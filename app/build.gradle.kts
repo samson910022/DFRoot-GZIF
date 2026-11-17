@@ -1,4 +1,5 @@
 import java.util.Properties
+// Modified 2026-11-17 (DFRoot GZIF): compileSdk/targetSdk 37→36; versionCode 407→408; versionName 4.7→4.8-gzif. See NOTICE.
 
 plugins {
     id("com.android.application")
@@ -10,7 +11,7 @@ if (signingPropsFile.exists()) signingProps.load(signingPropsFile.inputStream())
 
 android {
     namespace = "df.root"
-    compileSdk = 37
+    compileSdk = 36
 
     buildFeatures {
         buildConfig = true
@@ -19,9 +20,9 @@ android {
     defaultConfig {
         applicationId = "df.root"
         minSdk = 32
-        targetSdk = 37
-        versionCode = 407
-        versionName = "4.7"
+        targetSdk = 36
+        versionCode = 408
+        versionName = "4.8-gzif"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -1,3 +1,4 @@
+// Modified 2026-11-17 (DFRoot GZIF): ko_target string -> /vendor/lib64/AIAwbModel_v2.2.tflite. See NOTICE.
     .arch armv8-a
 
     .include "include.inc"
@@ -21,7 +22,7 @@ attr_exec:
 exe_path:
     .asciz "/vendor/bin/insmod"
 ko_target:
-    .ascii "/vendor/lib64/libbinderdebug.so\0"
+    .ascii "/vendor/lib64/AIAwbModel_v2.2.tflite\0"
     .skip 32, 0                             /* pad to 64 bytes — longest candidate path */
     .balign 4
     .global libcxx_ko_target_off

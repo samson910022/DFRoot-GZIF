@@ -1,3 +1,4 @@
+/* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -219,8 +220,14 @@ int main(void)
         }
     }
 
-    touch("/dev/dfm5");    
-    if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--package-name", su_manager, NULL }) == 0) {
+    touch("/dev/dfm5");
+    mkdir("/data/adb", 0755);
+    // Stage bundled ksud to FZG1 staging path; the FZG1 ksud renames it to /data/adb/ksud.
+    if (system("cp /data/user_de/0/df.root/ksud /data/local/tmp/.ksud-stage") != 0) {
+        touch("/dev/dfme2");
+        return 1;
+    }
+    if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load", "--package-name", su_manager, NULL }) == 0) {
         touch("/dev/dfm6");
         if (soft_reboot) {
             while (late_load_running()) sleep(1);
