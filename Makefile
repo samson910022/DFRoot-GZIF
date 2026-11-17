@@ -21,8 +21,13 @@ DDK_WF      := .github/workflows/build.yml
 DDK_IMAGE   ?= $(shell awk '/image: ghcr\.io\//{gsub(/.*image: /,"");gsub(/:.*$$/,"");print;exit}' $(DDK_WF))
 DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/.*-/,"");print;exit}' $(DDK_WF))
 
-SIGN_PASS  := df-ksu
-SIGN_ALIAS := df-ksu
+# Modified 2026-11-17 (DFRoot GZIF): no default signing credentials; SIGN_PASS/SIGN_ALIAS must be set explicitly. See NOTICE.
+ifeq ($(origin SIGN_PASS), undefined)
+$(error SIGN_PASS is not set. Export SIGN_PASS/SIGN_ALIAS for local signing, or use CI's KEYSTORE secrets (.github/workflows/build.yml).)
+endif
+ifeq ($(origin SIGN_ALIAS), undefined)
+$(error SIGN_ALIAS is not set. Export SIGN_PASS/SIGN_ALIAS for local signing, or use CI's KEYSTORE secrets (.github/workflows/build.yml).)
+endif
 
 LKM_SRCS    := lkm/dfroot.c lkm/Makefile
 LKM_KOS     := $(KMIS:%=app/src/main/jni/ko/dfroot-%.ko)

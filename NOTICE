@@ -1,0 +1,110 @@
+DFRoot GZIF — notices
+=====================
+
+This repository is a fork of diabl0w/DFRoot
+(https://github.com/diabl0w/DFRoot), based on upstream commit
+7a6513a69ce4c1a90b68d857c26347bf166ffe10
+("Fall back to libbase when libc++ hook selection fails (#185)", 2026-11-06).
+
+Upstream DFRoot is licensed under the GNU General Public License,
+version 2 (GPL-2.0-only). See LICENSE (verbatim, unchanged). The DFRoot
+application source in this repository remains GPL-2.0-only.
+
+Local modifications (2026-11-17, samson910022), made for the Samsung
+Galaxy S23 Ultra (SM-S9180) build S9180ZHU8GZIF (Android 17 / One UI 9.0 /
+SPL 2026-10-05 / kernel 5.15.197-android13-8-34343818-abS9180ZHU8GZIF):
+see CHANGELOG.md ("4.8-gzif") for the file-level diffs, each of which also
+carries a per-file change notice (GPL-2.0 §2(a)).
+The application was renamed: label is now "DFRoot GZIF" (was "DFRoot FZG1");
+`applicationId` remains `df.root` by design (the bootstrap staging protocol
+depends on it).
+
+Aggregated third-party components
+----------------------------------
+
+This fork ships two prebuilt executables under
+`app/src/main/jniLibs/arm64-v8a/` (both byte-identical to artifacts committed
+in `samson910022/Root-My-Galaxy-Payloads-Next`):
+
+1. `libksud.so` — KernelSU userspace loader ("ksud"), Samsung-patched build
+   - Upstream:        https://github.com/tiann/KernelSU — tag v3.3.0
+   - Patch:           `samson910022/Root-My-Galaxy-Payloads-Next` →
+                      `kernelsu/patches/KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch`
+                      (Samsung KDP/RKP/DEFEX/NO_PATCH_TEXT; kretprobe-based;
+                       no `.text` writes)
+   - Build recipe:    `kernelsu/README.md`, `kernelsu/REBUILD-dm3q-v3.3.0.md`
+                      in that repository
+   - sha256:          aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940
+   - Embedded module: `android13-5.15_kernelsu.ko` (KMI `android13-5.15`)
+   - Log tag:         `KernelSU`
+
+2. `libksudnext.so` — KernelSU-Next userspace loader ("ksud"), Samsung-patched build
+   - Upstream:        https://github.com/KernelSU-Next/KernelSU-Next — tag v3.4.2
+   - Patch:           `samson910022/Root-My-Galaxy-Payloads-Next` →
+                      `kernelsu/patches/KernelSU-Next-v3.4.2-samsung-kdp-rkp-defex.patch`
+   - Build recipe:    `kernelsu/README.md` in that repository
+   - sha256:          679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d
+   - Embedded modules: `android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`,
+                      `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`
+                      (on GZIF, `android13-5.15` is used)
+   - Log tag:         `KernelSU Next`
+
+Licences of the components:
+
+- kernelsu.ko (embedded/loaded kernel module, both loaders): GPL-2.0-only
+- KernelSU userspace (ksud, ksuinit): GPL-3.0-or-later
+- KernelSU-Next userspace (ksud, ksuinit): GPL-3.0-or-later
+- DFRoot application source (this repository): GPL-2.0-only
+
+Aggregation statement
+---------------------
+
+The APK aggregates DFRoot (GPL-2.0-only) with two independent executables
+(above). The mere fact that the APK contains them and launches them does
+not relicense either side. Each component remains under its own licence;
+this NOTICE file does not, and cannot, extend the terms of one component to
+the others.
+
+Source offer (GPL-3.0 §6)
+-------------------------
+
+The complete corresponding source for the two prebuilt userspace components
+is available in
+
+    https://github.com/samson910022/Root-My-Galaxy-Payloads-Next
+
+(`kernelsu/`, `kernelsu/patches/`) together with the pinned upstream
+repositories listed above (tiann/KernelSU v3.3.0; KernelSU-Next/KernelSU-Next
+v3.4.2). The Samsung KDP/RKP/DEFEX/NO_PATCH_TEXT patches applied to those
+trees are the ones shipped in the payloads repository. The built loader
+binaries are unmodified from the artifacts committed there (sha256 above).
+DFRoot's own modifications vs upstream are listed in CHANGELOG.md and shown
+as per-file notices in the modified sources.
+
+Build-host paths
+----------------
+
+`libksud.so` embeds a build-user cargo-registry path (`…/.cargo/registry/…`)
+from the machine that built it. The binary is otherwise unmodified from the
+repository artifact. Rebuild with `RUSTFLAGS="--remap-path-prefix=$HOME=/build"`
+to strip such paths in future refreshes.
+
+LKM (`dfroot.ko`)
+-----------------
+
+The LKM binary is intentionally NOT committed. It is built from
+`lkm/dfroot.c` (GPL-2.0-only, `MODULE_LICENSE("GPL")`) by the top-level
+`Makefile` (podman + DDK image `ghcr.io/ylarod/ddk-min:<kmi>-20260828`) or
+by CI (`.github/workflows/build.yml`), and copied to
+`app/src/main/jni/ko/dfroot-<kmi>.ko` (all `*.ko` under that directory are
+gitignored). Fresh clones must run the LKM build (or download CI artifacts)
+before `assembleRelease`; see README.md and PORTING-GZIF.md §8.
+
+References
+----------
+
+- Upstream project:     https://github.com/diabl0w/DFRoot
+- This fork:            https://github.com/samson910022/DFRoot-GZIF
+- Payloads/provenance:  https://github.com/samson910022/Root-My-Galaxy-Payloads-Next
+- Validation evidence:  PORTING-GZIF.md; docs/GZIF-validation-summary-20261117.md
+  in the payloads repository

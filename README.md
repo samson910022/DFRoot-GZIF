@@ -9,6 +9,21 @@ DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a
 > [!IMPORTANT]
 > Before hitting that fork button, consider making a pull request instead :)
 
+## DFRoot GZIF — Samsung Galaxy S23 Ultra (SM-S9180 / S9180ZHU8GZIF)
+
+This fork adds hardware-validated support for the S23 Ultra (`dm3q`) build
+**`S9180ZHU8GZIF`** (Android 17 / One UI 9.0 / SPL 2026-10-05 /
+kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
+
+- **Validated 2026-11-17** (volatile, late-load root only):
+  - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
+  - KernelSU-Next **3.4.2** Samsung-patched generic loader → full chain; `su -v` → `3.4.2:KernelSU` (run8, 17:53)
+- **Vanilla (unpatched) KernelSU / KernelSU-Next modules panic inside `init_module()` on this build** — do not substitute them. This fork bundles Samsung-patched loaders under `app/src/main/jniLibs/` (provenance + sha256: `NOTICE`).
+- Root is **not boot-persistent** (late-load); re-run LAUNCH ROOT after every reboot. No `boot.img` flash is performed.
+- **Only `S9180ZHU8GZIF` is tested.** No other build/model/One UI version is claimed. Not registered in any update feed.
+- The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
+- Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
+
 ## FAQ
 
 **Q: Log says patching failed and that my device isn't vulnerable**
@@ -86,6 +101,30 @@ The exploit uses this primitive to patch shellcode into `libc++.so` in the kerne
 ```sh
 make
 ```
+
+### Building this fork (DFRoot GZIF)
+
+The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
+`app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
+
+- build it with the top-level `make` (podman + DDK images; chains all eight
+  KMIs — long), or
+- build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
+  the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
+  for GZIF, or
+- fetch the prebuilt `dfroot-android13-5.15.ko` (sha256 `94f8be98…`) from CI
+  artifacts (`.github/workflows/build.yml`) and place it at
+  `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
+
+Then: JDK 21 (toolchain-pinned) · SDK 36 · NDK r28c (`28.2.13676358`) ·
+CMake 3.22.1 · `./gradlew :app:assembleRelease` →
+`app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
+`adb install -r` → enable adb → open **DFRoot GZIF** → LAUNCH ROOT.
+
+Signing: `signing.properties` at the repo root (gitignored) with
+`KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`.
+Do **not** commit it. Local `make` now requires explicit `SIGN_PASS`/`SIGN_ALIAS`
+(no default credentials); CI uses the `KEYSTORE` secrets.
 
 ## Credits
 
