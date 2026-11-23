@@ -3,10 +3,27 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="df.root">
 
+    <!-- INTERNET is a normal permission (auto-granted at install, no user
+         consent, no Play policy concern) and is REQUIRED by the exploit: the
+         Java side opens a DatagramSocket() for the sender port and the native
+         binary (launched as the app UID via ProcessBuilder) opens an
+         AF_INET/SOCK_DGRAM socket for the IpSec/loopback UDP channel. Android
+         checks INTERNET for every AF_INET socket create, loopback included, so
+         without it both paths fail with EACCES and the exploit breaks. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <!-- QUERY_ALL_PACKAGES is a restricted permission on API 30+. We only need
+         to resolve the two supported SU managers, so declare a narrow <queries>
+         whitelist instead. PackageManager.getApplicationInfo()/getLabel()/getIcon()
+         still see these explicitly declared packages under package visibility
+         restrictions. Keep in sync with ExploitRunner.KSU_MANAGER_PACKAGES. -->
+    <queries>
+        <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.rifsxd.ksunext" />
+    </queries>
+
     <application
         android:label="DFRoot GZIF"
         android:icon="@mipmap/ic_launcher"

@@ -25,8 +25,16 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         Log.i(TAG, "boot: " + intent.getAction());
         final Context deCtx = context.createDeviceProtectedStorageContext();
         PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+        if (pm == null) {
+            // Never NPE here: without PowerManager we cannot safely keep the CPU
+            // awake for the exploit, so fail with a clear log instead.
+            Log.e(TAG, "boot: PowerManager unavailable, aborting exploit");
+            return;
+        }
         PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:boot");
-        wl.acquire();
+        // Timed acquire: if the exploit hangs, the lock is released automatically
+        // after WAKELOCK_TIMEOUT_MS instead of draining the battery forever.
+        wl.acquire(ExploitRunner.WAKELOCK_TIMEOUT_MS);
         new Thread(() -> {
             try {
                 int rc = ExploitRunner.run(deCtx, this);
@@ -34,7 +42,9 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
             } catch (Exception e) {
                 Log.e(TAG, "boot: exploit exception", e);
             } finally {
-                wl.release();
+                if (wl.isHeld()) {
+                    wl.release();
+                }
             }
         }, "dfroot-boot").start();
     }

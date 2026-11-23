@@ -9,7 +9,7 @@
     <SwitchPreference
         android:key="soft_reboot"
         android:title="Auto Soft Reboot"
-        android:summary="Applies to both Manual Start and Start at Boot."
+        android:summary="EXPERIMENTAL — on S9180/GZIF this has caused a full hard reboot. Keep OFF unless you accept that risk. Applies to both Manual Start and Start at Boot."
         android:defaultValue="false" />
 
     <SwitchPreference
