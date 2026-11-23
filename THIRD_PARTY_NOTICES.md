@@ -11,12 +11,16 @@ Components bundled with, linked against, or built by this project, and their lic
 | `dfroot.ko` (not committed; built from `lkm/dfroot.c`) | LKM | GPL-2.0-only (`MODULE_LICENSE("GPL")`) | this repository, `lkm/` |
 | splicehelper / `jni/*.c`, `*.S` | payload sources | GPL-2.0-only | this repository (upstream DFRoot + GZIF modifications) |
 | libcxx/shellcode headers | payload sources | GPL-2.0-only | this repository |
-| AndroidX (appcompat, material, constraintlayout, preference) | app dependencies | Apache-2.0 | Google Maven (versions in `gradle/libs.versions.toml`) |
 | Gradle / Android Gradle Plugin / Gradle wrapper | build | Apache-2.0 | gradle.org / Google Maven |
 | `aes256.c/h`, `libcxx.h` etc. under `app/src/main/jni/` | payload sources | see file headers (GPL-2.0-only unless marked otherwise) | this repository |
 
 Notes
 
+- The app declares no third-party Java/Kotlin libraries: `dependencies {}` in
+  `app/build.gradle.kts` is empty and the settings UI uses the deprecated but
+  functional framework `android.preference.*` API. Consequently the app has no
+  AndroidX / Material dependency and no corresponding Apache-2.0 notice applies.
+  `gradle/libs.versions.toml` now declares only the AGP plugin alias.
 - The applicationId (`df.root`) and the app UI credit the upstream authors;
   upstream's credits section in README.md is retained verbatim.
 - The Samsung-patched loader binaries carry no other obligations than those

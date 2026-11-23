@@ -19,15 +19,19 @@ KMIS :=        \
 DDK_WF      := .github/workflows/build.yml
 
 DDK_IMAGE   ?= $(shell awk '/image: ghcr\.io\//{gsub(/.*image: /,"");gsub(/:.*$$/,"");print;exit}' $(DDK_WF))
-DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/.*-/,"");print;exit}' $(DDK_WF))
+# Strip the @sha256 digest before taking the release: the CI image is digest-pinned,
+# and without this the local podman pull would get a bogus "...-20260828@sha256:..." tag.
+# (DDK_IMAGE is unaffected: its gsub(/:.*$/,"") already cuts at the first colon.)
+DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/@sha256:.*$$/,"");sub(/.*-/,"");print;exit}' $(DDK_WF))
 
-# Modified 2026-11-17 (DFRoot GZIF): no default signing credentials; SIGN_PASS/SIGN_ALIAS must be set explicitly. See NOTICE.
-ifeq ($(origin SIGN_PASS), undefined)
-$(error SIGN_PASS is not set. Export SIGN_PASS/SIGN_ALIAS for local signing, or use CI's KEYSTORE secrets (.github/workflows/build.yml).)
-endif
-ifeq ($(origin SIGN_ALIAS), undefined)
-$(error SIGN_ALIAS is not set. Export SIGN_PASS/SIGN_ALIAS for local signing, or use CI's KEYSTORE secrets (.github/workflows/build.yml).)
-endif
+# Modified 2026-11-24 (DFRoot GZIF): signing credentials are no longer required at
+# parse time. They are exported into recipe environments and validated only in the
+# targets that actually sign, so `make clean` (and any non-signing query) works
+# without SIGN_PASS/SIGN_ALIAS. Exporting instead of interpolating into a command
+# line also keeps them out of make's echo and the process list; keytool reads them
+# with -storepass:env / -keypass:env. See NOTICE for the original 2026-11-17 change.
+export SIGN_PASS
+export SIGN_ALIAS
 
 LKM_SRCS    := lkm/dfroot.c lkm/Makefile
 LKM_KOS     := $(KMIS:%=app/src/main/jni/ko/dfroot-%.ko)
@@ -35,7 +39,8 @@ APK_SRCS    := $(wildcard app/src/main/java/df/root/*.java \
                                app/src/main/jni/*.c app/src/main/jni/*.h \
                                app/src/main/jni/*.S app/src/main/jni/*.inc \
                                app/src/main/res/layout/*.xml \
-                               app/src/main/res/values/*.xml) \
+                               app/src/main/res/values/*.xml \
+                               app/src/main/jniLibs/arm64-v8a/*.so) \
                    app/src/main/AndroidManifest.xml \
                    app/build.gradle.kts \
                    app/src/main/jni/CMakeLists.txt
@@ -47,14 +52,51 @@ APK   := out/DFRoot.apk
 all: $(APK)
 
 keystore.jks:
+	@: "$${SIGN_PASS:?SIGN_PASS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
+	: "$${SIGN_ALIAS:?SIGN_ALIAS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
+	umask 077; \
 	keytool -genkeypair -keystore $@ -storetype JKS \
-	    -storepass $(SIGN_PASS) -keypass $(SIGN_PASS) \
-	    -alias $(SIGN_ALIAS) -keyalg RSA -keysize 2048 -validity 10000 \
+	    -storepass:env SIGN_PASS -keypass:env SIGN_PASS \
+	    -alias "$$SIGN_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
 	    -dname "CN=DFRoot"
 
 signing.properties: keystore.jks
-	printf 'KEYSTORE_FILE=../keystore.jks\nKEYSTORE_PASSWORD=%s\nKEY_ALIAS=%s\nKEY_PASSWORD=%s\n' \
-	    $(SIGN_PASS) $(SIGN_ALIAS) $(SIGN_PASS) > $@
+	@: "$${SIGN_PASS:?SIGN_PASS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
+	: "$${SIGN_ALIAS:?SIGN_ALIAS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
+	esc_props() { \
+	    local s=$$1 out= c n leading=1 i; \
+	    local len=$${#s}; \
+	    for (( i = 0; i < len; i++ )); do \
+	        c=$${s:i:1}; \
+	        case $$c in \
+	            '\') out+='\\' ;; \
+	            $$'\r') out+='\r' ;; \
+	            $$'\n') out+='\n' ;; \
+	            $$'\t') out+='\t' ;; \
+	            $$'\f') out+='\f' ;; \
+	            ' ') if (( leading )); then out+='\ '; else out+=' '; fi ;; \
+	            *) \
+	                printf -v n '%d' "'$$c"; \
+	                if (( n > 126 )); then \
+	                    printf -v n '\\u%04x' "$$n"; \
+	                    out+=$$n; \
+	                else \
+	                    out+=$$c; \
+	                fi \
+	                ;; \
+	        esac; \
+	        [[ $$c == ' ' ]] || leading=0; \
+	    done; \
+	    printf '%s' "$$out"; \
+	}; \
+	umask 077; \
+	{ \
+	    printf 'KEYSTORE_FILE=../keystore.jks\n'; \
+	    printf 'KEYSTORE_PASSWORD=%s\n' "$$(esc_props "$$SIGN_PASS")"; \
+	    printf 'KEY_ALIAS=%s\n' "$$(esc_props "$$SIGN_ALIAS")"; \
+	    printf 'KEY_PASSWORD=%s\n' "$$(esc_props "$$SIGN_PASS")"; \
+	} > $@; \
+	chmod 600 $@
 
 $(LKM_KOS): $(LKM_SRCS)
 	@printf '\n\033[1;35m══  Building LKMs  ══\033[0m\n'; \

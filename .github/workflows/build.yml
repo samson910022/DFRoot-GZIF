@@ -8,27 +8,37 @@ on:
     branches: [master, main]
   workflow_dispatch:
 
+# Least privilege by default: only the release job needs write access (see below).
 permissions:
-  contents: write
+  contents: read
+
+# Supersede superseded runs on the same ref (e.g. a force-push) instead of burning
+# DDK minutes on builds whose results will never be used.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-lkms:
     name: LKMs / ${{ matrix.kmi }}
     runs-on: ubuntu-latest
+    # DDK kernel builds are slow (toolchain download + full module build).
+    timeout-minutes: 60
     strategy:
       matrix:
         kmi:
-          - android12-5.10
-          - android13-5.10
+          # This is the GZIF fork: README/PORTING-GZIF.md and
+          # app/src/main/jni/CMakeLists.txt support android13-5.15 only.
+          # Building the other 7 upstream KMIs produced artifacts that were
+          # never consumed by the APK (CMake embeds only dfroot-android13-5.15.ko),
+          # so the matrix is reduced to the single KMI actually shipped.
           - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
     container:
-      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828
-      options: --privileged
+      # No --privileged: the same DDK image builds the LKM locally via podman
+      # with only --pid=host --network=none, so no extra caps are required.
+      # Digest pinned (floating tags are mutable): resolved via GHCR token +
+      # manifest HEAD and cross-verified with `docker buildx imagetools inspect`.
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd
     steps:
       - uses: actions/checkout@v7
 
@@ -55,31 +65,88 @@ jobs:
   build-dfroot:
     needs: build-lkms
     runs-on: ubuntu-latest
+    # Gradle + native build; comfortably under 30 minutes for this small app.
+    timeout-minutes: 30
+    # Only the tag-triggered "Create GitHub Release" step needs write access.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
       - name: Validate signing config
         if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          if [ "${{ secrets.KEYSTORE }}" = "" ]; then
-            echo "::error::Signing secrets not configured. KEYSTORE secret is required for release builds."
+          missing=""
+          [ -n "$KEYSTORE" ] || missing="$missing KEYSTORE"
+          [ -n "$KEYSTORE_PASSWORD" ] || missing="$missing KEYSTORE_PASSWORD"
+          [ -n "$KEY_ALIAS" ] || missing="$missing KEY_ALIAS"
+          [ -n "$KEY_PASSWORD" ] || missing="$missing KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing signing secrets:$missing. All of KEYSTORE, KEYSTORE_PASSWORD, KEY_ALIAS and KEY_PASSWORD are required for release builds."
             exit 1
           fi
 
       - name: Create signing.properties
         if: github.event_name != 'pull_request'
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo KEYSTORE_FILE=../keystore.jks > signing.properties
-          echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} >> signing.properties
-          echo KEY_ALIAS=${{ secrets.KEY_ALIAS }} >> signing.properties
-          echo KEY_PASSWORD=${{ secrets.KEY_PASSWORD }} >> signing.properties
-          echo ${{ secrets.KEYSTORE }} | base64 --decode > keystore.jks
+          # Secrets are supplied via env (never interpolated into shell source), and
+          # each value is escaped for java.util.Properties.load() before being written:
+          #   \  -> \\   (load() treats backslash as an escape introducer)
+          #   LF -> \n   CR -> \r   (a real newline would start a new entry)
+          #   leading space/tab/form-feed -> escaped (load() trims it after '=')
+          #   non-ASCII -> \uXXXX (load(InputStream) decodes ISO-8859-1, not UTF-8)
+          esc_props() {
+            local s=$1 out= c n leading=1 i
+            local len=${#s}
+            for (( i = 0; i < len; i++ )); do
+              c=${s:i:1}
+              case $c in
+                '\')   out+='\\' ;;
+                $'\r') out+='\r' ;;
+                $'\n') out+='\n' ;;
+                $'\t') out+='\t' ;;
+                $'\f') out+='\f' ;;
+                ' ')   if (( leading )); then out+='\ '; else out+=' '; fi ;;
+                *)
+                  printf -v n '%d' "'$c"
+                  if (( n > 126 )); then
+                    printf -v n '\\u%04x' "$n"
+                    out+=$n
+                  else
+                    out+=$c
+                  fi
+                  ;;
+              esac
+              [[ $c == ' ' ]] || leading=0
+            done
+            printf '%s' "$out"
+          }
+          umask 077
+          printf 'KEYSTORE_FILE=../keystore.jks\n' > signing.properties
+          printf 'KEYSTORE_PASSWORD=%s\n' "$(esc_props "$KEYSTORE_PASSWORD")" >> signing.properties
+          printf 'KEY_ALIAS=%s\n' "$(esc_props "$KEY_ALIAS")" >> signing.properties
+          printf 'KEY_PASSWORD=%s\n' "$(esc_props "$KEY_PASSWORD")" >> signing.properties
+          printf '%s' "$KEYSTORE" | base64 --decode > keystore.jks
 
-      - name: Download DF LKMs
+      - name: Download DF LKM (android13-5.15)
+        # The upload-artifact step stores out/dfroot-android13-5.15.ko at the
+        # archive root (single file => LCA is out/), so downloading by name into
+        # app/src/main/jni/ko/ yields exactly app/src/main/jni/ko/dfroot-android13-5.15.ko,
+        # which is the path CMakeLists.txt embeds. No pattern/merge needed now that
+        # the matrix has a single KMI.
         uses: actions/download-artifact@v7
         with:
-          pattern: df-lkm-*
-          merge-multiple: true
+          name: df-lkm-android13-5.15
           path: app/src/main/jni/ko/
 
       - uses: actions/setup-java@v6
@@ -116,6 +183,6 @@ jobs:
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           files: app/build/outputs/apk/release/DFRoot_*.apk
