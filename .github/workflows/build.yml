@@ -91,11 +91,20 @@ jobs:
 
       - name: Build DFRoot APK
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew :app:assembleDebug
-          else
-            ./gradlew :app:assembleRelease
-          fi
+          set -e
+          for i in 1 2 3; do
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              if ./gradlew :app:assembleDebug; then break; fi
+            else
+              if ./gradlew :app:assembleRelease; then break; fi
+            fi
+            if [ "$i" = "3" ]; then
+              echo "Gradle build failed after 3 attempts"
+              exit 1
+            fi
+            echo "Gradle build failed (attempt $i), retrying in 30s..."
+            sleep 30
+          done
 
       - name: Upload DFRoot APK
         uses: actions/upload-artifact@v7
