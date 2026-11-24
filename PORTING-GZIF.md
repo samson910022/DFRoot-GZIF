@@ -10,10 +10,18 @@
 
 > [!WARNING]
 > **Current working-tree changes are UNVALIDATED on device.** The round-2 PR #3
-> status-protocol rework described below (single `/dev/dffinal` outcome, pure
-> `status_protocol.{c,h}`, new Java rc strings) is host-tested only. The
-> hardware results in §5 and §12 were obtained with the **old multi-marker
-> protocol** and must not be read as validation of the current code.
+> work described below (single `/dev/dffinal` outcome, pure
+> `status_protocol.{c,h}`, new Java rc strings, KO hash-skip policy, build
+> provenance and Java preference persistence) is **host-tested only**. The
+> hardware results in §5 and §12 (run6/run8, 2026-11-17) were obtained with the
+> **historical implementation** — the old multi-marker protocol, the then-current
+> KO pins and the old preference-write path — and must not be read as validation
+> of the current code. No release may ship with obsolete KO pins (stop and
+> review if the DDK artifact no longer matches the two reviewed pins; never
+> skip in CI/release). Provenance records are informational, **not** an
+> independent reproducible-build proof. Auto Soft Reboot and Start on Boot
+> remain disabled/unvalidated, and the residual `/data/local/tmp/.ksud-stage`
+> trust issue (P1-08) is a release gate requiring a loader rebuild.
 
 ---
 
@@ -157,6 +165,11 @@ publication report failure; it is removed entirely.
 
 ## 5. Proven on hardware — run ledger (2026-11-17)
 
+> [!NOTE]
+> This ledger is historical: it describes the implementation and KO pins that
+> existed on 2026-11-17, not the current working tree. Nothing below validates
+> the round-2 PR #3 changes; those are host-tested only.
+
 All times local. "KP" = kernel panic (abnormal reset; dumped as XBL/ABL-only `SYSTEM_LAST_KMSG_*_KP` in dropbox; **no kernel text / panic string is ever captured on this device** — full stops).
 
 | Run | Time | Manager selected | Loader actually staged (bundled) | Outcome | Evidence |
@@ -283,7 +296,7 @@ This matches the documented FZG1 loader contract (`kernelsu/README.md:154-156` i
 > The single `error` token in `/dev/dffinal` covers both "secure staging failed" and "ksud exited nonzero"; distinguishing them requires either reading the app log (the app prints `progress: bootstrap starting SU daemon` then awaits the final status) or capturing logcat with **both** tags (`KernelSU` **and** `KernelSU Next`) — the 17:00 evidence was blind to the latter and had to be diagnosed from the binary (see §9.2).
 
 > [!WARNING]
-> **Residual staging risk:** `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory. `stage_file()` prevents symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but because the bundled loaders hardcode `/data/local/tmp/.ksud-stage` and rename it themselves, a process running as `shell` could still replace the file after `close()` and before the loader's `rename()`. Regular apps cannot write `/data/local/tmp`; closing this gap requires rebuilding the bundled loaders to accept a root-owned path/fd. Do not treat this PR as a complete fix for that threat model.
+> **Residual staging risk (P1-08, release gate):** `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory. `stage_file()` prevents symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but because the bundled loaders hardcode `/data/local/tmp/.ksud-stage` and rename it themselves, a process running as `shell` could still replace the file after `close()` and before the loader's `rename()`. Regular apps cannot write `/data/local/tmp`; **this issue cannot be closed without rebuilding the bundled loaders to accept a root-owned path/fd, so it is a release gate.** Do not treat this PR as a complete fix for that threat model.
 
 ### Other local port deltas vs upstream (for completeness — these are *not* one of the two named patches)
 
@@ -439,6 +452,7 @@ The device never captures panic text (ABL: `Failed to get KlogOffset, Not Found`
 - **This port is not upstream.** It is an uncommitted local working tree on top of `diabl0w/DFRoot @ 7a6513a`. Pulling upstream or re-cloning loses the two patches and the bundled loaders. Do not push to `origin` (which points at `github.com/diabl0w/DFRoot`) — fork if you need to publish.
 - **Legality/ethics:** only on your own device; the exploit patches page-cache contents of files the system executes. It does not unlock anything, and it violates no signature checks *because it does not need to* — but Samsung's warranty/Knox terms are your affair.
 - **Verification hygiene:** never trust the on-screen toast. Verify with the §8.3 oracle each time, on every boot.
+- **Residual preference risk:** if the SU-manager `SharedPreferences` write/removal fails, a stale package name may remain on disk. With "Start on Boot" enabled, `BootReceiver` reads that value again through `ExploitRunner.run()` on a later boot even though the UI no longer offers it. Clear app data or keep Start on Boot disabled to avoid acting on a stale selection; the failed-write path is host-tested only and UNVALIDATED on device.
 
 ---
 
@@ -473,6 +487,15 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 ---
 
 ## 12. Reproduction confidence — what is device-validated vs unverified
+
+Every row below is evidence for the **historical implementation** (old marker
+protocol, historical KO pins, old preference write path). It does not validate
+the current round-2 PR #3 working tree, which is host-tested only. Build
+provenance manifests are informational, not independent reproducible-build
+proofs. A release is blocked if the KO pins are obsolete, if Auto Soft Reboot /
+Start on Boot remain unvalidated for the shipped configuration, or while the
+P1-08 `/data/local/tmp/.ksud-stage` trust gap remains unaddressed by a loader
+rebuild.
 
 | # | Claim | Status | Evidence |
 |---|---|---|---|

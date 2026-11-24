@@ -24,6 +24,21 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
 
+> [!WARNING]
+> **Validation boundary.** run6/run8 happened on 2026-11-17 against the
+> **historical implementation** (old multi-marker status protocol and the
+> then-current `dfroot.ko` pins). The current round-2 PR #3 tree — single
+> `/dev/dffinal` outcome, KO hash-skip policy, build provenance and Java
+> preference persistence — is **host-tested only and UNVALIDATED on device**.
+> Do not publish a release with obsolete KO pins: if a rebuilt DDK artifact no
+> longer matches the two reviewed pins, stop and review/update them in a
+> reviewed commit; never skip the check for CI or release builds. Provenance
+> manifests are informational and are **not** an independent reproducible-build
+> proof. Auto Soft Reboot and Start on Boot stay disabled by default and
+> unvalidated. The residual `/data/local/tmp/.ksud-stage` trust issue (P1-08)
+> cannot be closed without rebuilding the bundled loaders and is a release
+> gate.
+
 ## FAQ
 
 **Q: Log says patching failed and that my device isn't vulnerable**

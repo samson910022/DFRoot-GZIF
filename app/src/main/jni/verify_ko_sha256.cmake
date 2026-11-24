@@ -4,7 +4,9 @@
 #   cmake -DKO_FILE=<.../dfroot-android13-5.15.ko> \
 #         "-DKO_EXPECTED_SHA256S=<hash1>;<hash2>;..." \
 #         -DKO_STAMP=<build>/dfroot-ko.sha256.verified \
-#         [-DDFROOT_SKIP=ON] \
+#         -DDFROOT_BUILD_TYPE=<Debug|Release|...>
+#         [-DKO_VERIFY_MANIFEST=<build>/dfroot-ko.sha256.manifest]
+#         [-DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON=<local reason>]
 #         -P verify_ko_sha256.cmake
 #
 # KO_EXPECTED_SHA256S is a CMake (semicolon-separated) list of accepted
@@ -18,13 +20,25 @@
 # needed. On success the script writes the stamp that exp.c's OBJECT_DEPENDS
 # waits on, i.e. verification always completes before .incbin embeds the blob.
 # The stamp is rewritten only when its content changes, so re-running the
-# check every build does not force a needless recompile of exp.c.
+# check every build does not force a needless recompile of exp.c. The stamp
+# deliberately contains only the outcome and the KO identity -- no timestamp,
+# build type, reason or environment data, all of which are volatile.
+# The (volatile, informational) build record goes to a separate manifest.
 
-foreach(required IN ITEMS KO_FILE KO_EXPECTED_SHA256S KO_STAMP)
+foreach(required IN ITEMS KO_FILE KO_EXPECTED_SHA256S KO_STAMP DFROOT_BUILD_TYPE)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "verify_ko_sha256: missing -D${required}=... argument")
     endif()
 endforeach()
+
+get_filename_component(verify_script "${CMAKE_CURRENT_LIST_FILE}" ABSOLUTE)
+get_filename_component(script_dir "${verify_script}" DIRECTORY)
+if(NOT DEFINED KO_VERIFY_MANIFEST OR "${KO_VERIFY_MANIFEST}" STREQUAL "")
+    set(KO_VERIFY_MANIFEST "${KO_STAMP}.manifest")
+endif()
+if(NOT DEFINED DFROOT_SOURCE_DIR OR "${DFROOT_SOURCE_DIR}" STREQUAL "")
+    get_filename_component(DFROOT_SOURCE_DIR "${script_dir}/../../.." ABSOLUTE)
+endif()
 
 # The blob must exist even when the hash check is skipped: exp.c still .incbin's
 # it, so a missing/unreadable KO can never silently produce an artifact. Check
@@ -45,31 +59,63 @@ if(IS_DIRECTORY "${KO_FILE}")
         "  ${KO_FILE}")
 endif()
 
+# Normalize and validate every pin up front, including in skip mode: the
+# manifest records the accepted-pin count and a malformed pin list is always a
+# configuration error. CMake's MATCHES has no interval quantifier ({64}), so
+# check length and forbidden characters separately.
+set(expected_list "")
+foreach(raw_expected IN LISTS KO_EXPECTED_SHA256S)
+    string(STRIP "${raw_expected}" expected)
+    string(TOLOWER "${expected}" expected)
+    string(LENGTH "${expected}" expected_len)
+    if(NOT expected_len EQUAL 64 OR expected MATCHES "[^0-9a-f]")
+        message(FATAL_ERROR
+            "verify_ko_sha256: KO_EXPECTED_SHA256S contains an invalid SHA-256 "
+            "pin (expected exactly 64 hex digits): '${expected}'")
+    endif()
+    list(APPEND expected_list "${expected}")
+endforeach()
+list(LENGTH expected_list accepted_pins)
+
 if(DFROOT_SKIP)
+    # Skip policy is enforced here (not only in CMakeLists.txt) so a direct
+    # `cmake -P` invocation cannot bypass it. Presence of any automation /
+    # release environment marker, a Release build, or an absent reason is
+    # always fatal. The env markers (CI / GITHUB_ACTIONS / DFROOT_RELEASE) are
+    # authoritative: DFROOT_BUILD_TYPE comes from the caller/CMake cache and
+    # can be stale (e.g. a cached Debug config reused for a release build), so
+    # it is only a secondary signal. CI exports DFROOT_RELEASE=1 for releases.
+    if(DEFINED ENV{CI} OR DEFINED ENV{GITHUB_ACTIONS} OR DEFINED ENV{DFROOT_RELEASE})
+        message(FATAL_ERROR
+            "verify_ko_sha256: KO hash-check skip is forbidden when CI, "
+            "GITHUB_ACTIONS or DFROOT_RELEASE is set. Refusing to build with "
+            "an unverified ring0 module.")
+    endif()
+    string(TOUPPER "${DFROOT_BUILD_TYPE}" build_type_upper)
+    if(build_type_upper STREQUAL "RELEASE")
+        message(FATAL_ERROR
+            "verify_ko_sha256: KO hash-check skip is forbidden for "
+            "DFROOT_BUILD_TYPE=${DFROOT_BUILD_TYPE} (Release).")
+    endif()
+    if(NOT DEFINED DFROOT_SKIP_REASON OR "${DFROOT_SKIP_REASON}" STREQUAL "")
+        message(FATAL_ERROR
+            "verify_ko_sha256: -DDFROOT_SKIP_REASON=<reason> is required when "
+            "DFROOT_SKIP is enabled (local experiments only).")
+    endif()
+
+    set(skip_status "skipped")
+    set(actual_hash "not-computed (skip enabled)")
     set(stamp_text "SKIPPED: KO hash check disabled (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}\n")
-    message(STATUS "dfroot.ko SHA-256 check SKIPPED (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}")
+    message(STATUS
+        "dfroot.ko SHA-256 check SKIPPED (DFROOT_SKIP_KO_HASH_CHECK=ON) for "
+        "${KO_FILE}; reason: ${DFROOT_SKIP_REASON}")
 else()
     file(SHA256 "${KO_FILE}" actual)
-    string(TOLOWER "${actual}" actual)
-
-    # Normalize and validate every pin. CMake's MATCHES has no interval
-    # quantifier ({64}), so check length and forbidden characters separately.
-    set(expected_list "")
-    foreach(raw_expected IN LISTS KO_EXPECTED_SHA256S)
-        string(STRIP "${raw_expected}" expected)
-        string(TOLOWER "${expected}" expected)
-        string(LENGTH "${expected}" expected_len)
-        if(NOT expected_len EQUAL 64 OR expected MATCHES "[^0-9a-f]")
-            message(FATAL_ERROR
-                "verify_ko_sha256: KO_EXPECTED_SHA256S contains an invalid SHA-256 "
-                "pin (expected exactly 64 hex digits): '${expected}'")
-        endif()
-        list(APPEND expected_list "${expected}")
-    endforeach()
+    string(TOLOWER "${actual}" actual_hash)
 
     set(hash_matched FALSE)
     foreach(expected IN LISTS expected_list)
-        if(actual STREQUAL expected)
+        if(actual_hash STREQUAL expected)
             set(hash_matched TRUE)
             break()
         endif()
@@ -81,7 +127,7 @@ else()
         message(FATAL_ERROR
             "dfroot.ko SHA-256 MISMATCH -- build aborted before the blob is embedded.\n"
             "  file:     ${KO_FILE}\n"
-            "  actual:   ${actual}\n"
+            "  actual:   ${actual_hash}\n"
             "  expected (any one of these pins is accepted):\n"
             "  ${expected_display}\n"
             "This .ko is loaded in ring0; do not ship bytes of unknown provenance. "
@@ -92,10 +138,13 @@ else()
             "requires review. Local experiments only: -DDFROOT_SKIP_KO_HASH_CHECK=ON.")
     endif()
 
-    set(stamp_text "verified ${actual}  ${KO_FILE}\n")
-    message(STATUS "dfroot.ko SHA-256 verified: ${actual}")
+    set(skip_status "verified")
+    set(stamp_text "verified ${actual_hash}  ${KO_FILE}\n")
+    message(STATUS "dfroot.ko SHA-256 verified: ${actual_hash}")
 endif()
 
+# Stable stamp: identical inputs (and identical verification status) always
+# produce byte-identical content, so ninja/make does not rebuild exp.c needlessly.
 get_filename_component(stamp_dir "${KO_STAMP}" DIRECTORY)
 file(MAKE_DIRECTORY "${stamp_dir}")
 set(write_stamp TRUE)
@@ -108,3 +157,64 @@ endif()
 if(write_stamp)
     file(WRITE "${KO_STAMP}" "${stamp_text}")
 endif()
+
+# Separate, informational manifest. Unlike the stamp it is rewritten on every
+# verification because it records the time and environment. It is evidence of
+# what this build check saw, NOT an independent proof of reproducibility.
+set(manifest_text "# dfroot.ko SHA-256 verification record (informational)\n")
+string(APPEND manifest_text
+    "status: ${skip_status}\n"
+    "sha256: ${actual_hash}\n"
+    "ko_file: ${KO_FILE}\n"
+    "accepted_pins: ${accepted_pins}\n")
+if(DFROOT_SKIP)
+    string(APPEND manifest_text "skip_reason: ${DFROOT_SKIP_REASON}\n")
+else()
+    string(APPEND manifest_text "skip_reason: n/a (hash check enforced)\n")
+endif()
+string(APPEND manifest_text
+    "build_type: ${DFROOT_BUILD_TYPE}\n"
+    "timestamp_utc: ")
+string(TIMESTAMP manifest_timestamp "%Y-%m-%dT%H:%M:%SZ" UTC)
+string(APPEND manifest_text "${manifest_timestamp}\n")
+
+if(DEFINED ENV{CI})
+    string(APPEND manifest_text "env_CI: set ($ENV{CI})\n")
+else()
+    string(APPEND manifest_text "env_CI: unset\n")
+endif()
+if(DEFINED ENV{GITHUB_ACTIONS})
+    string(APPEND manifest_text "env_GITHUB_ACTIONS: set ($ENV{GITHUB_ACTIONS})\n")
+else()
+    string(APPEND manifest_text "env_GITHUB_ACTIONS: unset\n")
+endif()
+if(DEFINED ENV{DFROOT_RELEASE})
+    string(APPEND manifest_text "env_DFROOT_RELEASE: set ($ENV{DFROOT_RELEASE})\n")
+else()
+    string(APPEND manifest_text "env_DFROOT_RELEASE: unset\n")
+endif()
+
+set(git_head "unavailable")
+find_package(Git QUIET)
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" rev-parse HEAD
+        WORKING_DIRECTORY "${DFROOT_SOURCE_DIR}"
+        OUTPUT_VARIABLE head_output
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE git_result)
+    if(git_result EQUAL 0 AND NOT "${head_output}" STREQUAL "")
+        set(git_head "${head_output}")
+    endif()
+endif()
+
+string(APPEND manifest_text
+    "git_head: ${git_head}\n"
+    "verify_script: ${verify_script}\n"
+    "stamp: ${KO_STAMP}\n")
+
+get_filename_component(manifest_dir "${KO_VERIFY_MANIFEST}" DIRECTORY)
+file(MAKE_DIRECTORY "${manifest_dir}")
+file(WRITE "${KO_VERIFY_MANIFEST}" "${manifest_text}")
+message(STATUS "dfroot.ko verification manifest: ${KO_VERIFY_MANIFEST}")

@@ -64,12 +64,65 @@
   linked into `bootstrap` and exercised by `tests/native/final_publish_test.c`
   against real temp files (0644 under a hostile umask, atomic replace, symlink
   temp sabotage).
+- KO hash-skip policy (P2-04): `verify_ko_sha256.cmake` now requires
+  `DFROOT_BUILD_TYPE`, validates every pin up front, and enforces the skip
+  policy in the script itself (FATAL when `DFROOT_SKIP` is combined with
+  `CI`/`GITHUB_ACTIONS`/`DFROOT_RELEASE`, a Release build type, or an empty
+  `DFROOT_SKIP_REASON`). Blob existence/directory checks still run first. The
+  verified stamp stays stable (no timestamps or reasons in it); a separate
+  `dfroot-ko.sha256.manifest` records status, hash, accepted-pin count, build
+  type, environment flags, UTC timestamp, git HEAD and script path. CI parses
+  the pins from `CMakeLists.txt`, runs the script directly under `CI=true`
+  (must pass), asserts skip fails, and greps the CMakeCache for
+  `DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF`.
+- Build provenance (P2-06): new `record_build_provenance.cmake` and
+  `dfroot_build_provenance` target record splicehelper binary/source SHA-256,
+  compiler id/version/target/sysroot/flags, CMake version, git HEAD, build type
+  and KO gate status. A release-only, best-effort workflow step hashes the APK,
+  KO, splicehelper and bundled loaders and uploads an informational manifest.
+  No new pins are introduced. Provenance is evidence only; it is **not** an
+  independent reproducible-build proof, and splicehelper is not claimed to be
+  bit-for-bit deterministic across toolchains.
+- Preference persistence (P2-08): new `PreferencePersister.java` uses
+  synchronous `commit()` and returns failure to callers. `MainActivity` reverts
+  the SU-manager spinner (with a recursion guard) and `SettingsFragment`
+  returns the listener result so switches revert on a failed write; both show
+  a Toast and log. New `tests/java/PreferencePersisterTest.java` (fake
+  `SharedPreferences`, 8 JVM cases) and a `:app:testDebugUnitTest` CI step.
+  PR builds now configure without `signing.properties`: the release signing
+  config is a harmless placeholder unless the real keystore and all secrets
+  are present, and `assembleRelease` fails closed otherwise.
+- Test/docs truthfulness (P2-07): 18-case (14 numbered groups, some with a/b
+  subcases) host-only `tests/cmake/ko_hash_policy_test.cmake` is wired into CI
+  alongside the existing `make -C tests/native test` step; docs below state
+  the validation boundary explicitly.
 
-Residual risk: the bundled loaders hardcode `/data/local/tmp/.ksud-stage`;
-symlink/race-at-creation is fixed, but a `shell`-uid process could still swap
-the staged file before the loader renames it. Requires a loader rebuild to
-fully close (documented in `PORTING-GZIF.md`). Device behavior of the new
-final-status flow (including Auto Soft Reboot) remains **unvalidated**.
+Residual risks / **release gates** (not closed by this PR):
+
+- run6 and run8 (2026-11-17) validated the **historical implementation** — the
+  old multi-marker status protocol and the then-current KO pins — only. Every
+  change in this "Unreleased" section is **host-tested only and UNVALIDATED on
+  device**; no new hardware run has exercised the single-`/dev/dffinal` flow,
+  the new build policy, or the new Java persistence paths.
+- **No release may ship with obsolete KO pins.** If a DDK rebuild produces a
+  hash outside the two reviewed pins, stop: verify the artifact out of band,
+  update the pins in a reviewed commit and docs, or do not release. Never
+  skip the check for CI/release builds.
+- Provenance manifests are informational and are **not** an independent
+  reproducible-build proof.
+- Auto Soft Reboot and Start on Boot remain disabled by default and
+  **unvalidated** on S9180ZHU8GZIF.
+- P1-08: the bundled loaders hardcode `/data/local/tmp/.ksud-stage`; the
+  symlink/race-at-creation is fixed, but a `shell`-uid process could still swap
+  the staged file before the loader renames it. **This cannot be closed without
+  rebuilding the bundled loaders and is a release gate** (documented in
+  `PORTING-GZIF.md` §6).
+- Stale SU-manager preference: when `PreferencePersister.remove()` fails in
+  `MainActivity`, the old package name may remain in the prefs XML on disk; if
+  Start on Boot is enabled, `BootReceiver` could still read it via
+  `ExploitRunner.run()` on a later boot. The UI hides the stale choice but
+  cannot force the write to succeed. Mitigation is to clear app data / disable
+  Start on Boot; tracked as a residual risk, not fixed by this PR.
 
 ## 4.8-gzif (2026-11-17)
 

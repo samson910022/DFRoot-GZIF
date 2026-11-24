@@ -24,8 +24,11 @@ add_custom_command(
     COMMENT "Building splicehelper"
 )
 add_custom_target(splicehelper_bin DEPENDS "${SPLICEHELPER}")
-# splicehelper is compiled here from splicehelper.c, so its bytes are fully
-# determined by source that is already reviewed; it needs no external hash pin.
+# splicehelper is compiled here from the reviewed splicehelper.c, so no external
+# blob/hash pin is needed. Its bytes are NOT guaranteed to be bit-for-bit
+# identical across toolchains (compiler, flags and sysroot all matter), so we do
+# not claim reproducibility: record_build_provenance.cmake records the sha256 of
+# both the built binary and the source instead.
 
 # The .ko below is a gitignored, externally supplied binary embedded by .incbin
 # in exp.c and later loaded in ring0. Pin its SHA-256 and verify it at build
@@ -50,19 +53,44 @@ set(KO_EXPECTED_SHA256S
 )
 set(KO_VERIFY_SCRIPT "${JNI_DIR}/verify_ko_sha256.cmake")
 set(KO_VERIFY_STAMP "${CMAKE_CURRENT_BINARY_DIR}/dfroot-ko.sha256.verified")
+set(KO_VERIFY_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/dfroot-ko.sha256.manifest")
 
 option(DFROOT_SKIP_KO_HASH_CHECK "Skip the pinned dfroot.ko SHA-256 check (local experiments only)" OFF)
+set(DFROOT_SKIP_REASON "" CACHE STRING "Required local justification when DFROOT_SKIP_KO_HASH_CHECK=ON")
+
+# CMake can be driven without CMAKE_BUILD_TYPE (multi-config generators); pass
+# an explicit label so the verify script's required argument is always present.
+# Policy authority: the environment markers (CI, GITHUB_ACTIONS, DFROOT_RELEASE)
+# are authoritative for build-time policy. CMAKE_BUILD_TYPE is read from the
+# CMake cache and can be stale when a cached build directory is reused for a
+# different build type, so it is only a secondary signal -- a stale "Debug"
+# label must never weaken the skip guard below (or the one in the verify
+# script). CI exports DFROOT_RELEASE=1 for release builds as an explicit marker.
+if(CMAKE_BUILD_TYPE STREQUAL "")
+    set(DFROOT_EFFECTIVE_BUILD_TYPE "Unspecified")
+else()
+    set(DFROOT_EFFECTIVE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+endif()
 
 if(DFROOT_SKIP_KO_HASH_CHECK)
-    # Fail closed in CI/release: an unverified LKM must never be shipped from
-    # an automated build. Local experiments may opt out with a loud warning.
-    if(DEFINED ENV{CI} OR DEFINED ENV{GITHUB_ACTIONS})
+    # Configure-time guard (the verify script enforces the same policy again so
+    # a direct `cmake -P` call cannot bypass it). Fail closed in CI/release:
+    # an unverified LKM must never be shipped from an automated build. Local
+    # experiments may opt out with a loud warning and a recorded reason.
+    if(DEFINED ENV{CI} OR DEFINED ENV{GITHUB_ACTIONS} OR DEFINED ENV{DFROOT_RELEASE})
         message(FATAL_ERROR "DFROOT_SKIP_KO_HASH_CHECK is forbidden in CI/release builds")
+    endif()
+    string(TOUPPER "${DFROOT_EFFECTIVE_BUILD_TYPE}" dfroot_build_type_upper)
+    if(dfroot_build_type_upper STREQUAL "RELEASE")
+        message(FATAL_ERROR
+            "DFROOT_SKIP_KO_HASH_CHECK is forbidden for Release builds "
+            "(CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})")
     endif()
     message(WARNING
         "DFROOT_SKIP_KO_HASH_CHECK=ON: the pinned dfroot.ko SHA-256 check is "
         "DISABLED. The resulting binary may embed an unverified LKM. "
-        "Use this only for local experiments; never for CI or release builds.")
+        "Use this only for local experiments; never for CI or release builds. "
+        "Reason: '${DFROOT_SKIP_REASON}'")
 endif()
 
 # Always-running target touches a real file that the stamp rule depends on;
@@ -92,19 +120,52 @@ add_custom_command(
             "-DKO_FILE=${KO_FILE}"
             "-DKO_EXPECTED_SHA256S=${KO_EXPECTED_SHA256S}"
             "-DKO_STAMP=${KO_VERIFY_STAMP}"
+            "-DKO_VERIFY_MANIFEST=${KO_VERIFY_MANIFEST}"
+            "-DDFROOT_BUILD_TYPE=${DFROOT_EFFECTIVE_BUILD_TYPE}"
             "-DDFROOT_SKIP=${DFROOT_SKIP_KO_HASH_CHECK}"
+            "-DDFROOT_SKIP_REASON=${DFROOT_SKIP_REASON}"
             -P "${KO_VERIFY_SCRIPT}"
     DEPENDS ${KO_VERIFY_DEPENDS}
+    BYPRODUCTS "${KO_VERIFY_MANIFEST}"
     COMMENT "Verifying pinned dfroot.ko SHA-256"
     VERBATIM
 )
 add_custom_target(ko_sha256_check DEPENDS "${KO_VERIFY_STAMP}")
 
+# Informational build provenance. It records hashes of splicehelper (binary and
+# source), toolchain identity, git HEAD, build type and the KO gate outcome.
+# It is evidence, not an independent reproducible-build proof.
+set(PROVENANCE_SCRIPT "${JNI_DIR}/record_build_provenance.cmake")
+set(PROVENANCE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/dfroot-build-provenance.txt")
+add_custom_command(
+    OUTPUT "${PROVENANCE_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DPROVENANCE_OUTPUT=${PROVENANCE_OUTPUT}"
+            "-DSPLICEHELPER=${SPLICEHELPER}"
+            "-DSPLICEHELPER_SRC=${JNI_DIR}/splicehelper.c"
+            "-DKO_VERIFY_MANIFEST=${KO_VERIFY_MANIFEST}"
+            "-DKO_VERIFY_STAMP=${KO_VERIFY_STAMP}"
+            "-DDFROOT_BUILD_TYPE=${DFROOT_EFFECTIVE_BUILD_TYPE}"
+            "-DDFROOT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../.."
+            "-DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
+            "-DCMAKE_C_COMPILER_VERSION=${CMAKE_C_COMPILER_VERSION}"
+            "-DCMAKE_C_COMPILER_TARGET=${CMAKE_C_COMPILER_TARGET}"
+            "-DCMAKE_SYSROOT=${CMAKE_SYSROOT}"
+            "-DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}"
+            "-DCMAKE_ASM_FLAGS=${CMAKE_ASM_FLAGS}"
+            "-DDFROOT_CMAKE_VERSION=${CMAKE_VERSION}"
+            -P "${PROVENANCE_SCRIPT}"
+    DEPENDS "${SPLICEHELPER}" "${KO_VERIFY_STAMP}" "${PROVENANCE_SCRIPT}"
+    COMMENT "Recording DFRoot build provenance"
+    VERBATIM
+)
+add_custom_target(dfroot_build_provenance DEPENDS "${PROVENANCE_OUTPUT}")
+
 # AGP only packages lib*.so, so the executable is named libdfroot.so and lands
 # in the APK's native lib dir. The app execs it from nativeLibraryDir, which is
 # executable (app data dir is not).
 add_executable(dfroot exp.c libcxx.S elf_parser.c device_version.c status_protocol.c)
-add_dependencies(dfroot splicehelper_bin ko_sha256_check)
+add_dependencies(dfroot splicehelper_bin ko_sha256_check dfroot_build_provenance)
 # exp.c .incbin's the build-dir splicehelper rather than a source-tree copy.
 target_compile_definitions(dfroot PRIVATE DFROOT_SPLICEHELPER_PATH=\"${SPLICEHELPER}\")
 set_target_properties(dfroot PROPERTIES

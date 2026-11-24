@@ -44,6 +44,10 @@ public class MainActivity extends Activity implements IReporter {
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private final Executor mExec = Executors.newSingleThreadExecutor();
     private int mValidSuManagerPos = 0;
+    private PreferencePersister mPrefsPersister;
+    // A programmatic setSelection() fires onItemSelected again; suppress the
+    // write (and any further revert) while restoring the previous choice.
+    private boolean mRestoringSpinnerSelection;
     // Keeps the CPU awake across the up-to-70s soft-reboot outcome wait in
     // ExploitRunner.run(); a timeout bounds it in case the native binary hangs.
     private PowerManager.WakeLock mWakeLock;
@@ -85,6 +89,11 @@ public class MainActivity extends Activity implements IReporter {
         spinnerSuManager.setAdapter(new SuManagerAdapter(this, entries));
 
         SharedPreferences prefs = mDeCtx.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
+        mPrefsPersister = new PreferencePersister(prefs, (key, detail) -> {
+            Log.e(TAG, "Preference write failed for " + key + ": " + detail);
+            mMain.post(() -> Toast.makeText(this,
+                    "Could not save selection - reverting", Toast.LENGTH_LONG).show());
+        });
         String saved = prefs.getString(ExploitRunner.PREF_SU_MANAGER, null);
         boolean savedFound = false;
         for (int i = 1; i < entries.size(); i++) {
@@ -97,17 +106,30 @@ public class MainActivity extends Activity implements IReporter {
         }
         if (!savedFound && saved != null) { // Saved manager was uninstalled
             // commit(): the native bootstrap reads the prefs XML from disk.
-            prefs.edit().remove(ExploitRunner.PREF_SU_MANAGER).commit();
+            if (!mPrefsPersister.remove(ExploitRunner.PREF_SU_MANAGER)) {
+                // commit() failed: the stale package name MAY REMAIN ON DISK,
+                // and BootReceiver (if enabled) could still read it through
+                // ExploitRunner.run() on a later boot. The UI avoids offering
+                // a selection the bootstrap would act on, but this is a
+                // residual risk (see CHANGELOG.md / PORTING-GZIF.md).
+                revertSpinnerSelection(0);
+            }
         }
 
         spinnerSuManager.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                if (mRestoringSpinnerSelection) return; // programmatic revert
                 SuManagerEntry e = entries.get(pos);
                 if (e.packageName == null) return;
+                int previous = mValidSuManagerPos;
                 mValidSuManagerPos = pos;
                 // commit(): the native bootstrap reads the prefs XML from disk.
-                prefs.edit().putString(ExploitRunner.PREF_SU_MANAGER, e.packageName).commit();
+                if (!mPrefsPersister.putString(ExploitRunner.PREF_SU_MANAGER, e.packageName)) {
+                    // Guard prevents this setSelection() from writing the old
+                    // value back or triggering another revert.
+                    revertSpinnerSelection(previous);
+                }
                 updateRunButton();
             }
             @Override
@@ -140,6 +162,17 @@ public class MainActivity extends Activity implements IReporter {
 
     private void updateRunButton() {
         btnRun.setEnabled(mValidSuManagerPos >= 1 && !new File("/dev/df").exists());
+    }
+
+    /** Revert the spinner without re-persisting the old selection. */
+    private void revertSpinnerSelection(int pos) {
+        mRestoringSpinnerSelection = true;
+        spinnerSuManager.setSelection(pos, false);
+        // AdapterView normally dispatches onItemSelected synchronously, but a
+        // queued callback must also see the guard: our post is FIFO behind it.
+        mMain.post(() -> mRestoringSpinnerSelection = false);
+        mValidSuManagerPos = pos;
+        updateRunButton();
     }
 
     private void runExploit() {

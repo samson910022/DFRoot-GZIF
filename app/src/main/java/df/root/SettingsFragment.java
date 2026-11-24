@@ -7,8 +7,12 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
+import android.util.Log;
+import android.widget.Toast;
 
 public class SettingsFragment extends PreferenceFragment {
+
+    private static final String TAG = "dfroot";
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -18,6 +22,11 @@ public class SettingsFragment extends PreferenceFragment {
         Context ctx = getActivity();
         SharedPreferences dePrefs = ctx.createDeviceProtectedStorageContext()
                 .getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
+        PreferencePersister persister = new PreferencePersister(dePrefs, (key, detail) -> {
+            Log.e(TAG, "Preference write failed for " + key + ": " + detail);
+            Toast.makeText(ctx, "Could not save setting - reverting switch",
+                    Toast.LENGTH_LONG).show();
+        });
 
         ComponentName bootReceiver = new ComponentName(ctx, BootReceiver.class);
         SwitchPreference bootPref = (SwitchPreference) findPreference("boot_start");
@@ -36,16 +45,17 @@ public class SettingsFragment extends PreferenceFragment {
         softRebootPref.setPersistent(false);
         softRebootPref.setChecked(dePrefs.getBoolean("soft_reboot", false));
         softRebootPref.setOnPreferenceChangeListener((pref, value) -> {
-            dePrefs.edit().putBoolean("soft_reboot", (Boolean) value).commit();
-            return true;
+            // Returning false on commit failure keeps the switch at its old
+            // position (the preference is non-persistent), so the UI never
+            // claims a setting was saved when the native bootstrap cannot read
+            // it back from disk.
+            return persister.putBoolean("soft_reboot", (Boolean) value);
         });
 
         SwitchPreference disableModulesPref = (SwitchPreference) findPreference("disable_modules");
         disableModulesPref.setPersistent(false);
         disableModulesPref.setChecked(dePrefs.getBoolean("disable_modules", false));
-        disableModulesPref.setOnPreferenceChangeListener((pref, value) -> {
-            dePrefs.edit().putBoolean("disable_modules", (Boolean) value).commit();
-            return true;
-        });
+        disableModulesPref.setOnPreferenceChangeListener((pref, value) ->
+                persister.putBoolean("disable_modules", (Boolean) value));
     }
 }
