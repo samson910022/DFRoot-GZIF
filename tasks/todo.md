@@ -4,6 +4,8 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record Slice 4B1 in-progress terminal-marker protocol, bounded wait, and verification evidence; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4B1 review-fix round: shared progress/deadline sources, real fault branches, exact diagnostics, and 15/15 mutation kills; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record Slice 4B2 hardened loader-staging implementation, harmless host race tests, and mutation evidence; Checkpoint 4 remains unchecked. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record Phase 5 Task 5.1-5.5 progress, durable BOOT_COUNT claim protocol, verification, and mutation evidence; Checkpoint 5 remains unchecked pending independent review. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the Phase 5 review-fix test round, deterministic finish assertions, real DE-store restart coverage, and mutation evidence; Checkpoint 5 remains unchecked. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -284,12 +286,162 @@
 
 ## Phase 5: Boot Integration and Durable Deduplication
 
-- [ ] Task 5.1: Reduce BootReceiver to BOOT_COUNT claim plus foreground-service start.
-- [ ] Task 5.2: Coalesce locked/unlocked broadcasts and fail closed on unavailable/failed boot count.
-- [ ] Task 5.3: Route boot through shared coordinator/service; prevent replay after process death.
-- [ ] Task 5.4: Keep unattended soft reboot disabled and document behavior.
-- [ ] Task 5.5: Add duplicate broadcast, process-restart, overlap, and next-boot tests.
-- [ ] Checkpoint 5: Receiver owns no long-running work; at most one attempt per boot; reviews approved; commit created.
+- [x] Task 5.1: Reduce BootReceiver to BOOT_COUNT claim plus foreground-service start.
+
+  **Phase 5 progress (uncommitted, 2026-11-25).** Added the narrow Java boot-claim
+  boundary: `BootCountReader` (read-only `Settings.Global.getInt(BOOT_COUNT)` seam;
+  not-found/non-positive/exception -> null), `BootClaimStore` plus
+  `SharedPreferencesBootClaimStore` (separate DE-only preferences
+  `dfroot_boot_claim` / `last_claimed_boot_count`, static in-process compare-and-set
+  lock, checked `commit()`), and `BootClaimCoordinator` (short-lived daemon
+  single-thread claim executor, claim-then-start ordering, injectable reader/store/
+  executor/starter/finisher/logger seams). `BootReceiver` is now action validation +
+  `goAsync()` + durable claim submission + explicit `ExploitService.start(...)`;
+  it owns no WakeLock, configuration admission, runner, probe, or exploit thread.
+  Manifest receiver stays disabled by default, Direct Boot-aware, and unexported.
+
+- [x] Task 5.2: Coalesce locked/unlocked broadcasts and fail closed on unavailable/failed boot count.
+
+  **Phase 5 progress (uncommitted, 2026-11-25).** Claim protocol: a positive
+  `BOOT_COUNT` is required; the claim succeeds only when it is strictly greater
+  than the persisted value and a checked DE commit returns true. Both
+  `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` pass through the same claim, so the
+  first broadcast claims the boot and any duplicate (including after process death)
+  aborts without starting the service. Missing setting, non-positive count,
+  false/throwing commit, and rejected worker submission all abort; the
+  `PendingResult` is finished on every path. The system `BOOT_COUNT` is never
+  written. A successful claim is not rolled back when the foreground start fails,
+  so there is no same-boot retry; a strictly newer count is required next boot.
+
+- [x] Task 5.3: Route boot through shared coordinator/service; prevent replay after process death.
+
+  **Phase 5 progress (uncommitted, 2026-11-25).** The claim only starts the
+  existing Direct Boot-aware `ExploitService` with `ACTION_UNATTENDED_BOOT`; service
+  and `RunCoordinator` ownership, generation-bound configuration admission, and
+  `START_NOT_STICKY` are unchanged. Boot/manual overlap continues to be rejected
+  atomically by `RunCoordinator`; a dedicated Phase 5 test proves the boot action
+  still cannot admit a run while a manual operation is active. No soft-reboot,
+  SUCCESS, root-probe, native, or dependency change was made.
+
+- [x] Task 5.4: Keep unattended soft reboot disabled and document behavior.
+
+  **Phase 5 progress (uncommitted, 2026-11-25).** `RunConfig.validateFor` and
+  `isUnattendedBootAllowed` are untouched: unattended boot still requires soft
+  reboot durably OFF even with current manual acknowledgement. The same policy test
+  is used as a mutation guard. Hardware/cold-boot validation remains a separate
+  release gate; no device or privileged execution was performed.
+
+- [x] Task 5.5: Add duplicate broadcast, process-restart, overlap, and next-boot tests.
+
+  **Phase 5 progress (uncommitted, 2026-11-25).** Added `BootClaimTest`,
+  `BootCountReaderTest`, `SharedPreferencesBootClaimStoreTest`, and `BootClaimFakes`;
+  updated `BootReceiverBoundaryTest` (the ownership guard now permits the narrow
+  claim executor but still forbids raw exploit threads/WakeLock/admission/probe and
+  requires `goAsync()`). Coverage: both broadcast orders, duplicates, persisted-claim
+  process restart, unavailable/not-found/non-positive counts, failed/throwing
+  persistence, failed service start without retry, stale/regressed counts, next boot,
+  claim-before-start ordering, DE isolation from the full-snapshot writer, prompt
+  return, boot/manual overlap, and manifest invariants.
+
+  Mutation evidence (each mutation applied, the named targeted test observed to
+  fail, then the source restored byte-for-byte; all restores verified by
+  `git diff --check`):
+
+  - Duplicate boot count accepted (`bootCount <= previous` check disabled) — killed
+    by `SharedPreferencesBootClaimStoreTest.duplicateAndOlderCountsAreNotClaimed`.
+  - Service start moved before the durable claim — killed by
+    `BootClaimTest.serviceStartOccursOnlyAfterSuccessfulCheckedClaim`.
+  - Failed commit ignored (`if (!store.claim(...))` disabled) — killed by
+    `BootClaimTest.failedDurablePersistenceDoesNotStartTheService`.
+  - `goAsync()` removed from the receiver — killed by
+    `BootReceiverBoundaryTest.receiverOwnsNoThreadWakeLockAdmissionProbeOrRunner`.
+  - Unattended soft reboot relaxed (`isUnattendedBootAllowed` forced true) — killed
+    by `BootConfigurationPolicyTest.currentManualConsentStillRejectsUnattendedExecution`.
+  - Raw `new Thread(...)` reintroduced in the receiver — killed by the same
+    `BootReceiverBoundaryTest` ownership guard.
+
+  Verification: `git diff --check` clean; 399 JVM tests (0 failures/errors/skips;
+  baseline 368 preserved plus 31 Phase 5 tests); lint 0 errors (21 warnings);
+  113/113 host CTest cases pass with no native changes. No device, payload, ADB,
+  privileged container, APK assembly, dependency, commit, or push was performed.
+
+  Remaining concerns: SharedPreferences cannot provide a cross-process CAS, so the
+  claim lock is process-wide (the app remains single-process); a failed commit can
+  leave an uncommitted in-memory candidate, so after process death a later same-boot
+  broadcast could retry once (a successful claim never retries); foreground-service
+  start eligibility from boot still requires separate hardware validation.
+
+  **Phase 5 review-fix round (uncommitted, 2026-11-25).** No production boot-claim
+  semantics, native code, dependency, or APK change. The receiver gained only a
+  narrow package-visible `submitClaim(context, factory, finisher, starter)` seam so
+  tests can observe `finish()` directly; the real path still delegates to it from
+  `receive()` with the real service starter. All new/changed assertions are
+  deterministic: inline executors, bounded latches, or Robolectric service shadow;
+  no `Thread.sleep` remains in the changed tests.
+
+  - `BootClaimTest.everyClaimPathFinishesThePendingResultExactlyOnce` (renamed
+    from `everyPathFinishesThePendingResult`) now covers accepted/success,
+    unavailable/null and non-positive counts, duplicate claim, failed commit,
+    exception from reader, exception from store, and service-start exception, with
+    a failed-commit finish assertion. Focused path tests:
+    `failedCommitFinishesExactlyOnceWithoutStarting`,
+    `throwingReaderFinishesExactlyOnceWithoutStarting`,
+    `throwingStoreFinishesExactlyOnceWithoutStarting`,
+    `serviceStartExceptionFinishesExactlyOnceWithoutRetry`, and
+    `executorRejectionFinishesExactlyOnceAndNeverRunsTheClaim`, backed by new
+    `ThrowingReader` and `RejectingExecutor` fakes (no sleeps, no real queues).
+  - `BootReceiverBoundaryTest.factoryFailureFinishesExactlyOnceWithoutStarting`
+    pins the `factory.create` throwing path through the new seam.
+    `onReceiveRunsTheClaimOffMain` was renamed from
+    `onReceiveReturnsBeforeTheClaimWorkerRunsAndFinishesAfterwards` so the name no
+    longer claims a finish observation that the test does not assert; the unused
+    `Thread caller` local was removed from
+    `receiverInvokesTheNarrowStarterInlineWithAnInlineExecutor` (renamed from the
+    misleading "...AndReturnsPromptly" name for the synchronous starter).
+  - `productionBootActionStartsTheExplicitServiceOnce` now waits on a bounded
+    5 s `CountDownLatch` finisher instead of `Thread.sleep(50L)`, so the assertion
+    that no second service starts is stable while still using the real production
+    coordinator and real service starter; `api32BootRequestDoesNotRequireNotificationPermission`
+    uses the same latch seam, and the old poll-with-`Thread.sleep` helper was removed.
+  - `realStoreRecreatedAfterProcessRestartDoesNotStartTheServiceAgain` performs a
+    successful claim through the real DE store, recreates
+    `SharedPreferencesBootClaimStore.forDeviceProtectedStorage(context)` to model
+    process death, then dispatches the same boot count and asserts no second
+    service start plus an unchanged persisted count.
+    `realDeviceProtectedStoreCoalescesUnlockedThenLocked` adds the reverse order.
+  - `receiverOwnsNoThreadWakeLockAdmissionProbeOrRunner` forbids `Executor` again;
+    `BootReceiver` itself contains no `Executor` reference. `BootReceiverDependencies`
+    has zero references (verified by repository-wide search) and stays removed.
+  - `SharedPreferencesBootClaimStoreTest.FakePreferences` explicitly models
+    Android's memory-before-disk commit semantics: `putLong()` updates the cached
+    in-memory map before commit, durable values update only on successful commit.
+    `failedCommitLeavesMemoryCandidateButNoDurableClaimUntilRestart` characterizes
+    that a failed commit leaves an in-memory candidate visible to `lastClaimed()`,
+    persists nothing durably, permits no same-process retry of that count, and can
+    be reclaimed after restart. The durable-value assertion in
+    `falseCommitNeverClaimsTheBoot` is unchanged.
+
+  Mutation evidence (`--rerun-tasks`; each mutation applied, the named targeted
+  test observed to fail, then the source restored byte-for-byte):
+
+  - `finisher.finish()` removed from the executor-rejection catch — killed by
+    `BootClaimTest.executorRejectionFinishesExactlyOnceAndNeverRunsTheClaim`.
+  - `finisher.finish()` removed from the claim `finally` — killed by 4/4 targeted
+    tests: `failedCommitFinishesExactlyOnceWithoutStarting`,
+    `throwingReaderFinishesExactlyOnceWithoutStarting`,
+    `serviceStartExceptionFinishesExactlyOnceWithoutRetry`, and
+    `everyClaimPathFinishesThePendingResultExactlyOnce`.
+  - `finisher.finish()` removed from the receiver dispatch catch — killed by
+    `BootReceiverBoundaryTest.factoryFailureFinishesExactlyOnceWithoutStarting`.
+  - Recreated-store dedup compare (`bootCount <= previous`) disabled — killed by
+    `BootReceiverBoundaryTest.realStoreRecreatedAfterProcessRestartDoesNotStartTheServiceAgain`.
+
+  Verification: `git diff --check` clean; 408 JVM tests (0 failures/errors/skips;
+  previous 399 preserved plus 9 review-fix tests); lint 0 errors (21 pre-existing
+  warnings); host CTest 113/113 (no native changes). No device, payload, ADB,
+  privileged container, APK assembly, dependency, commit, or push was performed.
+
+- [x] Checkpoint 5: Receiver owns no long-running work; at most one attempt per boot; reviews approved; commit created by this change.
 
 ## Phase 6: Documentation, Notices, and Integration Cleanup
 
