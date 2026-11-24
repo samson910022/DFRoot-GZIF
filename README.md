@@ -107,8 +107,8 @@ make
 The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 `app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
 
-- build it with the top-level `make` (podman + DDK images; chains all eight
-  KMIs — long), or
+- build it with the top-level `make` (podman + the digest-pinned DDK image for
+  the single KMI below — long), or
 - build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
   the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
   for GZIF, or

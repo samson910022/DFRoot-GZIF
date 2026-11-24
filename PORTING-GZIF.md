@@ -308,7 +308,7 @@ The APK is currently **dual-mode**: both loaders are inside one APK; the spinner
   - Gradle wrapper **9.7.1** (`gradle/wrapper/gradle-wrapper.properties`), AGP catalog 9.5.0 (root pin 9.4.0, §6 note).
 - `signing.properties` at repo root with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (**do not commit; it is gitignored**) — required for `assembleRelease`. Debug builds sign with `signingConfigs.getByName("debug")` — still references the same properties file (absent entries fail closed).
 - NDK sysroot builds: `splicehelper` is compiled freestanding at CMake time (`-nodefaultlibs -nostartfiles -ffreestanding -static`).
-- LKM rebuild (**required** — the `.ko` is not committed): `cd lkm && make KDIR=<kdir> LLVM=1` (or CI workflow `.github/workflows/build.yml`, which uses `ghcr.io/ylarod/ddk-min:<kmi>-20260828` containers). Top-level `Makefile` chains podman DDK builds for all eight KMIs then `:app:assembleRelease`.
+- LKM rebuild (**required** — the `.ko` is not committed): `cd lkm && make KDIR=<kdir> LLVM=1` (or CI workflow `.github/workflows/build.yml`, which uses digest-pinned `ghcr.io/ylarod/ddk-min:<kmi>-20260828@sha256:…` containers). Top-level `Makefile` runs one podman DDK build for `android13-5.15` (via `scripts/ddk-image.sh`) then `:app:assembleRelease`.
 - `lkm/dfroot.ko` is intentionally GPL with `module_init` returning `-ENODEV`; §4 step (5).
 
 ### 8.2 Build

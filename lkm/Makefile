@@ -1,3 +1,8 @@
+# The outer make does not forward OBJCOPY from the LLVM=1 kernel build, so an
+# unset OBJCOPY turns the strip command below into an empty-command failure that
+# is easy to miss.  Default to the LLVM tool shipped in the DDK image.
+OBJCOPY ?= llvm-objcopy
+
 obj-m += dfroot.o
 
 CFLAGS_dfroot.o := -Os -Qn -fno-addrsig -fno-asynchronous-unwind-tables \

@@ -56,6 +56,10 @@ jobs:
         run: |
           python3 tests/workflow/test_policy.py
 
+      - name: Run make contract tests
+        run: |
+          python3 -B tests/make/test_make.py
+
   build-lkms:
     name: LKMs / ${{ matrix.kmi }}
     needs: test-ci
@@ -74,8 +78,9 @@ jobs:
           # so the matrix is reduced to the single KMI actually shipped.
           - android13-5.15
     container:
-      # No --privileged: the same DDK image builds the LKM locally via podman
-      # with only --pid=host --network=none, so no extra caps are required.
+      # No --privileged: the same digest-pinned DDK image builds the LKM locally
+      # via podman with --network=none, --cap-drop=ALL and no-new-privileges, so
+      # no extra caps are required.
       # Digest pinned (floating tags are mutable): resolved via GHCR token +
       # manifest HEAD and cross-verified with `docker buildx imagetools inspect`.
       image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd

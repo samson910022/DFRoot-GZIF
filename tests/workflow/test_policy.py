@@ -44,6 +44,7 @@ TEST_CI_COMMANDS = {
     "Run signing regression tests": "bash tests/signing/run_tests.sh",
     "Run signed and unsigned release smoke": 'bash tests/signing/smoke_signed_release.sh "$HOME"',
     "Run workflow policy tests": "python3 tests/workflow/test_policy.py",
+    "Run make contract tests": "python3 -B tests/make/test_make.py",
 }
 APK_COUNTER_COMMAND = "Verify APK counts"
 ANCESTRY_STEP = "Verify tag is on master"
@@ -131,6 +132,7 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Run signing regression tests",
         "Run signed and unsigned release smoke",
         "Run workflow policy tests",
+        "Run make contract tests",
     ],
     "build-lkms": [
         "Check out source",
@@ -1263,6 +1265,25 @@ class MutationDetectionTests(unittest.TestCase):
                     assert_exact_release_run_scripts(mutated)
                 with self.assertRaises(AssertionError):
                     validate_workflow(mutated)
+
+    def test_make_contract_step_noop_mutation_is_rejected(self) -> None:
+        """Replacing the new test-ci step with a no-op must fail the exact lock."""
+        original = (
+            "      - name: Run make contract tests\n"
+            "        run: |\n"
+            "          python3 -B tests/make/test_make.py\n"
+        )
+        noop = self.mutate(original, original.replace("python3 -B tests/make/test_make.py", "true"))
+        with self.assertRaisesRegex(AssertionError, "must be exactly"):
+            assert_exact_test_ci_commands(noop)
+        with self.assertRaises(AssertionError):
+            validate_workflow(noop)
+
+        removed = self.mutate(original, "")
+        with self.assertRaisesRegex(AssertionError, "step names must be exactly"):
+            assert_exact_step_names(removed)
+        with self.assertRaises(AssertionError):
+            validate_workflow(removed)
 
     def test_cleanup_exfiltration_mutations_are_rejected(self) -> None:
         """Cleanup is not exempt from the exact lock: no appended commands."""
