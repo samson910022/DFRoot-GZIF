@@ -1,6 +1,9 @@
+// Modified 2026-11-25 (DFRoot GZIF round-3 PR #3 phase 3): preference-integrity
+// launch gate, marker-failure boot gate and truthful StatusRc messages. See NOTICE.
 package df.root;
 
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -48,8 +51,9 @@ public class MainActivity extends Activity implements IReporter {
     // A programmatic setSelection() fires onItemSelected again; suppress the
     // write (and any further revert) while restoring the previous choice.
     private boolean mRestoringSpinnerSelection;
-    // Keeps the CPU awake across the up-to-70s soft-reboot outcome wait in
-    // ExploitRunner.run(); a timeout bounds it in case the native binary hangs.
+    // Keeps the CPU awake across the up-to-85s overall status wait in
+    // ExploitRunner.run() (70 s budget + bounded grace); the timeout bounds it
+    // in case the native binary hangs.
     private PowerManager.WakeLock mWakeLock;
 
     @Override
@@ -65,6 +69,7 @@ public class MainActivity extends Activity implements IReporter {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mDeCtx = createDeviceProtectedStorageContext();
+        PreferenceIntegrity.init(mDeCtx);
         PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
         mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:manual");
         setContentView(R.layout.activity_main);
@@ -91,8 +96,14 @@ public class MainActivity extends Activity implements IReporter {
         SharedPreferences prefs = mDeCtx.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
         mPrefsPersister = new PreferencePersister(prefs, (key, detail) -> {
             Log.e(TAG, "Preference write failed for " + key + ": " + detail);
-            mMain.post(() -> Toast.makeText(this,
-                    "Could not save selection - reverting", Toast.LENGTH_LONG).show());
+            // Posted: PreferencePersister marks the key ambiguous right after
+            // this callback returns, so the gate state is settled by then.
+            mMain.post(() -> {
+                Toast.makeText(this,
+                        "Could not save selection - reverting; LAUNCH ROOT is blocked " +
+                        "until the same setting saves successfully", Toast.LENGTH_LONG).show();
+                disableBootReceiverForFailedMarker();
+            });
         });
         String saved = prefs.getString(ExploitRunner.PREF_SU_MANAGER, null);
         boolean savedFound = false;
@@ -136,6 +147,11 @@ public class MainActivity extends Activity implements IReporter {
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        // A later successful save of the same key clears the quarantine.
+        PreferenceIntegrity.addListener(() -> mMain.post(() -> {
+            updateRunButton();
+            disableBootReceiverForFailedMarker();
+        }));
         updateRunButton();
 
         btnRun.setOnClickListener(v -> {
@@ -161,7 +177,26 @@ public class MainActivity extends Activity implements IReporter {
     }
 
     private void updateRunButton() {
-        btnRun.setEnabled(mValidSuManagerPos >= 1 && !new File("/dev/df").exists());
+        btnRun.setEnabled(mValidSuManagerPos >= 1
+                && !new File("/dev/df").exists()
+                && !PreferenceIntegrity.isQuarantined());
+    }
+
+    /**
+     * If a quarantine could not be persisted durably, the boot-time gate cannot
+     * be trusted: disable BootReceiver so a stale preference cannot be acted on
+     * after reboot. A healthy (non-quarantined) app leaves Start on Boot alone.
+     */
+    private void disableBootReceiverForFailedMarker() {
+        if (!PreferenceIntegrity.isQuarantined()
+                || PreferenceIntegrity.durableMarkerActive()) return;
+        ComponentName receiver = new ComponentName(this, BootReceiver.class);
+        if (getPackageManager().getComponentEnabledSetting(receiver)
+                != PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+            getPackageManager().setComponentEnabledSetting(receiver,
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    PackageManager.DONT_KILL_APP);
+        }
     }
 
     /** Revert the spinner without re-persisting the old selection. */
@@ -177,21 +212,15 @@ public class MainActivity extends Activity implements IReporter {
 
     private void runExploit() {
         // Bound the lock so a hung native binary cannot keep the device awake
-        // forever; 120s comfortably covers the up-to-70s soft-reboot wait.
+        // forever; 120s comfortably covers the 85s overall status budget.
         mWakeLock.acquire(120000);
         try {
             int rc = ExploitRunner.run(mDeCtx, this);
-            /* rc comes from the single atomically published final outcome.
-             * None of these strings claim root was verified or a reboot
-             * happened: only the on-device oracle can prove either. */
-            String msg = rc == 0  ? "DFRoot: late-load exited 0; root not verified"
-                       : rc == 1  ? "DFRoot: Error - bootstrap failed"
-                       : rc == 2  ? "DFRoot: unknown result - check logcat & dmesg"
-                       : rc == 3  ? "DFRoot: Error - failed to patch files"
-                       : rc == 4  ? "DFRoot: soft-reboot command issued; not confirmed"
-                       : rc == 5  ? "DFRoot: soft reboot skipped (late-load not confirmed absent)"
-                       : rc == 6  ? "DFRoot: soft-reboot command failed"
-                       :            "DFRoot: Error - unknown result";
+            /* rc comes from either a Java-side early gate or the single
+             * atomically published final outcome. StatusRc.name() never claims
+             * root was verified or a reboot was confirmed: only an on-device
+             * oracle can prove either. */
+            String msg = StatusRc.name(rc);
             mMain.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);

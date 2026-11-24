@@ -165,7 +165,7 @@ jobs:
 
       # Explicit XML assertion: a green Gradle exit code alone cannot hide a
       # skipped test class or a failure recorded only in the report.
-      - name: Assert JUnit XML (8 tests, 0 failures)
+      - name: Assert JUnit XML (15 tests, 0 failures)
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -187,8 +187,8 @@ jobs:
                      root.get("errors"), root.get("skipped")))
           print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %
                 (tests, failures, errors, skipped))
-          if tests != 8 or failures != 0 or errors != 0 or skipped != 0:
-              raise SystemExit("::error::JUnit XML assertion failed: expected 8 tests, 0 failures/errors/skips")
+          if tests != 15 or failures != 0 or errors != 0 or skipped != 0:
+              raise SystemExit("::error::JUnit XML assertion failed: expected 15 tests, 0 failures/errors/skips")
           PY
           echo "junit-ok" > "$RUNNER_TEMP/marker-junit"
 

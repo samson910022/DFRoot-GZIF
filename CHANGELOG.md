@@ -1,5 +1,60 @@
 # Changelog — DFRoot GZIF
 
+## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
+
+**All changes in this section are host-tested only and UNVALIDATED on device.**
+No hardware run has exercised the quarantine latch, the new rc gates or the
+updated UI messages. Documenting a release gate is not closing it.
+
+- **SharedPreferences memory/disk divergence (P2-08).** New
+  `PreferenceIntegrity.java` is a process-wide quarantine latch with a durable
+  marker file in device-protected storage. `init(Context)` / `init(File)` are
+  idempotent; `markAmbiguous(key)` latches quarantine and writes the marker;
+  `markConsistent(key)` clears it ONLY for the same key (a different key cannot
+  recover another key), and when the last key is consistent the marker is
+  removed. A marker found at startup is restored (`SENTINEL_RESTORED`) and keeps
+  the quarantine active across process death. Any marker read/write/delete
+  failure fails closed (quarantine stays set, `durableMarkerActive()` false).
+  `addListener()` lets the UI refresh; `resetForTest()` is test-only.
+  `PreferencePersister.java` keeps its public API: a failed/throwing commit is
+  reported first and then calls `markAmbiguous(key)`; a successful commit calls
+  `markConsistent(key)`. The JVM fake now models separate in-memory and on-disk
+  maps, so a failed commit really leaves them divergent.
+- **Launch / boot gating.** `ExploitRunner.run()` initializes
+  `PreferenceIntegrity` and evaluates the pure static `earlyExitRc(devDfExists,
+  prefsQuarantined)` before touching the device: `/dev/df` now returns rc 9
+  (`RC_ALREADY_HOOKED`) with a truthful "already hooked" message instead of rc 0;
+  a quarantined preference state returns rc 8 (`RC_PREF_STATE_UNCERTAIN`);
+  `/dev/df` takes precedence when both hold. `MainActivity` disables LAUNCH
+  ROOT while quarantined, updates the button through a listener, states that a
+  failed save blocks launch, and disables the `BootReceiver` component when the
+  marker could not be persisted (so boot gating cannot be trusted).
+  `SettingsFragment` disables "Start on Boot" while quarantined, refuses to
+  enable it, uses the same failure toast/boot-component guard, and refreshes on
+  listener callbacks. `BootReceiver` initializes the latch from the DE context
+  and skips the boot launch when quarantined.
+- **Java rc map is now truthful (phase 1b follow-up).** New `StatusRc.java`
+  mirrors `status_protocol.h`: rc 0 root-only, 1 error, 2 unknown, 3 patch
+  failure, 4 reboot requested, 5 reboot skipped, 6 reboot failed,
+  7 attempt unknown, 8 preference state uncertain, 9 already hooked, plus the
+  additive 64 recovery-failed bit. `base()`, `recoveryFailed()` and `name()`
+  are pure; `name()` appends a recovery warning for ANY rc with bit 64 and never
+  claims "root verified" or a confirmed reboot. `MainActivity.runExploit()`
+  uses `StatusRc.name(rc)` instead of its own string ladder.
+- **Tests / CI.** `tests/java/PreferencePersisterTest.java` now has 11 JVM cases
+  (failed put/remove quarantine, same-key clears, different-key does not, thrown
+  write, marker created and restored after a simulated restart). New
+  `tests/java/LaunchGateTest.java` has 4 cases (early-exit truth table including
+  `/dev/df` precedence, rc constants, recovery bit on every code, never claiming
+  verified root/confirmed reboot). The Gradle `test` source dir already points
+  at `tests/java`; CI's JUnit XML assertion now expects **15 tests**, 0
+  failures/errors/skips. These are host-only JVM tests, not device validation.
+- **Release gates unchanged.** P1-08 (`/data/local/tmp/.ksud-stage` swapped by a
+  `shell`-uid process before the loader renames it) remains **OPEN**: this phase
+  only documents the Java-side gating and does not rebuild the bundled loaders.
+  Auto Soft Reboot and Start on Boot stay disabled by default and unvalidated;
+  the packaged-KO real gate is still blocked until the reviewed KO is re-pinned.
+
 ## Unreleased — round-3 PR #3, phase 2 (build / packaging gates)
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**
@@ -46,8 +101,9 @@ not be published.
   from `make_packaged_ko_fixture.py`) covers valid pin, ANY-pin, mismatch,
   corrupted byte, missing section, wrong size, bad objcopy, skip-cannot-bypass
   and fail-closed manifest behaviour. CI asserts a marker from every native /
-  CMake / JVM suite and parses the JUnit XML for exactly **8 tests, 0
-  failures/errors/skips**, so one failure cannot hide another. Required gates
+  CMake / JVM suite and parses the JUnit XML for **15 tests, 0
+  failures/errors/skips** after phase 3 added the launch-gate JVM cases, so one
+  failure cannot hide another. Required gates
   have no `continue-on-error`; only the informational provenance uploads stay
   best-effort. A release-evidence step checks the git SHA, skip OFF in every
   CMakeCache, a verified KO manifest whose hash is in the pins, a verified
@@ -165,7 +221,8 @@ not be published.
 ## Unreleased — round-3 PR #3, phase 1b (native only, Java mapping later)
 
 **Host-tested only and UNVALIDATED on device.** No hardware run has exercised
-this protocol. Java result-code strings/map are deliberately untouched.
+this protocol. Java result-code strings/map were deliberately untouched *at
+this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
 
 - **Nonce-bound v2 token.** `exp.c` generates a 128-bit nonce with `getrandom`
   (`/dev/urandom` fallback), writes it atomically (0644, `fchmod`, `fsync`,
@@ -232,11 +289,12 @@ Residual risks / **release gates** (not closed by this PR):
   rebuilding the bundled loaders and is a release gate** (documented in
   `PORTING-GZIF.md` §6).
 - Stale SU-manager preference: when `PreferencePersister.remove()` fails in
-  `MainActivity`, the old package name may remain in the prefs XML on disk; if
-  Start on Boot is enabled, `BootReceiver` could still read it via
-  `ExploitRunner.run()` on a later boot. The UI hides the stale choice but
-  cannot force the write to succeed. Mitigation is to clear app data / disable
-  Start on Boot; tracked as a residual risk, not fixed by this PR.
+  `MainActivity`, the old package name may remain in the prefs XML on disk. The
+  phase 3 quarantine now blocks manual launch (rc 8) and `BootReceiver` skips
+  booting while the key is ambiguous, so a stale value is not acted on; the
+  stale disk bytes are still not erased by a failed write (fail-closed gating,
+  not a repair). Recovery requires a successful save of the same key or clearing
+  app data. This path is host-tested only and UNVALIDATED on device.
 - The 32-byte AES key is still passed to the native binary on `argv`
   (`/proc/<pid>/cmdline` exposure). Both in-process copies are wiped on all
   paths, but fully removing this residual needs a Java→native fd/pipe contract

@@ -89,7 +89,7 @@ All three candidate CVEs were triaged against the extracted GZIF kernel Image (s
 
 Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK). Sources below are the upstream DFRoot files with the local port applied.
 
-**(0) Preconditions / staging.** App is launched → user presses **LAUNCH ROOT**. `ExploitRunner.run()` (`app/src/main/java/df/root/ExploitRunner.java:45`) first refuses to run if `/dev/df` exists (`:46-49` → "already hooked, skipping"), prints device info (`:106`, Model/Manufacturer/Android/SPL/Kernel), and refuses if Developer Options → "Log buffer size" is Off (`:51-56`). The SU manager selected in the spinner is validated (`hasKsud()` `:40-43` — the *manager APK* must ship `nativeLibraryDir/libksud.so`; this is only an eligibility gate, not the loader that runs — see §6), then `stageAssets()` (`:123-135`) copies the **bundled Samsung-patched loader** (see §6, patch 1) to `/data/user_de/0/df.root/ksud` and `libbootstrap.so` to `/data/user_de/0/df.root/bootstrap`.
+**(0) Preconditions / staging.** App is launched → user presses **LAUNCH ROOT**. `ExploitRunner.run()` now first calls `PreferenceIntegrity.init(ctx)` and the pure `earlyExitRc(devDfExists, prefsQuarantined)`: `/dev/df` existing yields **rc 9** (`DF_RC_ALREADY_HOOKED`, "already hooked ... launch skipped" — never rc 0), and a quarantined SharedPreferences state yields **rc 8** (`RC_PREF_STATE_UNCERTAIN`, launch blocked); `/dev/df` wins when both hold (phase 3, host-tested only). It then prints device info (Model/Manufacturer/Android/SPL/Kernel) and refuses if Developer Options → "Log buffer size" is Off. The SU manager selected in the spinner is validated (`hasKsud()` `:40-43` — the *manager APK* must ship `nativeLibraryDir/libksud.so`; this is only an eligibility gate, not the loader that runs — see §6), then `stageAssets()` (`:123-135`) copies the **bundled Samsung-patched loader** (see §6, patch 1) to `/data/user_de/0/df.root/ksud` and `libbootstrap.so` to `/data/user_de/0/df.root/bootstrap`.
 
 **(1) IpSecManager ESP transform.** The app opens a `UdpEncapsulationSocket` + `SecurityParameterIndex` via `android.net.IpSecManager`, builds an **AES-CBC / HMAC-SHA256 transport-mode `IpSecTransform`** (`ExploitRunner.java:77-98`). No app permission needed; netd (root, SELinux-allowed) installs the IPv4 ESP-in-UDP SA. The app then execs `libdfroot.so` (the native payload, disguised as a JNI lib — AGP only packages `lib*.so` — and exec'd from `nativeLibraryDir`, which is executable; `runBinary()` `:137`, `ProcessBuilder` + `redirectErrorStream(true)`).
 
@@ -156,9 +156,12 @@ protocol — `status_protocol.{c,h}` + `bootstrap.c` / `exp.c`):
 
 All tokens have the form `dfroot-v2:<32-hex nonce>:<outcome>\n`. A token with a
 stale/foreign nonce, an unknown outcome, embedded NUL or extra bytes is ignored
-by the consumer. App rc 9 (`DF_RC_ALREADY_HOOKED`) is reserved for the Java-side
-`/dev/df` gate; 64 is a **recovery-failed bit** OR'ed into any rc below when a
-restore could not be verified.
+by the consumer. App rc 9 (`DF_RC_ALREADY_HOOKED`) is the Java-side `/dev/df` gate (phase 3: it
+now actually returns 9 instead of 0); rc 8 (`RC_PREF_STATE_UNCERTAIN`) is the
+Java-side SharedPreferences quarantine gate; rc 7 covers `reboot_pending` /
+`reboot_attempt_unknown`. 64 is a **recovery-failed bit** OR'ed into any rc below
+when a restore could not be verified; the Java `StatusRc.name()` surfaces that
+warning for every code and never claims verified root or a confirmed reboot.
 
 | `/dev/dffinal` token | App rc | Meaning |
 |---|---|---|
@@ -460,12 +463,20 @@ The classic manager therefore cannot manage root on this firmware **even on a fu
 - **Auto Soft Reboot** (DFRoot setting) triggered a **full hard reboot once** on this model (bootstrap's soft-reboot path → `ksud soft-reboot`), documented in the campaign record §6.6 ("which on this build is a full kernel reboot — /proc/uptime resets, Enforcing remains"). Upstream DFRoot FAQ points the same way (diabl0w Discussion #69: "try disabling Auto Soft Reboot"). **Do not enable it on this device until you have tested it.**
 - **Start on Boot** re-runs the whole chain per boot. Risks: (a) if a KSU module is broken, bootloop; mitigation = boot to Safe Mode (hold Vol-Down), or DFRoot Settings → "Disable KSU Modules", or uninstall DFRoot; (b) unverified for stability on this firmware — not validated on this unit. Leave off unless you have a specific reason and a recovery plan.
 - Both are controlled by the `BootReceiver` (blocked unless enabled; manifest has `android:enabled="false"` for the receiver) and the `soft_reboot` pref in `SettingsFragment`.
+- Phase 3 (host-only, UNVALIDATED on device) adds fail-closed gating: a failed
+  preference write quarantines its key in `PreferenceIntegrity` (durable marker
+  in device-protected storage); while quarantined, `BootReceiver` skips the boot
+  launch, `SettingsFragment` disables "Start on Boot" and refuses to enable it,
+  and `MainActivity` disables LAUNCH ROOT. If the marker cannot be persisted,
+  the `BootReceiver` component is disabled rather than trusting an unrecorded
+  gate. Recovery requires a successful write of the SAME key (or clearing app
+  data); a different key does not clear the latch.
 
 ### 9.7 Other failure modes & logcat tags
 - Tags to capture: **`dfroot`** (exploit + app; line markers `* app version`, `=== setup ===`, `=== exploit ===`, `=== init ===`, `=== cleanup ===`), **`KernelSU`** (classic ksud), **`KernelSU Next`** (Next ksud), and (for manager UX) the manager's own tags. Always capture both KSU tags or none (`next-failure-evidence.txt` is a negative example).
 - "DFRoot: unknown result - check logcat & dmesg" (rc=2) → either IpSec setup failed or no valid final token appeared before the checked 70 s budget (85 s overall cap when a `reboot_pending` preflight opened the grace window); look at `dfroot` lines; `dmesg` requires root (unavailable exactly when you need it). A final rc ≥ 64 means a restore failed (recovery bit).
 - Log buffer size Off → DFRoot refuses ("Log buffer size is set to Off") — set it to anything else in Developer Options.
-- `/dev/df` lingering after a failed run: press the button again is refused — **reboot is the only re-arm**.
+- `/dev/df` lingering after a failed run: press the button again is refused with rc 9 ("already hooked", not rc 0) — **reboot is the only re-arm**. A quarantined preference state blocks launch with rc 8; rc ≥ 64 appends "recovery verification failed" to ANY message.
 - Intermittent: `Failed to set feature 5: ksuctl failed: Operation not supported on transport endpoint (os error 95)` (seen run8) — non-fatal; KSU continued and loaded 5 other features. Do not chase it.
 - `KernelSU version: 0` lines are expected on fresh boots (nothing loaded when the probe runs) — not an error.
 - If modules fail to load/bootloop after a successful root: DFRoot Settings → **Disable KSU Modules** (bootstrap honors it via `/data/adb/modules/*/disable` before ksud runs), or boot into Safe Mode, or uninstall the offending module, or remove DFRoot.
@@ -489,7 +500,7 @@ The device never captures panic text (ABL: `Failed to get KlogOffset, Not Found`
 - **This port is not upstream.** It is an uncommitted local working tree on top of `diabl0w/DFRoot @ 7a6513a`. Pulling upstream or re-cloning loses the two patches and the bundled loaders. Do not push to `origin` (which points at `github.com/diabl0w/DFRoot`) — fork if you need to publish.
 - **Legality/ethics:** only on your own device; the exploit patches page-cache contents of files the system executes. It does not unlock anything, and it violates no signature checks *because it does not need to* — but Samsung's warranty/Knox terms are your affair.
 - **Verification hygiene:** never trust the on-screen toast. Verify with the §8.3 oracle each time, on every boot.
-- **Residual preference risk:** if the SU-manager `SharedPreferences` write/removal fails, a stale package name may remain on disk. With "Start on Boot" enabled, `BootReceiver` reads that value again through `ExploitRunner.run()` on a later boot even though the UI no longer offers it. Clear app data or keep Start on Boot disabled to avoid acting on a stale selection; the failed-write path is host-tested only and UNVALIDATED on device.
+- **Residual preference risk:** if the SU-manager `SharedPreferences` write/removal fails, a stale package name may remain on disk. Phase 3 quarantine blocks manual launch (rc 8) and makes `BootReceiver` skip while the key is ambiguous, so a stale value is not acted on; the failed write still does not erase the stale bytes (fail-closed gating, not a repair). Save the same setting again or clear app data to recover; this path is host-tested only and UNVALIDATED on device.
 
 ---
 
@@ -527,7 +538,7 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 
 Every row below is evidence for the **historical implementation** (old marker
 protocol, historical KO pins, old preference write path). It does not validate
-the current round-2 PR #3 working tree, which is host-tested only. Build
+the current round-2/round-3 PR #3 working tree, which is host-tested only. Build
 provenance manifests are informational, not independent reproducible-build
 proofs. A release is blocked if the KO pins are obsolete, if Auto Soft Reboot /
 Start on Boot remain unvalidated for the shipped configuration, or while the
@@ -558,6 +569,7 @@ rebuild.
 | 20 | "Both managers" success (classic manager UI + Next UI) | **Half-validated**: both manager APKs present and exercised as *failures*; both **loader lineages** validated as successes (run6 = classic 3.3.0 lineage; run8 = Next 3.4.2 lineage). `me.weishu.kernelsu`-selected success run: **not performed** | §5.1 |
 | 21 | Round-2 PR #3 single `/dev/dffinal` status flow + truthful rc strings | **UNVALIDATED on device** — host-tested only (28 mock cases + real-file permission/atomicity test) | `tests/native/status_protocol_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` Unreleased |
 | 22 | Round-3 PR #3 phase 1b: nonce-bound v2 token, `REBOOT_PENDING`/`REBOOT_ATTEMPT_UNKNOWN`, cleanup-before-wait, 85 s grace cap, recovery bit, `/proc` scan verdict | **UNVALIDATED on device** — host-tested only (34 status cases, 13 proc-scan cases, real-file publisher test, host compiles) | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` Unreleased |
+| 23 | Round-3 PR #3 phase 3: SharedPreferences quarantine latch + durable boot marker, rc 9 `/dev/df` gate, rc 8 uncertain-prefs gate, `StatusRc` messages/recovery warning, launch/boot disabling | **UNVALIDATED on device** — host-only JVM tests (11 preference cases + 4 launch-gate cases, 15 total, no Android runtime) | `tests/java/PreferencePersisterTest.java`, `tests/java/LaunchGateTest.java`; `CHANGELOG.md` Unreleased |
 
 Confidence rollup: **the chain works on this firmware today; it has survived exactly two cold-boot runs with the Samsung-patched loaders; every other CVE/module/persistence aspect remains unverified.**
 
@@ -573,6 +585,11 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 6. **Publishability**: the working tree is uncommitted; decide (a) commit DFRoot-fzg1 locally (never push to diabl0w's upstream), or (b) vendor it into a fork, before the knowledge walks away.
 7. **The classic manager UI**: if the user ever wants `me.weishu.kernelsu` as the *app* again, the Writable-dex defect must be fixed upstream (or a patched classic APK shipped); not a DFRoot problem.
 8. **(Optional) capture `KernelSU Next` logs properly** in future evidence files: `adb logcat -d | grep -E 'KernelSU Next|KernelSU|dfroot'` — unfiltered-or-dual-tag always (see §9.2.4).
+9. **P1-08 remains OPEN (release gate).** The bundled loaders still hardcode
+   `/data/local/tmp/.ksud-stage`; a `shell`-uid process could swap the staged
+   file before the loader renames it. Phase 3 documents Java-side launch/boot
+   gating only — documenting a gate is not a fix; closing this needs a loader
+   rebuild. Auto Soft Reboot / Start on Boot also stay unvalidated.
 
 ---
 
@@ -590,7 +607,7 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
 11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle 9.7.1 → `./gradlew :app:assembleRelease`, `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
-13. Troubleshooting: `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown, other `reboot_*` = reboot states); rc ≥ 64 ⇒ restore verification failed; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status flow is host-tested but UNVALIDATED on device.**
+13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
 

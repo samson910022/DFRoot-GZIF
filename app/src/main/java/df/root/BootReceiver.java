@@ -1,3 +1,5 @@
+// Modified 2026-11-25 (DFRoot GZIF round-3 PR #3 phase 3): skip boot launch when
+// SharedPreferences integrity is quarantined. See NOTICE.
 package df.root;
 
 import android.content.BroadcastReceiver;
@@ -24,6 +26,13 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         }
         Log.i(TAG, "boot: " + intent.getAction());
         final Context deCtx = context.createDeviceProtectedStorageContext();
+        PreferenceIntegrity.init(deCtx);
+        if (PreferenceIntegrity.isQuarantined()) {
+            // Memory and the prefs XML may disagree; the native bootstrap
+            // reads the XML, so no boot-time launch is safe.
+            Log.i(TAG, "boot: preferences quarantined, skipping launch");
+            return;
+        }
         PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:boot");
         wl.acquire();

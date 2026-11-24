@@ -134,7 +134,8 @@ multi-marker status protocol, the then-current `dfroot.ko` pins and the old
 preference-write path. The current round-2 PR #3 changes (single `/dev/dffinal`
 outcome, KO hash-skip policy, build provenance, Java preference persistence)
 are **host-tested only and UNVALIDATED on device**. The round-3 phase-2 build
-and packaging gates described below are likewise host-tested only.
+and packaging gates and the phase-3 Java launch/boot gating described below are
+likewise host-tested only (the 15 JVM tests run without an Android runtime).
 
 - **No release with obsolete KO pins.** If a DDK rebuild no longer matches the
   two reviewed SHA-256 pins in `app/src/main/jni/CMakeLists.txt`, stop and
@@ -155,16 +156,24 @@ and packaging gates described below are likewise host-tested only.
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
 - **All CI suites are asserted.** Every native/CMake/JVM suite writes a marker
-  that CI checks, the JUnit XML must report 8 tests with 0 failures/errors, and
+  that CI checks, the JUnit XML must report 15 tests with 0 failures/errors, and
   a release-evidence step cross-checks git SHA, skip OFF in every CMakeCache,
   verified KO and packaged manifests with the same hash, and the APK hash.
   Only the informational provenance uploads remain best-effort.
+- **Phase 3 Java gates (host-only).** `PreferenceIntegrity.java` quarantines a
+  failed SharedPreferences write in memory and on disk (durable marker in
+  device-protected storage, same-key recovery, fail closed on marker I/O error).
+  `ExploitRunner` returns rc 9 for `/dev/df` and rc 8 for uncertain preferences;
+  `StatusRc` maps rc 0–9 plus the additive 64 recovery bit truthfully. No device
+  run has exercised these paths; they are not a substitute for on-device
+  validation.
 - **Auto Soft Reboot / Start on Boot remain disabled by default and
   unvalidated** on S9180ZHU8GZIF.
-- **P1-08 release gate.** The bundled loaders hardcode
+- **P1-08 release gate — still OPEN.** The bundled loaders hardcode
   `/data/local/tmp/.ksud-stage`; race-at-creation is fixed, but a `shell`-uid
   process could still swap the staged file before the loader renames it. This
   cannot be closed without rebuilding the loaders and is a release gate.
+  Phase 3 only documents the Java-side gating; documenting a gate is not a fix.
 
 References
 ----------

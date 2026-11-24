@@ -43,6 +43,16 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > Start on Boot stay disabled by default and unvalidated. The residual
 > `/data/local/tmp/.ksud-stage` trust issue (P1-08) cannot be closed without
 > rebuilding the bundled loaders and is a release gate.
+> Round-3 PR #3 phase 3 adds a process-wide SharedPreferences quarantine with a
+> durable device-protected marker: a failed preference write (memory/disk
+> divergence) blocks LAUNCH ROOT (rc 8) and boot-time launching, and a lingering
+> `/dev/df` now returns rc 9 ("already hooked") instead of rc 0. The Java rc
+> table (including rc 7, 8, 9 and the additive 64 recovery-failed bit) is
+> truthful — no toast claims verified root or a confirmed reboot. If the marker
+> cannot be persisted, "Start on Boot" is disabled fail-closed. All of this is
+> host-only JVM testing (15 tests), **UNVALIDATED on device**; P1-08 remains
+> **OPEN** and documenting it is not a fix. Auto Soft Reboot and Start on Boot
+> stay disabled by default and unvalidated.
 
 ## FAQ
 
