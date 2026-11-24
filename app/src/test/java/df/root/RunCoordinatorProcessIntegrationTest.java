@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove coordinator ownership spans child exit and final stdout EOF. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): verify operation-ID binding survives the full supervised process lifecycle. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

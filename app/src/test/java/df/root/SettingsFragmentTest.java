@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify modal consent and durable settings-state reflection. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): recheck settings observation against operation-ID-bound run admission. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify Activity detachment, service-only requests, coordinator observation, and single-flight UI gating. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): recheck service request wiring against operation-ID publication. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

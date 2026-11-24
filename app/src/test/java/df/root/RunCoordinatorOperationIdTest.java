@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove the admitted operation ID crosses the coordinator engine boundary. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): verify the same ID is published for the native run-config artifact. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

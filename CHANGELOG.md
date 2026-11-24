@@ -85,6 +85,77 @@ repository is public, so Actions artifacts are not private, and the unsigned
 APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
+## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (uncommitted)
+
+Architecture repairs on top of `4.8-gzif`; `versionCode`/`versionName` are
+unchanged (408 / `4.8-gzif`). No runtime payload, firmware target, or SUCCESS
+product decision was widened. Summary by phase:
+
+- **Phase 0 — build/test foundation.** Release signing made optional (an absent
+  `signing.properties` yields an unsigned release that still configures; a
+  present but incomplete file fails clearly). Pinned JUnit/Robolectric test
+  dependencies and Android unit-test resources added. Independent CI app-checks
+  job runs unit tests and lint without secrets, a device, or the gitignored KO;
+  `--no-tests=error` prevents an empty suite from passing. `app/src/main/res/xml`
+  added to the Makefile APK inputs. Loader SHA-256 pins are owned once by Gradle.
+- **Phase 1 — side-effect-free preflight and result contract.** Canonical
+  `SuManager` allowlist (`me.weishu.kernelsu` → `libksud.so`,
+  `com.rifsxd.ksunext` → `libksudnext.so`) with per-manager pinned bundled
+  loaders and **no implicit fallback** to the manager APK. SHA-256 pin, regular
+  non-symlink, owner-user, log-buffer, and exact firmware/kernel gates all run
+  before staging, IpSec allocation, or process start. Typed `RunResult` mapping
+  with collision-free unknown handling; rc=1 is broad bootstrap failure; SUCCESS
+  keeps owner semantics but carries `LATE_LOAD_COMPLETED` internal detail. No
+  root probe was added.
+- **Phase 2 — durable configuration and soft-reboot consent.** Serialized
+  off-main-thread `ConfigurationRepository` with checked `commit()` and
+  saving/verified/error states; failed or unverified writes block run admission.
+  Immutable `RunConfig`; versioned soft-reboot acknowledgement with legacy
+  enabled → safe OFF migration and a durable modal; unattended boot soft reboot
+  remains disabled.
+- **Phase 3 — operation ownership.** Process-scoped single-flight `RunCoordinator`
+  rejects duplicates and freezes configuration; Direct Boot-aware `specialUse`
+  `ExploitService` owns process lifetime, notification, and a timed partial
+  WakeLock and returns `START_NOT_STICKY`. The Activity is detach-only on destroy;
+  a supervised child drains stdout asynchronously, uses a timed wait, and keeps
+  indeterminate outcomes owned until actual exit (no forced kill, no retry).
+  Manager/settings controls are locked while work is active.
+- **Phase 4 — native snapshot, completion, staging.** Java publishes an atomic,
+  versioned `dfroot_run_config` artifact; native bootstrap parses only that
+  artifact. Run-scoped terminal markers (`rc=0` success, `rc=1` error,
+  `rc=4` soft-reboot success, `rc=6` soft-reboot failure) are written only after
+  bootstrap work completes; `/dev/dfm6` stays an owner-visible **progress**
+  diagnostic. Late-load wait is bounded (60 s; timeout → rc=1), soft-reboot
+  command wait is bounded (30 s; failure/timeout → rc=6). `/data/local/tmp/.ksud-stage`
+  staging uses sticky-bit protection, `O_EXCL|O_NOFOLLOW`, verified descriptor
+  copy/fsync/fchmod, and guaranteed directory-mode restoration.
+- **Phase 5 — boot integration.** `BootReceiver` validates the broadcast and
+  durably claims `Settings.Global.BOOT_COUNT` in device-protected storage before
+  starting the foreground service; locked/unlocked broadcasts coalesce, so at
+  most **one attempt per boot** and no silent replay after process death. Boot
+  soft reboot stays disabled; boot FGS eligibility is not hardware-validated.
+
+Files/areas changed: `app/src/main/java/df/root/*` (new coordinator, service,
+configuration repository/store, run-config artifact, preflight, result mapping,
+boot-claim path, narrow Java seams), `app/src/main/jni/*` (`run_config_codec`,
+`run_status`, `loader_stage`, `bootstrap.c`, `exp.c`, CMake wiring),
+`app/src/main/jni/host-tests/*`, `app/src/test/java/df/root/*`,
+`app/src/main/AndroidManifest.xml`, `app/src/main/res/{xml,values,drawable}/*`,
+`app/build.gradle.kts`, `.github/workflows/build.yml`, `Makefile`, and
+`tasks/{plan,todo}.md`. Every modified GPL-covered source file carries a dated
+per-file notice (`NOTICE`).
+
+Validation (2026-11-25, non-privileged host only): **408 JVM tests** (0
+failures/errors/skips), **113 host CTest** cases (0 failures), `lintDebug` **0
+errors** (21 warnings present before the Phase 6 docs-only edits, one a
+`PrivateApi` warning at `AndroidRunEnvironment.java:93` in a file added by PR #2
+— not all 21 predate PR #2), `git diff --check` clean, loader pins match
+the bundled binaries, zero secret-pattern hits, and no generated/build/KO files
+tracked. **No hardware, device, ADB, payload, privileged-container, cold-boot,
+soft-reboot, or APK-assembly validation was performed for this revision.** APK
+assembly still requires the gitignored `app/src/main/jni/ko/dfroot-android13-5.15.ko`
+(built via podman + DDK or fetched from CI). The 2026-11-17 device runs below are
+historical evidence only, not validation of this architecture.
 
 ## 4.8-gzif (2026-11-17)
 

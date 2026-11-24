@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove atomic run ownership, uncertainty retention, cleanup, and bounded observation. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): cover the admitted operation ID passed to the production engine. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

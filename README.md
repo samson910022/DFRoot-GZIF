@@ -4,7 +4,7 @@
 
 # DFRoot [DirtyFrag (CVE-2026-43284)]
 
-DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a kernel page cache write primitive — to load a custom kernel module without requiring an unlocked bootloader. It is intentionally designed to be SU Manager agnostic and works with any KernelSU-compatible SU manager.
+DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a kernel page cache write primitive — to load a custom kernel module without requiring an unlocked bootloader. This fork supports exactly two SU managers (see [Supported managers](#supported-managers)); it is **not** manager-agnostic and does not accept arbitrary KernelSU-compatible managers.
 
 > [!IMPORTANT]
 > Before hitting that fork button, consider making a pull request instead :)
@@ -24,6 +24,51 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
 
+## Supported managers
+
+DFRoot GZIF supports exactly two manager packages. Each is bound to one bundled,
+SHA-256-pinned loader; there is **no implicit fallback** and no manager-agnostic mode.
+
+| Manager package | Bundled loader (pinned) | Loader lineage |
+|---|---|---|
+| `me.weishu.kernelsu` (KernelSU) | `libksud.so` (Samsung-patched ksud 3.3.0) | classic KernelSU |
+| `com.rifsxd.ksunext` (KernelSU-Next) | `libksudnext.so` (Samsung-patched ksud 3.4.2) | KernelSU-Next |
+
+Both loaders ship under `app/src/main/jniLibs/arm64-v8a/`. Preflight rejects any
+other package, a missing/renamed/symlinked loader, or a loader whose SHA-256 does
+not match its pin **before** staging, IpSec allocation, or process start. The
+manager APK's own `libksud.so` is never used as a loader fallback: the selected
+manager only supplies the `--package-name` argument and must be installed and
+visible. Adding another manager requires a matching pinned bundled loader plus
+device validation; see `PORTING-GZIF.md`.
+
+## Result contract (what "SUCCESS" means)
+
+`/dev/dfm6` remains the owner-visible **late-load SUCCESS progress diagnostic**;
+when that legacy marker is observed the app still prints `ksud start: SUCCESS`.
+It is progress only. Native now returns **only after a run-scoped terminal marker
+bound to the admitted operation ID** is observed (or the reader deadline expires),
+so a global marker alone can no longer end a run.
+
+| Code | Meaning |
+|---|---|
+| `0` | normal terminal success: the admitted run published its success marker |
+| `1` | bootstrap/terminal error — run-config, module, staging, marker conflict, or **late-load timeout** |
+| `2` | native setup/marker timeout — no valid terminal marker within the reader deadline, including a failed terminal write (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
+| `3` | native patch failure |
+| `4` | soft-reboot command returned success |
+| `6` | soft-reboot command failed |
+
+A late-load timeout is a rc=1 bootstrap/terminal error, never a success. **No root
+probe is added**: the app does not run `su` or inspect root state to decide a
+result. Verify root yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
+
+## Operation ownership, boot, and soft reboot
+
+- A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death.
+- **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. Foreground-service start eligibility from boot still requires hardware validation.
+- **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
+
 ## FAQ
 
 **Q: Log says patching failed and that my device isn't vulnerable**
@@ -35,7 +80,7 @@ A: Sorry, there is no fix. Either:
 
 **Q: Log says "SUCCESS" or "ksud exited with error", but I don't have root**
 
-A: First, try disabling "Auto Soft Reboot" in DFRoot settings if you have it enabled, otherwise https://github.com/diabl0w/DFRoot/discussions/69
+A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final result now waits for a run-scoped terminal marker, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). If "Auto Soft Reboot" is enabled, disable it: manual soft reboot is experimental and unvalidated on GZIF and has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6).
 
 **Q: I installed a module and now I can't launch root without crashing**
 
@@ -51,20 +96,16 @@ A: Typically Android will detect bootloops and boot you into Safe Mode, otherwis
 > I am not responsible for any damage to your device.
 
 1. Install [DFRoot](https://github.com/diabl0w/DFRoot/releases/latest)
-2. Install a SU Manager from below:
-   - Samsung:
-     - [diabl0w's KernelSU](https://github.com/diabl0w/KernelSU/releases/latest)
-   - Other:
-     - [KernelSU](https://github.com/tiann/KernelSU/releases/latest)
-     - [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases/latest)
-     - [KowSU](https://github.com/KOWX712/KernelSU/releases/latest)
+2. Install **one** of the two supported SU managers:
+   - [KernelSU](https://github.com/tiann/KernelSU/releases/latest) — package `me.weishu.kernelsu` (uses bundled `libksud.so`)
+   - [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases/latest) — package `com.rifsxd.ksunext` (uses bundled `libksudnext.so`)
 
-> If you have a custom KernelSU fork for a specific manufacturer, please make a pull request to add it here.
+> Other managers (including KowSU and unlisted forks) are **not supported** and are rejected by preflight. Adding a manager requires a matching pinned bundled loader and device validation — it is not a spinner-list change.
 
 ## Features
 
-- Start on Boot
-- Automatic soft reboot (if `late-load --soft-reboot` supported by your SU Manager)
+- Start on Boot (one attempt per boot via a durable `BOOT_COUNT` claim; boot foreground-service eligibility still needs hardware validation)
+- Soft reboot (manual only; experimental and unvalidated on GZIF — unattended boot soft reboot is disabled)
 - RO Partition Protection
 - Disable all KernelSU modules, to recover from a broken one
 - Shizuku not needed — regain root without WiFi!
@@ -94,7 +135,7 @@ The exploit uses this primitive to patch shellcode into `libc++.so` in the kerne
    - Bypasses DEFEX via kprobes (if applicable)
    - Calls `call_usermodehelper` to run our custom bootstrap code
 
-6. **bootstrap.c** — performs various functions and finally launches the su daemon from your installed SU Manager.
+6. **bootstrap.c** — reads the atomic run-config artifact, performs the setup/hardened staging, and launches the bundled Samsung-patched loader for the selected manager (not the manager APK's own `libksud.so`) via `late-load`; it then publishes a run-scoped terminal result. See [Supported managers](#supported-managers) and [Result contract](#result-contract-what-success-means).
 
 ## Building
 
@@ -142,6 +183,9 @@ hash above identifies the CI/release artifact.
 Then: `./gradlew :app:assembleRelease` →
 `app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
 `adb install -r` → enable adb → open **DFRoot GZIF** → LAUNCH ROOT.
+APK assembly requires the gitignored `app/src/main/jni/ko/dfroot-android13-5.15.ko`;
+no KO is committed, and assembling without it would require a privileged DDK
+container.
 
 ### Signing variants and CI events
 
@@ -177,6 +221,27 @@ Then: `./gradlew :app:assembleRelease` →
 > The release signing key is new. Android refuses to overwrite-update an
 > installed application with an APK signed by a different key: uninstall any
 > existing DFRoot GZIF installation before installing a signed release build.
+Signing is **optional**: if `signing.properties` exists at the repo root it must
+define `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`;
+if it is absent, release builds are unsigned and still configure. The file is
+gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
+`SIGN_ALIAS` (no default credentials); CI uses the `KEYSTORE` secrets.
+
+## Validation status (2026-11-25)
+
+Non-privileged host verification only:
+
+- **408** JVM unit tests (`./gradlew :app:testDebugUnitTest`), 0 failures/errors/skips.
+- **113** host CTest cases, 0 failures.
+- `./gradlew :app:lintDebug`: **0 errors** (21 warnings present before the Phase 6 docs-only edits; one is a `PrivateApi` warning at `AndroidRunEnvironment.java:93`, a file added by PR #2 — so not all 21 predate PR #2).
+- `git diff --check`: clean; loader SHA-256 pins match the bundled `jniLibs`
+  binaries; no generated/build outputs, secrets, or KO files are tracked.
+
+**No device, hardware, ADB, payload execution, privileged-container, cold-boot,
+soft-reboot, or APK-assembly validation was performed for this revision.** The
+2026-11-17 hardware runs (run6/run8) remain historical evidence only; see
+`CHANGELOG.md` and `PORTING-GZIF.md`. The gitignored KO above is required before
+any APK can be assembled.
 
 ## Credits
 

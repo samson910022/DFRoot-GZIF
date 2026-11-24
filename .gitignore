@@ -35,3 +35,5 @@ app/src/main/jni/ko/*.ko
 # stripped CI artifact placed at app/src/main/jni/ko/dfroot-android13-5.15.ko
 # is 13,384 B and not byte-identical; both are rebuilt, not committed.
 lkm/dfroot.ko
+# All other DDK/LKM build outputs are generated and never committed.
+lkm/*.ko

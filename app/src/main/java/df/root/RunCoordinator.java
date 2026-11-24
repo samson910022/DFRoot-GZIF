@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): add process-scoped single-flight operation ownership and immutable observation. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): retain application-scoped device-protected context for pre-unlock engine work. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): thread the admitted operation ID through the coordinator engine boundary. See NOTICE.
 package df.root;
 
 import android.content.Context;
