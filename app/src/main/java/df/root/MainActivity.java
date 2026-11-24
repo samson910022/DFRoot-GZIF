@@ -10,6 +10,7 @@ import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -43,6 +44,9 @@ public class MainActivity extends Activity implements IReporter {
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private final Executor mExec = Executors.newSingleThreadExecutor();
     private int mValidSuManagerPos = 0;
+    // Keeps the CPU awake across the up-to-70s soft-reboot outcome wait in
+    // ExploitRunner.run(); a timeout bounds it in case the native binary hangs.
+    private PowerManager.WakeLock mWakeLock;
 
     @Override
     public void report(String msg) {
@@ -57,6 +61,8 @@ public class MainActivity extends Activity implements IReporter {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         mDeCtx = createDeviceProtectedStorageContext();
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:manual");
         setContentView(R.layout.activity_main);
 
         getActionBar().setSubtitle("@diabl0w github/xda");
@@ -90,7 +96,8 @@ public class MainActivity extends Activity implements IReporter {
             }
         }
         if (!savedFound && saved != null) { // Saved manager was uninstalled
-            prefs.edit().remove(ExploitRunner.PREF_SU_MANAGER).apply();
+            // commit(): the native bootstrap reads the prefs XML from disk.
+            prefs.edit().remove(ExploitRunner.PREF_SU_MANAGER).commit();
         }
 
         spinnerSuManager.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
@@ -99,7 +106,8 @@ public class MainActivity extends Activity implements IReporter {
                 SuManagerEntry e = entries.get(pos);
                 if (e.packageName == null) return;
                 mValidSuManagerPos = pos;
-                prefs.edit().putString(ExploitRunner.PREF_SU_MANAGER, e.packageName).apply();
+                // commit(): the native bootstrap reads the prefs XML from disk.
+                prefs.edit().putString(ExploitRunner.PREF_SU_MANAGER, e.packageName).commit();
                 updateRunButton();
             }
             @Override
@@ -135,17 +143,23 @@ public class MainActivity extends Activity implements IReporter {
     }
 
     private void runExploit() {
+        // Bound the lock so a hung native binary cannot keep the device awake
+        // forever; 120s comfortably covers the up-to-70s soft-reboot wait.
+        mWakeLock.acquire(120000);
         try {
             int rc = ExploitRunner.run(mDeCtx, this);
             String msg = rc == 0 ? "DFRoot: SUCCESS"
                        : rc == 1 ? "DFRoot: Error - ksud nonzero exit"
                        : rc == 2 ? "DFRoot: Error - check logcat & dmesg"
-                       : "DFRoot: Error - failed to patch files";
+                       : rc == 3 ? "DFRoot: Error - failed to patch files"
+                       : rc == 4 ? "DFRoot: SOFT REBOOT PENDING (root active)"
+                       : "DFRoot: Error - unknown result";
             mMain.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");
         } finally {
+            if (mWakeLock.isHeld()) mWakeLock.release();
             mMain.post(this::updateRunButton);
         }
     }

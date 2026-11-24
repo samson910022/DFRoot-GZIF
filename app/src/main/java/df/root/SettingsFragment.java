@@ -36,7 +36,7 @@ public class SettingsFragment extends PreferenceFragment {
         softRebootPref.setPersistent(false);
         softRebootPref.setChecked(dePrefs.getBoolean("soft_reboot", false));
         softRebootPref.setOnPreferenceChangeListener((pref, value) -> {
-            dePrefs.edit().putBoolean("soft_reboot", (Boolean) value).apply();
+            dePrefs.edit().putBoolean("soft_reboot", (Boolean) value).commit();
             return true;
         });
 
@@ -44,7 +44,7 @@ public class SettingsFragment extends PreferenceFragment {
         disableModulesPref.setPersistent(false);
         disableModulesPref.setChecked(dePrefs.getBoolean("disable_modules", false));
         disableModulesPref.setOnPreferenceChangeListener((pref, value) -> {
-            dePrefs.edit().putBoolean("disable_modules", (Boolean) value).apply();
+            dePrefs.edit().putBoolean("disable_modules", (Boolean) value).commit();
             return true;
         });
     }

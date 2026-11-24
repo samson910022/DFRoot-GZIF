@@ -26,25 +26,29 @@ foreach(required IN ITEMS KO_FILE KO_EXPECTED_SHA256S KO_STAMP)
     endif()
 endforeach()
 
-if(DFROOT_SKIP)
-    set(stamp_text "SKIPPED: KO hash check disabled (DFROOT_SKIP_KO_HASH_CHECK=ON)\n")
-    message(STATUS "dfroot.ko SHA-256 check SKIPPED (DFROOT_SKIP_KO_HASH_CHECK=ON)")
-else()
-    if(NOT EXISTS "${KO_FILE}")
-        message(FATAL_ERROR
-            "dfroot.ko SHA-256 verification FAILED: blob not found:\n"
-            "  ${KO_FILE}\n"
-            "The LKM is gitignored and must be supplied before the Gradle build "
-            "(CI downloads the DDK artifact into app/src/main/jni/ko/). Restore "
-            "the blob there. For local experiments only, reconfigure with "
-            "-DDFROOT_SKIP_KO_HASH_CHECK=ON; never use that for CI/release builds.")
-    endif()
-    if(IS_DIRECTORY "${KO_FILE}")
-        message(FATAL_ERROR
-            "dfroot.ko SHA-256 verification FAILED: path is a directory:\n"
-            "  ${KO_FILE}")
-    endif()
+# The blob must exist even when the hash check is skipped: exp.c still .incbin's
+# it, so a missing/unreadable KO can never silently produce an artifact. Check
+# this before the DFROOT_SKIP branch so skip mode is fail-closed too.
+if(NOT EXISTS "${KO_FILE}")
+    message(FATAL_ERROR
+        "dfroot.ko SHA-256 verification FAILED: blob not found:\n"
+        "  ${KO_FILE}\n"
+        "The LKM is gitignored and must be supplied before the Gradle build "
+        "(CI downloads the DDK artifact into app/src/main/jni/ko/). Restore "
+        "the blob there. Even with -DDFROOT_SKIP_KO_HASH_CHECK=ON the blob must "
+        "exist; skipping only disables the hash check, never the .incbin input. "
+        "Never use skip mode for CI/release builds.")
+endif()
+if(IS_DIRECTORY "${KO_FILE}")
+    message(FATAL_ERROR
+        "dfroot.ko SHA-256 verification FAILED: path is a directory:\n"
+        "  ${KO_FILE}")
+endif()
 
+if(DFROOT_SKIP)
+    set(stamp_text "SKIPPED: KO hash check disabled (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}\n")
+    message(STATUS "dfroot.ko SHA-256 check SKIPPED (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}")
+else()
     file(SHA256 "${KO_FILE}" actual)
     string(TOLOWER "${actual}" actual)
 

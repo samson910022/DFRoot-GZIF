@@ -1,4 +1,5 @@
 /* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
+/* Modified 2026-11-24 (PR #3 hardening): secure staging, fail-closed markers and wait handling. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -8,10 +9,15 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define BLKROSET   0x125d
-#define KSUD_STAGE "/data/user_de/0/df.root/ksud"
+/* The bundled Samsung-patched loaders have /data/local/tmp/.ksud-stage baked
+ * into their self-staging constant, so the path must stay. Security is
+ * preserved by stage_file() (unlink + O_EXCL|O_NOFOLLOW + 0700 + fsync). */
+#define KSUD_STAGE "/data/local/tmp/.ksud-stage"
+#define KSUD_STAGE_SRC "/data/user_de/0/df.root/ksud"
 #define KSUD       "/data/adb/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
 #define MODULES_DIR "/data/adb/modules"
@@ -20,10 +26,10 @@ static int pref_true(const char *buf, const char *key)
 {
     char needle[64];
     snprintf(needle, sizeof(needle), "name=\"%s\"", key);
-    char *p = strstr(buf, needle);
+    const char *p = strstr(buf, needle);
     if (!p) return 0;
-    char *tag_end = strchr(p, '>');
-    char *v = strstr(p, "value=\"true\"");
+    const char *tag_end = strchr(p, '>');
+    const char *v = strstr(p, "value=\"true\"");
     return v && tag_end && v < tag_end;
 }
 
@@ -60,7 +66,7 @@ static int adopt_zygote_env(void)
     FILE *f = popen("pidof zygote64 zygote", "r");
     if (!f) return -1;
     int pid = 0;
-    fscanf(f, "%d", &pid);
+    if (fscanf(f, "%d", &pid) != 1) pid = 0;
     pclose(f);
     if (!pid) return -1;
 
@@ -73,8 +79,11 @@ static int adopt_zygote_env(void)
     close(fd);
     if (n <= 0) return -1;
     buf[n] = '\0';
-    for (char *p = buf, *end = buf + n; p < end; p += strlen(p) + 1)
+    for (char *p = buf, *end = buf + n; p < end; p += strlen(p) + 1) {
+        /* Do not inherit dynamic-loader controls from zygote. */
+        if (strncmp(p, "LD_", 3) == 0) continue;
         putenv(p);
+    }
     return 0;
 }
 
@@ -120,11 +129,13 @@ static int set_partitions_ro(void)
     return 0;
 }
 
+/* Returns 1 when a ksud late-load process exists, 0 when it is absent, and
+ * -1 when /proc cannot be scanned. Unknown must never be treated as absent. */
 static int late_load_running(void)
 {
     DIR *d = opendir("/proc");
     if (!d)
-        return 0;
+        return -1;
     struct dirent *e;
     char path[64], buf[256];
     int found = 0;
@@ -163,16 +174,77 @@ static int run_ctx(const char *ctx, char *const argv[])
         execv(argv[0], argv);
         _exit(127);
     }
-    int status;
-    TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
+    int status = 0;
+    if (TEMP_FAILURE_RETRY(waitpid(pid, &status, 0)) < 0)
+        return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
-static void touch(const char *path)
+/* Returns 0 on success. access(path, F_OK) only needs search permission on
+ * /dev, so markers stay 0600; only root can create entries in /dev anyway. */
+static int touch(const char *path)
 {
     int fd = open(path, O_CREAT | O_WRONLY, 0600);
-    if (fd >= 0)
-        close(fd);
+    if (fd < 0) {
+        printf("bootstrap: touch %s failed: %s\n", path, strerror(errno));
+        return -1;
+    }
+    close(fd);
+    return 0;
+}
+
+/* Copy src into dst. O_EXCL|O_NOFOLLOW + 0700 close the classic symlink race
+ * at creation time. The destination path itself is fixed by the bundled
+ * loaders' baked-in staging constant (/data/local/tmp/.ksud-stage), so a
+ * shell-uid process could still replace the file between close() and the
+ * loader's rename(); that residual risk is documented in PORTING-GZIF.md and
+ * can only be removed by rebuilding the loaders. */
+static int stage_file(const char *src, const char *dst)
+{
+    int sfd = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (sfd < 0) {
+        printf("bootstrap: open %s failed: %s\n", src, strerror(errno));
+        return -1;
+    }
+    unlink(dst);
+    int dfd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
+    if (dfd < 0) {
+        printf("bootstrap: create %s failed: %s\n", dst, strerror(errno));
+        close(sfd);
+        return -1;
+    }
+
+    char buf[65536];
+    for (;;) {
+        ssize_t r = read(sfd, buf, sizeof(buf));
+        if (r == 0) break;
+        if (r < 0) {
+            printf("bootstrap: read %s failed: %s\n", src, strerror(errno));
+            goto fail;
+        }
+        size_t off = 0;
+        while (off < (size_t)r) {
+            ssize_t w = write(dfd, buf + off, (size_t)r - off);
+            if (w <= 0) {
+                printf("bootstrap: write %s failed: %s\n", dst, strerror(errno));
+                goto fail;
+            }
+            off += (size_t)w;
+        }
+    }
+    if (fchmod(dfd, 0700) < 0 || fsync(dfd) < 0) {
+        printf("bootstrap: finalize %s failed: %s\n", dst, strerror(errno));
+        goto fail;
+    }
+    close(sfd);
+    close(dfd);
+    return 0;
+
+fail:
+    close(sfd);
+    close(dfd);
+    unlink(dst);
+    return -1;
 }
 
 /* Mark every installed module disabled before ksud runs. A broken module
@@ -183,16 +255,23 @@ static int disable_modules(void)
     if (!dir)
         return -1;
 
+    int rc = 0;
     struct dirent *ent;
     while ((ent = readdir(dir))) {
         if (ent->d_name[0] == '.')
             continue;
         char path[256];
         snprintf(path, sizeof(path), MODULES_DIR "/%s/disable", ent->d_name);
-        touch(path);
+        if (touch(path) != 0) rc = -1;
     }
     closedir(dir);
-    return 0;
+    return rc;
+}
+
+static long elapsed_ms(const struct timespec *start, const struct timespec *now)
+{
+    return (now->tv_sec - start->tv_sec) * 1000L +
+           (now->tv_nsec - start->tv_nsec) / 1000000L;
 }
 
 int main(void)
@@ -222,41 +301,48 @@ int main(void)
     }
 
     touch("/dev/dfm5");
-    mkdir("/data/adb", 0755);
-    // Stage bundled ksud to FZG1 staging path; the FZG1 ksud renames it to /data/adb/ksud.
-    if (system("cp /data/user_de/0/df.root/ksud /data/local/tmp/.ksud-stage") != 0) {
+    mkdir("/data/adb", 0700);
+    if (stage_file(KSUD_STAGE_SRC, KSUD_STAGE) != 0) {
         touch("/dev/dfme2");
         return 1;
     }
-    if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load", "--package-name", su_manager, NULL }) == 0) {
-        /* CRITICAL: /dev/dfmsr must be touched BEFORE /dev/dfm6. exp.c scans
-         * its marker table in array order within one poll; if dfm6 (rc=0)
-         * were seen first the App would print SUCCESS and only afterwards the
-         * device hard-reboots, misleading the user. dfmsr (rc=4) makes exp.c
-         * report SOFT REBOOT PENDING even though dfm6 also exists. The dfm6
-         * semantics (ksud late-load SUCCESS) are unchanged. */
+    if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--package-name", su_manager, NULL }) == 0) {
+        /* Publish root-active (dfmsr) BEFORE success (dfm6). If publishing
+         * dfmsr fails, do not publish dfm6: a false rc=0 is worse than a
+         * timeout that asks the user to check the log. */
+        int dfmsr_ok = 1;
         if (soft_reboot)
-            touch("/dev/dfmsr");
-
-        touch("/dev/dfm6");
+            dfmsr_ok = touch("/dev/dfmsr");
+        if (!soft_reboot || dfmsr_ok) {
+            if (touch("/dev/dfm6") != 0) {
+                touch("/dev/dfme2");
+                return 1;
+            }
+        } else {
+            return 1;
+        }
 
         if (soft_reboot) {
-            /* Bound the wait: never block indefinitely. 60 x 1s is well under
-             * the 10-minute WakeLock held by the App. */
-            int waited = 0;
-            while (waited < 60 && late_load_running()) {
+            /* Bound the wait with a monotonic clock, not sleep iterations. */
+            struct timespec start, now;
+            clock_gettime(CLOCK_MONOTONIC, &start);
+            int lr = late_load_running();
+            while (lr > 0) {
+                clock_gettime(CLOCK_MONOTONIC, &now);
+                if (elapsed_ms(&start, &now) >= 60000)
+                    break;
                 sleep(1);
-                waited++;
+                lr = late_load_running();
             }
-            if (late_load_running()) {
-                /* Still running at the bound. Root is already active (dfmsr
-                 * -> rc=4), so skip soft-reboot instead of waiting forever. */
+            if (lr != 0) {
+                /* Still running or unscannable: never authorize a reboot on
+                 * unknown state. Root is already active (dfmsr -> rc=4). */
                 touch("/dev/dfmw2");
             } else {
                 int sr_rc = run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
                 if (sr_rc != 0) {
-                    /* soft-reboot command failed. Do NOT mark root as failed:
-                     * dfmsr already told exp.c that root is active. */
+                    /* soft-reboot failed. Do NOT mark root as failed: dfmsr
+                     * already told exp.c that root is active. */
                     touch("/dev/dfmw3");
                 }
             }
@@ -266,6 +352,6 @@ int main(void)
          * the genuine failure (dfme2 -> rc=1). */
         touch("/dev/dfme2");
     }
-        
+
     return 0;
 }
