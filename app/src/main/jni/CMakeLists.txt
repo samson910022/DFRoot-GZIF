@@ -1,6 +1,7 @@
 # Modified 2026-11-17 (DFRoot GZIF): KO_FILES reduced to android13-5.15 only. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): share the strict run-config codec with both native binaries. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): compile the run-scoped terminal marker protocol into both native binaries. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): link the hardened loader-staging module into bootstrap. See NOTICE.
 cmake_minimum_required(VERSION 3.22)
 project(dfroot)
 enable_language(ASM)
@@ -45,7 +46,7 @@ set_source_files_properties(exp.c PROPERTIES
 target_link_libraries(dfroot log)
 target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 
-add_executable(bootstrap bootstrap.c run_config_codec.c run_status.c)
+add_executable(bootstrap bootstrap.c run_config_codec.c run_status.c loader_stage.c)
 set_target_properties(bootstrap PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"

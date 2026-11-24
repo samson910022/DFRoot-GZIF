@@ -3,6 +3,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): re-probe relocated roots, bound every test, and clean mktemp fixtures. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): add nonprivileged terminal marker write/classifier tests. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover shared progress markers, composed deadlines, exact fault branches, and malformed markers. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): add nonprivileged hardened loader-staging race tests with injectable directories. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -25,6 +26,18 @@ target_compile_options(run_config_codec_test PRIVATE -Wall -Wextra -Werror -peda
 add_executable(run_status_test run_status_test.c)
 target_link_libraries(run_status_test PRIVATE run_config_codec)
 target_compile_options(run_status_test PRIVATE -Wall -Wextra -Werror -pedantic)
+
+# Host-only library: the fault/mutation seams exist only here, never in the
+# production bootstrap binary that uses the same loader_stage.c source.
+add_library(loader_stage STATIC ../loader_stage.c)
+target_include_directories(loader_stage PUBLIC ..)
+target_compile_definitions(loader_stage PUBLIC _POSIX_C_SOURCE=200809L
+                           LOADER_STAGE_TEST_HOOKS)
+target_compile_options(loader_stage PRIVATE -Wall -Wextra -Werror -pedantic)
+
+add_executable(loader_stage_test loader_stage_test.c)
+target_link_libraries(loader_stage_test PRIVATE loader_stage)
+target_compile_options(loader_stage_test PRIVATE -Wall -Wextra -Werror -pedantic)
 
 enable_testing()
 
@@ -203,3 +216,97 @@ foreach(status_case IN ITEMS
                      "${CMAKE_CURRENT_SOURCE_DIR}/..")
     set_tests_properties(run_status.${status_case} PROPERTIES TIMEOUT 30)
 endforeach()
+
+# Staging tests add and restore a sticky bit, so their fixture root must honor
+# POSIX mode bits (including the 01000 bit) just like the run-config root. Probe
+# that explicitly instead of assuming a FUSE build directory behaves like /tmp.
+function(dfroot_probe_sticky_modes root result_var)
+    if(APPLE)
+        set(probe_stat stat -f %Lp)
+    else()
+        set(probe_stat stat -c %a)
+    endif()
+    set(probe_dir "${root}/.sticky_probe")
+    file(MAKE_DIRECTORY "${probe_dir}")
+    execute_process(COMMAND chmod 1700 "${probe_dir}"
+                    RESULT_VARIABLE probe_result OUTPUT_QUIET ERROR_QUIET)
+    if(probe_result EQUAL 0)
+        execute_process(COMMAND ${probe_stat} "${probe_dir}"
+                        OUTPUT_VARIABLE probe_mode OUTPUT_STRIP_TRAILING_WHITESPACE
+                        RESULT_VARIABLE probe_result ERROR_QUIET)
+    else()
+        set(probe_mode "")
+    endif()
+    file(REMOVE_RECURSE "${probe_dir}")
+    if(NOT probe_result EQUAL 0 OR NOT probe_mode STREQUAL "1700")
+        set(${result_var} FALSE PARENT_SCOPE)
+    else()
+        set(${result_var} TRUE PARENT_SCOPE)
+    endif()
+endfunction()
+
+set(LOADER_STAGE_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/loader-work")
+set(LOADER_STAGE_TEST_RELOCATED FALSE)
+if(UNIX)
+    dfroot_probe_sticky_modes("${CMAKE_CURRENT_BINARY_DIR}" STICKY_HONORED)
+    if(NOT STICKY_HONORED)
+        if(APPLE)
+            execute_process(COMMAND mktemp -d -t dfroot-loader-stage-tests
+                            OUTPUT_VARIABLE LOADER_STAGE_TEST_ROOT
+                            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        else()
+            execute_process(COMMAND mktemp -d -t dfroot-loader-stage-tests.XXXXXX
+                            OUTPUT_VARIABLE LOADER_STAGE_TEST_ROOT
+                            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        endif()
+        if(NOT EXISTS "${LOADER_STAGE_TEST_ROOT}")
+            message(FATAL_ERROR "loader-stage host tests require a mode-honoring filesystem for fixtures")
+        endif()
+        dfroot_probe_sticky_modes("${LOADER_STAGE_TEST_ROOT}" RELOCATED_STICKY_HONORED)
+        if(NOT RELOCATED_STICKY_HONORED)
+            message(FATAL_ERROR "relocated loader-stage fixture root does not honor sticky modes: ${LOADER_STAGE_TEST_ROOT}")
+        endif()
+        set(LOADER_STAGE_TEST_RELOCATED TRUE)
+        message(STATUS "loader-stage fixtures relocated to ${LOADER_STAGE_TEST_ROOT} (build directory ignores sticky modes)")
+    endif()
+endif()
+
+file(MAKE_DIRECTORY "${LOADER_STAGE_TEST_ROOT}")
+foreach(stage_case IN ITEMS
+        normal
+        preexisting_regular
+        preexisting_symlink
+        preexisting_fifo
+        preexisting_directory
+        source_symlink
+        source_fifo
+        source_directory
+        source_missing
+        staging_dir_symlink
+        staging_dir_regular
+        fault_write
+        fault_short_write
+        fault_fsync
+        fault_close
+        rename_failure
+        restore_failure
+        replacement_after_lstat
+        replacement_before_restore
+        private_before_exec
+        configure_defaults
+        no_shell
+        wiring)
+    add_test(NAME loader_stage.${stage_case}
+             COMMAND loader_stage_test ${stage_case} "${LOADER_STAGE_TEST_ROOT}/${stage_case}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/..")
+    set_tests_properties(loader_stage.${stage_case} PROPERTIES
+                         TIMEOUT 30 FIXTURES_REQUIRED loader_stage_fixtures)
+endforeach()
+
+if(LOADER_STAGE_TEST_RELOCATED)
+    add_test(NAME loader_stage.cleanup_fixtures
+             COMMAND /bin/sh -c
+                     "find '${LOADER_STAGE_TEST_ROOT}' -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +")
+    set_tests_properties(loader_stage.cleanup_fixtures PROPERTIES
+                         TIMEOUT 30 FIXTURES_CLEANUP loader_stage_fixtures)
+endif()

@@ -2,6 +2,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): read only the admitted run-config artifact, never SharedPreferences XML. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): publish checked run-scoped terminal markers and bound the late-load wait. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): use the shared composed deadlines and bound the soft-reboot command wait without killing. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): replace shell cp with hardened sticky-bit exclusive staging and unconditional mode restoration. See NOTICE. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -14,6 +15,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "loader_stage.h"
 #include "run_config_codec.h"
 #include "run_status.h"
 
@@ -269,14 +271,31 @@ int main(void)
 
     touch("/dev/dfm5");
     mkdir("/data/adb", 0755);
-    // Stage bundled ksud to FZG1 staging path; the FZG1 ksud renames it to /data/adb/ksud.
-    if (system("cp /data/user_de/0/df.root/ksud /data/local/tmp/.ksud-stage") != 0) {
+    /* Stage bundled ksud to the FZG1 staging path; that loader renames the
+     * staged entry to /data/adb/ksud. No shell and no process signaling. */
+    struct loader_stage stage;
+    if (loader_stage_configure(&stage, NULL, NULL) != 0
+        || loader_stage_install(&stage, KSUD_STAGE) != 0) {
+        fprintf(stderr, "bootstrap: loader staging failed: %s\n",
+                loader_stage_last_error(&stage));
         touch("/dev/dfme2");
         return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
-    if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
-                                  "--package-name", config.manager, NULL }) != 0) {
+    int late_rc = run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
+                                           "--package-name", config.manager, NULL });
+    /* Restore the staging directory mode whether or not late-load succeeded.
+     * A restore failure is a generic bootstrap error (rc=1); the terminal
+     * marker protocol and all global progress markers stay unchanged. */
+    int restored = loader_stage_restore(&stage);
+    if (restored != 0) {
+        fprintf(stderr, "bootstrap: staging mode restoration failed: %s\n",
+                loader_stage_last_error(&stage));
+    }
+    if (late_rc != 0) {
         touch("/dev/dfme2");
+        return terminal(RUN_STATUS_TERMINAL_ERROR);
+    }
+    if (restored != 0) {
         return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
 
