@@ -103,7 +103,7 @@ add_custom_target(ko_sha256_check DEPENDS "${KO_VERIFY_STAMP}")
 # AGP only packages lib*.so, so the executable is named libdfroot.so and lands
 # in the APK's native lib dir. The app execs it from nativeLibraryDir, which is
 # executable (app data dir is not).
-add_executable(dfroot exp.c libcxx.S elf_parser.c status_poll.c)
+add_executable(dfroot exp.c libcxx.S elf_parser.c status_protocol.c)
 add_dependencies(dfroot splicehelper_bin ko_sha256_check)
 # exp.c .incbin's the build-dir splicehelper rather than a source-tree copy.
 target_compile_definitions(dfroot PRIVATE DFROOT_SPLICEHELPER_PATH=\"${SPLICEHELPER}\")
@@ -118,7 +118,7 @@ set_source_files_properties(exp.c PROPERTIES
 target_link_libraries(dfroot log)
 target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 
-add_executable(bootstrap bootstrap.c)
+add_executable(bootstrap bootstrap.c status_protocol.c final_status_publish.c)
 set_target_properties(bootstrap PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"

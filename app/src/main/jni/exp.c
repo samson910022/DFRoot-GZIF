@@ -15,10 +15,11 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
-#include "status_poll.h"
+#include "status_protocol.h"
 
 static const char kCrashDump[] = "/apex/com.android.runtime/bin/crash_dump64";
 static char    *libcxx_ko_target;
@@ -676,14 +677,93 @@ static int setup(int argc, char **argv) {
     return 0;
 }
 
-static int marker_exists(const char *path, void *ctx) {
+/* ---- Consumer-side status_io operations ----
+ * The app only reads the single atomically published /dev/dffinal outcome.
+ * Progress markers are logged once each for diagnostics and are NEVER used to
+ * derive the result (no marker precedence, no "root verified" claim). */
+#define DF_FINAL_PATH "/dev/dffinal"
+
+static const struct {
+    const char *path;
+    const char *msg;
+} kProgressMarkers[] = {
+    { "/dev/df",   "progress: hook armed (/dev/df)" },
+    { "/dev/dfm0", "progress: kernel module launched bootstrap" },
+    { "/dev/dfm1", "progress: bootstrap loading preferences" },
+    { "/dev/dfm2", "progress: bootstrap cloning zygote env" },
+    { "/dev/dfm3", "progress: bootstrap setting partitions ro" },
+    { "/dev/dfm4", "progress: bootstrap disabling ksu modules" },
+    { "/dev/dfm5", "progress: bootstrap starting SU daemon" },
+    { "/dev/dfmw0", "progress: warning - clone zygote env failed" },
+    { "/dev/dfmw1", "progress: warning - set partitions ro failed" },
+};
+static int progress_seen[sizeof(kProgressMarkers) / sizeof(kProgressMarkers[0])];
+
+/* Negative = clock failure. status_protocol treats it as ERR so the consumer
+ * cannot freeze on a sentinel 0 and wait forever (fail closed). */
+static int64_t exp_now_ms(void *ctx)
+{
+    struct timespec ts;
     (void)ctx;
-    return access(path, F_OK) == 0;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 ||
+        ts.tv_sec < 0) return -1;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void marker_report(const char *msg, void *ctx) {
+static void exp_sleep_ms(void *ctx, int ms)
+{
+    (void)ctx;
+    if (ms > 0) usleep((unsigned int)ms * 1000);
+}
+
+static void exp_report(void *ctx, const char *msg)
+{
     (void)ctx;
     printf("%s\n", msg);
+}
+
+static int exp_read_final(void *ctx, char *buf, size_t cap)
+{
+    size_t i;
+    int fd, n;
+    (void)ctx;
+
+    for (i = 0; i < sizeof(kProgressMarkers) / sizeof(kProgressMarkers[0]); i++) {
+        if (!progress_seen[i] && access(kProgressMarkers[i].path, F_OK) == 0) {
+            progress_seen[i] = 1;
+            printf("%s\n", kProgressMarkers[i].msg);
+        }
+    }
+
+    if (!buf || cap == 0) return -1;
+    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1; /* unavailable: consumer keeps polling */
+    n = (int)read(fd, buf, cap - 1);
+    close(fd);
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    return 0;
+}
+
+/* The consumer never publishes; these are fail-closed no-ops kept so the
+ * injected vtable is complete. They are never called on the consumer path. */
+static int exp_publish_final(void *ctx, const char *token)
+{
+    (void)ctx; (void)token; return -1;
+}
+static int exp_late_load_state(void *ctx)
+{
+    (void)ctx; return -1; /* unknown */
+}
+static int exp_wait_child(void *ctx, int timeout_ms)
+{
+    (void)ctx; (void)timeout_ms; return -1;
+}
+
+static void status_cleanup_cb(void *ctx)
+{
+    (void)ctx;
+    cleanup();
 }
 
 static int exploit(void) {
@@ -711,41 +791,49 @@ static int exploit(void) {
     printf("\n=== init  ===\n");
     createOrphanProcess();
 
-    /* dfmsr (rc=4) must precede dfm6 (rc=0): poll_status_markers scans in
-     * array order and root-active wins, so both files existing still reports
-     * SOFT REBOOT PENDING rather than SUCCESS. */
-    static const struct status_marker markers[] = {
-        { "/dev/df",    "libc++: loading custom module",                    -1, 0 },
-        { "/dev/dfm0",  "kernel module: launching bootstrap",               -1, 0 },
-        { "/dev/dfm1",  "bootstrap: loading app preferences file",          -1, 0 },
-        { "/dev/dfme0", "bootstrap: ERROR - reading prefs failed",           1, 0 },
-        { "/dev/dfm2",  "bootstrap: cloning zygote env",                    -1, 0 },
-        { "/dev/dfmw0", "bootstrap: WARNING - clone zygote env failed",     -1, 0 },
-        { "/dev/dfm3",  "bootstrap: setting partitions ro",                 -1, 0 },
-        { "/dev/dfmw1", "bootstrap: WARNING - set partitions ro failed",    -1, 0 },
-        { "/dev/dfm4",  "bootstrap: disabling ksu modules",                 -1, 0 },
-        { "/dev/dfme1", "bootstrap: ERROR - disable modules failed",         1, 0 },
-        { "/dev/dfm5",  "bootstrap: starting SU daemon",                    -1, 0 },
-        { "/dev/dfmsr", "ksud start: SOFT REBOOT PENDING (root active)",     4, 0 },
-        { "/dev/dfm6",  "ksud start: SUCCESS",                               0, 0 },
-        { "/dev/dfmw2", "bootstrap: WARNING - late-load wait timed out, soft-reboot skipped (root active)", -1, 1 },
-        { "/dev/dfmw3", "bootstrap: WARNING - ksud soft-reboot command failed (root active)", -1, 1 },
-        { "/dev/dfme2", "ksud start: ERROR - ksud nonzero exit",             1, 0 },
-    };
-    /* Covers bootstrap's 60 s late-load wait plus slack for the soft-reboot
-     * command, so late dfmw2/dfmw3 can actually be delivered. */
-    rc = poll_status_markers(markers, sizeof(markers)/sizeof(markers[0]),
-                             marker_exists, marker_report, NULL, 70000);
-done:
-    if (rc == 3) printf("patch: ERROR - failed to patch files\n");
+    {
+        struct status_io io;
+        enum df_outcome outcome = DF_OUTCOME_NONE;
+        enum df_wait_result wait;
+
+        memset(&io, 0, sizeof(io));
+        io.now_ms          = exp_now_ms;
+        io.sleep_ms        = exp_sleep_ms;
+        io.read_final      = exp_read_final;
+        io.publish_final   = exp_publish_final;
+        io.late_load_state = exp_late_load_state;
+        io.wait_child      = exp_wait_child;
+        io.report          = exp_report;
+
+        /* 70 s budget covers the 60 s late-load wait plus slack. The child
+         * (soft-reboot) wait is 5 s; allow a 10 s grace after ROOT_ONLY so a
+         * refinement arriving near the end of that child wait is still inside
+         * the consumer's window (5 s grace ended exactly at the child's 5 s
+         * deadline and could miss it). The flow releases the patched files
+         * exactly once on observation or timeout, so cleanup is never delayed
+         * until main() returns. */
+        wait = status_flow_run(&io, NULL, 70000, 10000, status_cleanup_cb, &outcome);
+        printf("status: %s (rc=%d)\n",
+               wait == DONE ? "final status observed" :
+               wait == TIMEOUT ? "timeout waiting for final status" : "status error",
+               df_outcome_to_rc(outcome));
+        rc = df_outcome_to_rc(outcome);
+    }
     return rc;
+done:
+    /* No bootstrap was launched (patch failure), so no final status will ever
+     * be published. Release the patched files here rather than waiting out a
+     * 70 s budget with no possible terminal observation. */
+    cleanup();
+    printf("patch: ERROR - failed to patch files\n");
+    return 3;
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (setup(argc, argv) != 0) return 2;
+    /* exploit()/status_flow_run() owns cleanup exactly once. */
     int rc = exploit();
-    cleanup();
     clear_secret(g_aes_key, sizeof(g_aes_key));
     return rc;
 }

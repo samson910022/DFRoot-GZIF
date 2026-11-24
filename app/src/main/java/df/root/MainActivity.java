@@ -148,12 +148,17 @@ public class MainActivity extends Activity implements IReporter {
         mWakeLock.acquire(120000);
         try {
             int rc = ExploitRunner.run(mDeCtx, this);
-            String msg = rc == 0 ? "DFRoot: SUCCESS"
-                       : rc == 1 ? "DFRoot: Error - ksud nonzero exit"
-                       : rc == 2 ? "DFRoot: Error - check logcat & dmesg"
-                       : rc == 3 ? "DFRoot: Error - failed to patch files"
-                       : rc == 4 ? "DFRoot: SOFT REBOOT PENDING (root active)"
-                       : "DFRoot: Error - unknown result";
+            /* rc comes from the single atomically published final outcome.
+             * None of these strings claim root was verified or a reboot
+             * happened: only the on-device oracle can prove either. */
+            String msg = rc == 0  ? "DFRoot: late-load exited 0; root not verified"
+                       : rc == 1  ? "DFRoot: Error - bootstrap failed"
+                       : rc == 2  ? "DFRoot: unknown result - check logcat & dmesg"
+                       : rc == 3  ? "DFRoot: Error - failed to patch files"
+                       : rc == 4  ? "DFRoot: soft-reboot command issued; not confirmed"
+                       : rc == 5  ? "DFRoot: soft reboot skipped (late-load not confirmed absent)"
+                       : rc == 6  ? "DFRoot: soft-reboot command failed"
+                       :            "DFRoot: Error - unknown result";
             mMain.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);

@@ -1,90 +1,46 @@
 # Changelog — DFRoot GZIF
 
-## Unreleased — PR #1 hardening (CI build reliability)
+## Unreleased — PR #3 hardening pass (round 2)
 
-Hardening pass over the build, signing and release pipeline; no change to the
-exploit chain or to the GZIF validation claims. Documentation was brought in
-line with the shipped configuration (Gradle wrapper **9.9.2** with a pinned
-distribution SHA-256; AGP **9.5.0** effective through
-`gradle/libs.versions.toml` with no root `build.gradle.kts` pin; Kotlin/Java
-sources unchanged).
+**All changes in this section are host-tested only and UNVALIDATED on device.**
 
-- **Signing writer and fail-closed behavior** (`scripts/WriteSigningProperties.java`,
-  `app/build.gradle.kts`): signing material is serialized safely for arbitrary
-  passwords/aliases and locales; `signing.properties` is optional at
-  configuration time (a fresh checkout no longer fails `assembleDebug`),
-  incomplete properties fail with a readable error, and local keystore/property
-  files are created with restrictive permissions and verified after writing.
-  Without `signing.properties`, **Release is unsigned** (warning only) and
-  **Debug is debug-keystore signed**; an installable Release requires signing.
-- **Protected release environment** (`.github/workflows/build.yml`): least
-  privilege by default; only a push of a `v*` tag runs `build-release` in the
-  `release` environment, where the four `KEYSTORE*` secrets are available.
-  PR/branch/manual runs build a **debug-keystore-signed Debug + unsigned
-  Release** pair with no secrets, with no release signing on those events, and
-  never publish a GitHub Release; their unsigned APKs are uploaded as a public,
-  downloadable Actions artifact carrying the same notice/licence bundle.
-  Ancestry check precedes any secret reference; the signed APK
-  is `apksigner`-verified, checksummed and uploaded with 1-day retention; the
-  publish job only downloads, verifies and publishes. Action references are
-  hardened/pinned to full 40-hex SHAs and permissions are least-privilege; the
-  gates and exact step/run-script allowlists remain enforced by contract tests.
-- **New release key identity warning**: releases from this hardened pipeline
-  are signed with a **new key identity**. Android will not overwrite-update an
-  installed application signed by a different key — uninstall any existing
-  DFRoot GZIF build before installing a signed release APK (**unsigned CI
-  Release artifacts** from PR/branch/manual builds cannot update a signed
-  install either).
-- **Make/DDK hardening** (`Makefile`, `scripts/ddk-image.sh`): exactly one
-  digest-pinned `android13-5.15` DDK image for the single embedded KMI, derived
-  from CI instead of a floating tag; Podman uses `--network=none`,
-  `--cap-drop=ALL` and `no-new-privileges` with only `lkm/` and the KO directory
-  mounted. `SIGN_PASS`/`SIGN_ALIAS` are accepted **only from the environment**;
-  command-line assignments are rejected at parse time. CI strips
-  `.note.gnu.build-id` from the KO, so the CI/release artifact is 13,384 B with
-  sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`,
-  while the local `make` build is 13,504 B with sha256 `94f8be98…` (it retains
-  the build-id note); they are not byte-identical.
-- **GPLv3 licence conveyance**: added verbatim `GPL-3.0.txt` from
-  https://www.gnu.org/licenses/gpl-3.0.txt; `NOTICE` and
-  `THIRD_PARTY_NOTICES.md` now state the full GPL-3.0-or-later obligations for
-  the bundled userspace loaders (correcting the "no other obligations"
-  overstatement) while retaining the provenance and complete-source offer.
-  Both `GPL-3.0.txt` and the repository's own GPL-2.0 `LICENSE`, plus `NOTICE`
-  and `THIRD_PARTY_NOTICES.md`, accompany the signed release assets **and** the
-  publicly downloadable unsigned CI APK artifact, with the upload and publish
-  allowlists tightened to those exact files.
-- Documentation corrections in `README.md`, `PORTING-GZIF.md`, `NOTICE` and
-  `THIRD_PARTY_NOTICES.md`: 9.9.2 / 9.5.0-effective, signing/debug behavior,
-  CI KO hash, digest-pinned DDK image, environment-only Make credentials,
-  single-KMI Make, and the CI event matrix. No AndroidX / Material Components
-  dependency (the themes use the framework `android:Theme.Material*`), four KMI
-  modules embedded in `libksudnext.so` with GZIF using `android13-5.15`.
-  Historical hardware-validation evidence in `PORTING-GZIF.md` is retained.
-- Regression coverage: workflow policy/contract tests, make contract tests,
-  signing material/permission tests and signed/unsigned release smoke tests all
-  pass; new tests assert that the license and notice assets are packaged,
-  uploaded and published — including a byte pin for `LICENSE` and
-  equality-locked upload/publish allowlists — while still rejecting `secrets/`,
-  `.jks`, `signing.properties` and `..` artifact entries.
+- Native: bounds/overflow-safe ELF parsing (ELF64/LE/AArch64/ET_DYN only,
+  bounded string tables, segment-contained hook/payload offsets), strict
+  numeric/version parsing, checked `waitpid`, secure `ksud` staging.
+- Status protocol (replaces the multi-marker scheme): a **single** final
+  outcome is atomically published to `/dev/dffinal` (world-readable 0644 temp,
+  mode pinned with `fchmod()` against umask, `+ fsync + rename`; the token has
+  no secrets and must be readable by the app uid). The old terminal markers
+  `/dev/dfmsr`, `/dev/dfm6`, `/dev/dfmw2`,
+  `/dev/dfmw3` and `/dev/dfme2` are no longer published or polled; `/dev/dfm*`
+  files remain informational progress only. The inverted `dfmsr` publication
+  check (which made a successful publication report failure) is removed.
+- Pure, host-testable logic module `status_protocol.{c,h}` owns all decisions
+  with injected callbacks: fail-closed producer (late-load failure → ERROR,
+  no reboot; reboot only after a confirmed-absent late-load state and a
+  successful ROOT_ONLY preflight; bounded WNOHANG child wait; refinement
+  publish failure leaves ROOT_ONLY) and consumer (checked monotonic deadline,
+  ROOT_ONLY grace rebase, garbled tokens ignored, read errors keep polling,
+  cleanup exactly once). Clock failure fails closed everywhere; `/proc` scan
+  errors are never treated as "late-load absent"; a SIGKILLed child is reaped
+  with WNOHANG against a 2 s secondary deadline instead of a blocking wait.
+  `status_poll.{c,h}` is deleted.
+- App rc mapping: 0 late-load exited 0 / root not verified, 1 error,
+  2 unknown, 3 local patch failure, 4 soft-reboot command issued / not
+  confirmed, 5 soft reboot skipped, 6 soft-reboot command failed. No toast
+  claims root was verified or a reboot is guaranteed.
+- Build/tests: `status_protocol.c` is linked into both native targets;
+  `tests/native/status_protocol_test.c` replaces the marker test with 28
+  mock-based cases and touches no real `/dev`. `final_status_publish.c` is
+  linked into `bootstrap` and exercised by `tests/native/final_publish_test.c`
+  against real temp files (0644 under a hostile umask, atomic replace, symlink
+  temp sabotage).
 
-### Cross-PR integration note
-
-PRs #2–#5 were based on `38eebc3`; before merge they must rebase onto this
-hardened head and refresh every shared file they touch. In particular:
-
-- PR #5 changes the LKM bytes, so PR #3's `KO_EXPECTED_SHA256S` and every KO
-  hash/size quoted in the docs must be rebuilt and re-pinned against the new
-  artifact.
-- PR #4 must update its Gradle reference from **9.7.1** to **9.9.2** and refresh
-  the referenced PR #1 head to the current hardened commit.
-
-Both licence texts, `NOTICE` and `THIRD_PARTY_NOTICES.md` accompany the signed
-release assets **and** the publicly downloadable unsigned CI APK artifact: the
-repository is public, so Actions artifacts are not private, and the unsigned
-APKs are treated as conveyance with the same notices and source offer rather
-than as "internal, not third-party" outputs. The signed release bundle is not
-the only unit of conveyance.
+Residual risk: the bundled loaders hardcode `/data/local/tmp/.ksud-stage`;
+symlink/race-at-creation is fixed, but a `shell`-uid process could still swap
+the staged file before the loader renames it. Requires a loader rebuild to
+fully close (documented in `PORTING-GZIF.md`). Device behavior of the new
+final-status flow (including Auto Soft Reboot) remains **unvalidated**.
 
 ## 4.8-gzif (2026-11-17)
 

@@ -1,8 +1,9 @@
 /* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
-/* Modified 2026-11-24 (PR #3 hardening): secure staging, fail-closed markers and wait handling. */
+/* Modified 2026-11-24 (PR #3 hardening): secure staging, fail-closed single final-status file and bounded wait handling. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,9 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "status_protocol.h"
+#include "final_status_publish.h"
 
 #define BLKROSET   0x125d
 /* The bundled Samsung-patched loaders have /data/local/tmp/.ksud-stage baked
@@ -21,6 +25,16 @@
 #define KSUD       "/data/adb/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
 #define MODULES_DIR "/data/adb/modules"
+/* The single authoritative outcome. Written atomically via the .tmp file so
+ * the consumer can never observe a partial token. Progress markers stay
+ * informational; only /dev/dffinal carries the result. */
+#define DF_FINAL_PATH "/dev/dffinal"
+#define DF_FINAL_TMP  "/dev/dffinal.tmp"
+#define LATE_LOAD_WAIT_MS 60000
+#define SOFT_REBOOT_WAIT_MS 5000
+/* Secondary deadline for reaping a SIGKILLed child. A stuck child must never
+ * turn a bounded wait into an unbounded blocking waitpid(). */
+#define SIGKILL_REAP_WAIT_MS 2000
 
 static int pref_true(const char *buf, const char *key)
 {
@@ -130,7 +144,9 @@ static int set_partitions_ro(void)
 }
 
 /* Returns 1 when a ksud late-load process exists, 0 when it is absent, and
- * -1 when /proc cannot be scanned. Unknown must never be treated as absent. */
+ * -1 when /proc cannot be scanned. Unknown must never be treated as absent:
+ * a readdir() error is indistinguishable from end-of-directory except through
+ * errno, so a failed scan must be reported as unknown (no reboot authorized). */
 static int late_load_running(void)
 {
     DIR *d = opendir("/proc");
@@ -138,17 +154,30 @@ static int late_load_running(void)
         return -1;
     struct dirent *e;
     char path[64], buf[256];
-    int found = 0;
-    while ((e = readdir(d)) != NULL) {
+    int found = 0, rc = 0;
+
+    for (;;) {
         char *end;
+        int fd, n;
+
+        /* Reset immediately before every readdir(): open/read/close/strtol
+         * in the body can set errno, and readdir() only signals an error by
+         * returning NULL with a nonzero errno. */
+        errno = 0;
+        e = readdir(d);
+        if (!e) {
+            if (errno != 0)
+                rc = -1;
+            break;
+        }
         strtol(e->d_name, &end, 10);
         if (*end) continue;
         snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
-        int fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) continue;
-        int n = read(fd, buf, sizeof(buf) - 1);
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) continue; /* benign per-PID race: process already gone */
+        n = (int)read(fd, buf, sizeof(buf) - 1);
         close(fd);
-        if (n <= 0) continue;
+        if (n <= 0) continue; /* benign per-PID race: cmdline vanished */
         buf[n] = '\0';
         for (int i = 0; i < n; i++)
             if (!buf[i]) buf[i] = ' ';
@@ -157,8 +186,9 @@ static int late_load_running(void)
             break;
         }
     }
-    closedir(d);
-    return found;
+    if (closedir(d) < 0)
+        rc = -1;
+    return rc ? -1 : found;
 }
 
 static int run_ctx(const char *ctx, char *const argv[])
@@ -178,6 +208,150 @@ static int run_ctx(const char *ctx, char *const argv[])
     if (TEMP_FAILURE_RETRY(waitpid(pid, &status, 0)) < 0)
         return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/* ---- Real status_io operations for the producer ---- */
+
+/* Negative means "clock unavailable" and callers MUST fail closed. Returning
+ * 0 here would freeze a deadline (infinite wait) or make elapsed time look
+ * enormous (premature timeout); neither is safe for a reboot decision. */
+static int64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    if (ts.tv_sec < 0) return -1;
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static int64_t io_now_ms(void *ctx)
+{
+    (void)ctx;
+    return monotonic_ms();
+}
+
+static void io_sleep_ms(void *ctx, int ms)
+{
+    (void)ctx;
+    if (ms > 0) usleep((unsigned int)ms * 1000);
+}
+
+static void io_report(void *ctx, const char *msg)
+{
+    (void)ctx;
+    printf("bootstrap: %s\n", msg);
+}
+
+/* late_load_running() is already strictly tri-state: 1 running, 0 confirmed
+ * absent, -1 /proc unscannable (unknown). Never coerce unknown to absent. */
+static int io_late_load_state(void *ctx)
+{
+    (void)ctx;
+    return late_load_running();
+}
+
+/* Read the published final token. A failure (absent/unreadable/symlink) is
+ * simply "not available yet" to the consumer. */
+static int io_read_final(void *ctx, char *buf, size_t cap)
+{
+    int fd, n;
+    (void)ctx;
+    if (!buf || cap == 0) return -1;
+    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    n = (int)read(fd, buf, cap - 1);
+    close(fd);
+    if (n < 0) return -1;
+    buf[n] = '\0';
+    return 0;
+}
+
+/* Atomically publish one final token via df_publish_final(): O_EXCL|O_NOFOLLOW
+ * temp, mode DF_FINAL_MODE (0644, fchmod-pinned against umask), fsync, rename.
+ * rename(2) is atomic, so the consumer sees either the old token or the new
+ * one, never a partial write. The token has no secrets but MUST be readable by
+ * the app uid, which runs exp.c; a 0600 temp would make every consumer read
+ * fail. Failure leaves the previous final status untouched. */
+static int io_publish_final(void *ctx, const char *token)
+{
+    (void)ctx;
+    return df_publish_final(DF_FINAL_TMP, DF_FINAL_PATH, token);
+}
+
+/* SIGKILL the child and reap it with WNOHANG against a short secondary
+ * deadline. A blocking waitpid() here could hang forever (e.g. a child stuck
+ * in an uninterruptible state); an unreaped child is never a reboot success.
+ * On clock failure we cannot bound the loop at all, so we do not block. */
+static void kill_and_reap_bounded(pid_t pid)
+{
+    int64_t start, now;
+    int st = 0;
+
+    (void)kill(pid, SIGKILL);
+    start = monotonic_ms();
+    if (start < 0)
+        return;
+    for (;;) {
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid || (w < 0 && errno != EINTR))
+            return; /* reaped, or already gone (ECHILD) */
+        now = monotonic_ms();
+        if (now < 0 || now - start >= SIGKILL_REAP_WAIT_MS)
+            return;
+        usleep(10000);
+    }
+}
+
+/* Spawn the soft-reboot command in the KSU context and wait for it with a
+ * bounded, non-blocking loop. On timeout kill and reap the child; an
+ * unreaped/zombie child must never be mistaken for a successful reboot.
+ * Clock failure is fail-closed: return -1 (REBOOT_FAILED) rather than using a
+ * sentinel 0 that would freeze or distort the deadline. */
+static int wait_child_bounded(void *ctx, int timeout_ms)
+{
+    pid_t pid;
+    int64_t start;
+    int st = 0;
+    (void)ctx;
+
+    start = monotonic_ms();
+    if (start < 0)
+        return -1; /* no clock, no safe deadline: do not spawn/reboot */
+
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int fd = open("/proc/self/attr/exec", O_WRONLY | O_CLOEXEC);
+        if (fd >= 0) {
+            const char ksu_ctx[] = "u:r:ksu:s0";
+            (void)write(fd, ksu_ctx, sizeof(ksu_ctx) - 1);
+            close(fd);
+        }
+        execv(KSUD, (char *[]){ KSUD, "soft-reboot", NULL });
+        _exit(127);
+    }
+
+    for (;;) {
+        pid_t w;
+        int64_t now;
+
+        w = waitpid(pid, &st, WNOHANG);
+        if (w == pid)
+            return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        now = monotonic_ms();
+        if (now < 0) {
+            kill_and_reap_bounded(pid);
+            return -1;
+        }
+        if (now - start >= timeout_ms) {
+            kill_and_reap_bounded(pid);
+            return -1;
+        }
+        usleep(10000);
+    }
 }
 
 /* Returns 0 on success. access(path, F_OK) only needs search permission on
@@ -268,20 +442,34 @@ static int disable_modules(void)
     return rc;
 }
 
-static long elapsed_ms(const struct timespec *start, const struct timespec *now)
+/* Build the injected IO and let the pure protocol decide + publish the one
+ * final outcome. All progress markers are informational; nothing here reads
+ * a marker to derive a result. */
+static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot)
 {
-    return (now->tv_sec - start->tv_sec) * 1000L +
-           (now->tv_nsec - start->tv_nsec) / 1000000L;
+    struct status_io io;
+    memset(&io, 0, sizeof(io));
+    io.now_ms          = io_now_ms;
+    io.sleep_ms        = io_sleep_ms;
+    io.read_final      = io_read_final;
+    io.publish_final   = io_publish_final;
+    io.late_load_state = io_late_load_state;
+    io.wait_child      = wait_child_bounded;
+    io.report          = io_report;
+    return producer_decide_and_publish(&io, NULL, late_load_rc, soft_reboot,
+                                       LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);
 }
 
 int main(void)
 {
-    touch("/dev/dfm1");
     char su_manager[256];
-    int soft_reboot, disable_mods;
+    int soft_reboot = 0, disable_mods = 0;
+    int late_load_rc;
+
+    touch("/dev/dfm1");
     if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
         touch("/dev/dfme0");
-        return 1;
+        return df_outcome_to_rc(decide_and_publish(-1, 0));
     }
 
     touch("/dev/dfm2");
@@ -296,62 +484,16 @@ int main(void)
         touch("/dev/dfm4");
         if (disable_modules()) {
             touch("/dev/dfme1");
-            return 1;
+            return df_outcome_to_rc(decide_and_publish(-1, 0));
         }
     }
 
     touch("/dev/dfm5");
     mkdir("/data/adb", 0700);
-    if (stage_file(KSUD_STAGE_SRC, KSUD_STAGE) != 0) {
-        touch("/dev/dfme2");
-        return 1;
-    }
-    if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--package-name", su_manager, NULL }) == 0) {
-        /* Publish root-active (dfmsr) BEFORE success (dfm6). If publishing
-         * dfmsr fails, do not publish dfm6: a false rc=0 is worse than a
-         * timeout that asks the user to check the log. */
-        int dfmsr_ok = 1;
-        if (soft_reboot)
-            dfmsr_ok = touch("/dev/dfmsr");
-        if (!soft_reboot || dfmsr_ok) {
-            if (touch("/dev/dfm6") != 0) {
-                touch("/dev/dfme2");
-                return 1;
-            }
-        } else {
-            return 1;
-        }
+    if (stage_file(KSUD_STAGE_SRC, KSUD_STAGE) != 0)
+        return df_outcome_to_rc(decide_and_publish(-1, 0));
 
-        if (soft_reboot) {
-            /* Bound the wait with a monotonic clock, not sleep iterations. */
-            struct timespec start, now;
-            clock_gettime(CLOCK_MONOTONIC, &start);
-            int lr = late_load_running();
-            while (lr > 0) {
-                clock_gettime(CLOCK_MONOTONIC, &now);
-                if (elapsed_ms(&start, &now) >= 60000)
-                    break;
-                sleep(1);
-                lr = late_load_running();
-            }
-            if (lr != 0) {
-                /* Still running or unscannable: never authorize a reboot on
-                 * unknown state. Root is already active (dfmsr -> rc=4). */
-                touch("/dev/dfmw2");
-            } else {
-                int sr_rc = run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
-                if (sr_rc != 0) {
-                    /* soft-reboot failed. Do NOT mark root as failed: dfmsr
-                     * already told exp.c that root is active. */
-                    touch("/dev/dfmw3");
-                }
-            }
-        }
-    } else {
-        /* late-load failed: deliberately do NOT touch dfmsr, so exp.c reports
-         * the genuine failure (dfme2 -> rc=1). */
-        touch("/dev/dfme2");
-    }
-
-    return 0;
+    late_load_rc = run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load",
+                                            "--package-name", su_manager, NULL });
+    return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot));
 }
