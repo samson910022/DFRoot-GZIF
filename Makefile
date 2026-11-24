@@ -5,6 +5,7 @@ MAKEFLAGS   += --no-print-directory
 ARCH      := aarch64
 ABI       := arm64-v8a
 ENGINE    := podman
+JAVA      ?= java
 
 KMIS :=        \
     android12-5.10  \
@@ -28,8 +29,8 @@ DDK_RELEASE ?= $(shell awk '/image: ghcr\.io\/ylarod\/ddk-min:/{sub(/@sha256:.*$
 # parse time. They are exported into recipe environments and validated only in the
 # targets that actually sign, so `make clean` (and any non-signing query) works
 # without SIGN_PASS/SIGN_ALIAS. Exporting instead of interpolating into a command
-# line also keeps them out of make's echo and the process list; keytool reads them
-# with -storepass:env / -keypass:env. See NOTICE for the original 2026-11-17 change.
+# line keeps credentials out of make's echo; the shared Java writer reads them from
+# the environment and never places their values in arguments or logs.
 export SIGN_PASS
 export SIGN_ALIAS
 
@@ -47,56 +48,24 @@ APK_SRCS    := $(wildcard app/src/main/java/df/root/*.java \
 APK   := out/DFRoot.apk
 
 
-.PHONY: all clean
+.PHONY: all clean verify-signing-permissions
 
 all: $(APK)
 
 keystore.jks:
 	@: "$${SIGN_PASS:?SIGN_PASS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
 	: "$${SIGN_ALIAS:?SIGN_ALIAS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
-	umask 077; \
-	keytool -genkeypair -keystore $@ -storetype JKS \
-	    -storepass:env SIGN_PASS -keypass:env SIGN_PASS \
-	    -alias "$$SIGN_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
-	    -dname "CN=DFRoot"
+	LC_ALL=C.UTF-8 "$(JAVA)" scripts/WriteSigningProperties.java create-local .
 
-signing.properties: keystore.jks
+# Phony verification runs on every signing build. Order-only prerequisites keep an
+# up-to-date signing.properties file from being needlessly rewritten.
+verify-signing-permissions: | keystore.jks
+	@"$(JAVA)" scripts/WriteSigningProperties.java verify-local .
+
+signing.properties: | verify-signing-permissions
 	@: "$${SIGN_PASS:?SIGN_PASS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
 	: "$${SIGN_ALIAS:?SIGN_ALIAS is not set; export SIGN_PASS/SIGN_ALIAS for local signing, or use CI KEYSTORE secrets}"; \
-	esc_props() { \
-	    local s=$$1 out= c n leading=1 i; \
-	    local len=$${#s}; \
-	    for (( i = 0; i < len; i++ )); do \
-	        c=$${s:i:1}; \
-	        case $$c in \
-	            '\') out+='\\' ;; \
-	            $$'\r') out+='\r' ;; \
-	            $$'\n') out+='\n' ;; \
-	            $$'\t') out+='\t' ;; \
-	            $$'\f') out+='\f' ;; \
-	            ' ') if (( leading )); then out+='\ '; else out+=' '; fi ;; \
-	            *) \
-	                printf -v n '%d' "'$$c"; \
-	                if (( n > 126 )); then \
-	                    printf -v n '\\u%04x' "$$n"; \
-	                    out+=$$n; \
-	                else \
-	                    out+=$$c; \
-	                fi \
-	                ;; \
-	        esac; \
-	        [[ $$c == ' ' ]] || leading=0; \
-	    done; \
-	    printf '%s' "$$out"; \
-	}; \
-	umask 077; \
-	{ \
-	    printf 'KEYSTORE_FILE=../keystore.jks\n'; \
-	    printf 'KEYSTORE_PASSWORD=%s\n' "$$(esc_props "$$SIGN_PASS")"; \
-	    printf 'KEY_ALIAS=%s\n' "$$(esc_props "$$SIGN_ALIAS")"; \
-	    printf 'KEY_PASSWORD=%s\n' "$$(esc_props "$$SIGN_PASS")"; \
-	} > $@; \
-	chmod 600 $@
+	"$(JAVA)" scripts/WriteSigningProperties.java local .
 
 $(LKM_KOS): $(LKM_SRCS)
 	@printf '\n\033[1;35m══  Building LKMs  ══\033[0m\n'; \
@@ -116,7 +85,7 @@ $(LKM_KOS): $(LKM_SRCS)
 	        ' || exit 1; \
 	done; \
 
-$(APK): signing.properties $(LKM_KOS) $(APK_SRCS)
+$(APK): signing.properties keystore.jks $(LKM_KOS) $(APK_SRCS)
 	@printf '\n\033[1;36m══  DFRoot APK  ══\033[0m\n'
 	@printf '\033[1;35m  → gradle assembleRelease\033[0m\n'
 	./gradlew :app:assembleRelease

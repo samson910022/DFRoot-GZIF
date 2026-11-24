@@ -18,7 +18,10 @@ if (hasReleaseSigning) {
     signingPropsFile.inputStream().use { signingProps.load(it) }
     // Report a missing/incomplete file as a readable error instead of passing null to file()/AGP.
     val requiredSigningKeys = listOf("KEYSTORE_FILE", "KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD")
-    val missingSigningKeys = requiredSigningKeys.filter { signingProps.getProperty(it).isNullOrBlank() }
+    val missingSigningKeys = requiredSigningKeys.filter { key ->
+        val value = signingProps.getProperty(key)
+        if (key == "KEYSTORE_FILE") value.isNullOrBlank() else value.isNullOrEmpty()
+    }
     require(missingSigningKeys.isEmpty()) {
         "signing.properties (${signingPropsFile.absolutePath}) is missing required key(s): " +
             "${missingSigningKeys.joinToString(", ")}. " +
