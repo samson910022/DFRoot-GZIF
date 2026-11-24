@@ -25,7 +25,7 @@ signing and the JVM/host test foundation; side-effect-free canonical manager
 preflight with SHA-256-pinned bundled loaders; immutable `RunConfig` and durable
 off-main-thread configuration writes; a process-scoped `RunCoordinator` and
 Direct Boot-aware `specialUse` foreground service; an atomic, versioned
-`dfroot_run_config` artifact; run-scoped terminal markers with all legacy
+`run_config` artifact; run-scoped terminal markers with all legacy
 `/dev/dfm*` markers reduced to progress diagnostics; hardened `.ksud-stage`
 staging; and a durable `BOOT_COUNT` claim for boot runs. Each modified
 GPL-2.0-only source file carries its own dated `Modified 2026-11-24 … See NOTICE.`

@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): add process-scoped single-flight operation ownership and immutable observation. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): retain application-scoped device-protected context for pre-unlock engine work. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): thread the admitted operation ID through the coordinator engine boundary. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): contain close() Errors so cleanup cannot strand the terminal snapshot. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -409,7 +410,7 @@ public final class RunCoordinator {
         try {
             operation.admission.close();
             return null;
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             return e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
@@ -424,7 +425,7 @@ public final class RunCoordinator {
         try {
             operation.lease.close();
             return null;
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
             return e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }

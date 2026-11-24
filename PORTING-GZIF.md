@@ -102,7 +102,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **returns `-ENODEV` on purpose** ("intentionally fail init to unload immediately; avoids triggering mrdump module-loaded callbacks on MTK devices", `dfroot.c:186-188`).
 
 **(6) bootstrap.c — `app/src/main/jni/bootstrap.c`.** Kernel UMH runs the shell: `/dev/dfm0` touched → exec context set to `u:r:init:s0` → `exec /data/user_de/0/df.root/bootstrap`. The kernel runs this with **stdio → /dev/null** (umh setup stdio pointers are NULL), so diagnostics go to the `/dev/dfm*` marker files and to run-scoped terminal markers, not to the app. Bootstrap now:
-- parses the **atomic versioned `dfroot_run_config` artifact** published by Java (strict, fail-closed; no SharedPreferences XML parsing); on parse failure a reserved safe pre-admission ID carries rc=1;
+- parses the **atomic versioned `run_config` artifact** published by Java (strict, fail-closed; no SharedPreferences XML parsing); on parse failure a reserved safe pre-admission ID carries rc=1;
 - `adopt_zygote_env()` — clones zygote64's `environ` (SELinux/label propagation for later children);
 - `set_partitions_ro()` — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` is set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
@@ -125,7 +125,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 |---|---|
 | `/dev/df` | hook armed (libc++ shellcode ran, one-shot per boot) |
 | `/dev/dfm0` | dfroot.ko ran; UMH launched bootstrap |
-| `/dev/dfm1` | bootstrap started; prefs read OK |
+| `/dev/dfm1` | `bootstrap: loading run-config artifact` (progress) |
 | `/dev/dfm2` | zygote env cloned |
 | `/dev/dfm3` | partitions set ro |
 | `/dev/dfm4` | module-disable pass (only if `disable_modules` pref) |
@@ -135,7 +135,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 | `/dev/dfme1` | disable-modules failed (progress) |
 | `/dev/dfme2` | legacy `.ksud-stage`/ksud failure marker (progress) |
 | `/dev/dfmw0`/`dfmw1` | zygote-env / partitions-ro warnings (non-fatal progress) |
-| **run-scoped `/dev/dfroot-<op>-<code>`** | **terminal marker** bound to the admitted operation ID: `0` success, `1` bootstrap/terminal error (incl. late-load timeout), `4` soft-reboot command success, `6` soft-reboot command failure |
+| **run-scoped `/dev/dfroot_terminal_<op>_rc<code>`** | **terminal marker** bound to the admitted operation ID (e.g. `/dev/dfroot_terminal_<op>_rc0`): `rc0` success, `rc1` bootstrap/terminal error (incl. late-load timeout), `rc4` soft-reboot command success, `rc6` soft-reboot command failure |
 
 > [!NOTE]
 > **All global `/dev/*` markers, including `/dev/dfm6` and its `ksud start: SUCCESS`
@@ -606,11 +606,13 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 
 ## 15. Current architecture (2026-11-25, PR #2) and residual risks
 
-This section describes the **current uncommitted tree** and supersedes the stale
-implementation details in §4/§6/§8.4/§9 described above. It is documentation
-only: no device, payload, privileged-container, or APK-assembly validation was
-performed for this revision (host verification only: 408 JVM tests, 113 host
-CTest cases, lint 0 errors, `git diff --check` clean — see `CHANGELOG.md`).
+This section describes the **current locally committed tree on
+`fix/app-correctness-safety` (not yet pushed)** and supersedes the stale
+implementation details in §4/§6/§8.4/§9
+described above. It is documentation only: no device, payload,
+privileged-container, or APK-assembly validation was performed for this revision
+(host verification only: 409 JVM tests, 113 host CTest cases, lint 0 errors,
+`git diff --check` clean — see `CHANGELOG.md`).
 
 ### 15.1 Immutable configuration and durable writes
 - `ConfigurationRepository` is the single writer of critical DE preferences.
@@ -641,7 +643,7 @@ CTest cases, lint 0 errors, `git diff --check` clean — see `CHANGELOG.md`).
   until actual exit, and there is no automatic retry.
 
 ### 15.3 Atomic run-config artifact
-- Java publishes a versioned `dfroot_run_config` artifact atomically (temp file,
+- Java publishes a versioned `run_config` artifact atomically (temp file,
   checked mode/rename, bounded size, strict key=value codec). Native bootstrap
   reads **only** this artifact; it no longer parses mutable SharedPreferences
   XML. Truncated, oversized, malformed, identity-changing, or unsupported-

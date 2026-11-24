@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove atomic run ownership, uncertainty retention, cleanup, and bounded observation. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover the admitted operation ID passed to the production engine. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): prove an Error from lease close cannot strand cleanup or later submits. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -705,6 +706,31 @@ public class RunCoordinatorTest {
     }
 
     @Test
+    public void leaseCloseErrorCannotStrandCleanupOrBlockLaterSubmissions() throws Exception {
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(verifiedRepository(), queuedWorker, main);
+        engine.immediatePlan(RunResult.alreadyHooked());
+        ErrorCloseLease lease = new ErrorCloseLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+
+        assertEquals(RunCoordinator.State.TERMINAL, coordinator.getSnapshot().getState());
+        assertEquals(1, lease.closeCount.get());
+        assertTrue(coordinator.getSnapshot().getLog().stream().anyMatch(entry ->
+                entry.getMessage().contains("lease close failed: AssertionError: lease close Error")));
+        Field cleanupPending = RunCoordinator.class.getDeclaredField("cleanupPending");
+        cleanupPending.setAccessible(true);
+        assertFalse(cleanupPending.getBoolean(coordinator));
+
+        engine.immediatePlan(RunResult.alreadyHooked());
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                new FakeLease()).isAccepted());
+    }
+
+    @Test
     public void mainExecutorRejectionDoesNotAffectTerminalStateOrCleanup() throws Exception {
         ConfigurationRepository repository = verifiedRepository();
         RunCoordinator coordinator = coordinator(repository, worker, new RejectingExecutor());
@@ -975,6 +1001,16 @@ public class RunCoordinatorTest {
             if (closeFailure != null) {
                 throw closeFailure;
             }
+        }
+    }
+
+    private static final class ErrorCloseLease implements ResourceLease {
+        final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+            throw new AssertionError("lease close Error");
         }
     }
 

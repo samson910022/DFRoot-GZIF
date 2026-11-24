@@ -136,7 +136,7 @@ Acceptance:
 **Goal:** native consumes the admitted snapshot and reports only after all bootstrap work completes.
 
 Tasks:
-- Publish `dfroot_run_config` atomically from Java; replace bootstrap SharedPreferences XML parsing with strict versioned parsing and manager validation.
+- Publish `run_config` atomically from Java; replace bootstrap SharedPreferences XML parsing with strict versioned parsing and manager validation.
 - Make `dfm6` non-terminal; add terminal completion/error markers after late-load and soft-reboot work.
 - Bound late-load waiting; handle `waitpid` failures; check marker write failures.
 - Emit rc=4 only after soft-reboot command success; add a distinct soft-reboot-failed code; keep rc=1 broad.

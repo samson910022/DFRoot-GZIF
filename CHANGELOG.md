@@ -1,5 +1,6 @@
 # Changelog — DFRoot GZIF
 
+<<<<<<< HEAD
 ## Unreleased — PR #1 hardening (CI build reliability)
 
 Hardening pass over the build, signing and release pipeline; no change to the
@@ -86,6 +87,9 @@ APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
 ## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (uncommitted)
+=======
+## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (locally committed, not yet pushed)
+>>>>>>> ffe8056 (fix(app): contain close errors and finalize PR #2 documentation)
 
 Architecture repairs on top of `4.8-gzif`; `versionCode`/`versionName` are
 unchanged (408 / `4.8-gzif`). No runtime payload, firmware target, or SUCCESS
@@ -121,7 +125,7 @@ product decision was widened. Summary by phase:
   indeterminate outcomes owned until actual exit (no forced kill, no retry).
   Manager/settings controls are locked while work is active.
 - **Phase 4 — native snapshot, completion, staging.** Java publishes an atomic,
-  versioned `dfroot_run_config` artifact; native bootstrap parses only that
+  versioned `run_config` artifact; native bootstrap parses only that
   artifact. Run-scoped terminal markers (`rc=0` success, `rc=1` error,
   `rc=4` soft-reboot success, `rc=6` soft-reboot failure) are written only after
   bootstrap work completes; `/dev/dfm6` stays an owner-visible **progress**
@@ -145,8 +149,10 @@ boot-claim path, narrow Java seams), `app/src/main/jni/*` (`run_config_codec`,
 `tasks/{plan,todo}.md`. Every modified GPL-covered source file carries a dated
 per-file notice (`NOTICE`).
 
-Validation (2026-11-25, non-privileged host only): **408 JVM tests** (0
-failures/errors/skips), **113 host CTest** cases (0 failures), `lintDebug` **0
+Validation (2026-11-25, non-privileged host only): **409 JVM tests** (0
+failures/errors/skips), **113 host CTest** cases (0 failures; 111 base cases plus
+2 cleanup fixtures registered only when the mode probes fail and the fixture
+roots are relocated — 113 is the count in this environment), `lintDebug` **0
 errors** (21 warnings present before the Phase 6 docs-only edits, one a
 `PrivateApi` warning at `AndroidRunEnvironment.java:93` in a file added by PR #2
 — not all 21 predate PR #2), `git diff --check` clean, loader pins match

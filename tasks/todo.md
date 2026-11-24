@@ -436,8 +436,9 @@
   - Recreated-store dedup compare (`bootCount <= previous`) disabled — killed by
     `BootReceiverBoundaryTest.realStoreRecreatedAfterProcessRestartDoesNotStartTheServiceAgain`.
 
-  Verification: `git diff --check` clean; 408 JVM tests (0 failures/errors/skips;
-  previous 399 preserved plus 9 review-fix tests); lint 0 errors (21 pre-existing
+  Verification: `git diff --check` clean; 409 JVM tests (0 failures/errors/skips;
+  previous 399 preserved plus 10 review-fix tests, including the final
+  close()-Error lifetime test); lint 0 errors (21 pre-existing
   warnings); host CTest 113/113 (no native changes). No device, payload, ADB,
   privileged container, APK assembly, dependency, commit, or push was performed.
 
@@ -464,7 +465,7 @@
   unattended soft reboot disabled, manual soft reboot experimental/unvalidated
   (prior hard-reboot risk). Corrected signing to **optional**
   `signing.properties`, added the gitignored-KO APK prerequisite, and added a
-  **Validation status (2026-11-25)** section (408 JVM / 113 CTest / 0 lint
+  **Validation status (2026-11-25)** section (409 JVM / 113 CTest / 0 lint
   errors; no device/hardware/privileged/APK validation).
 
 - [x] Task 6.2: Update CHANGELOG and PORTING-GZIF with architecture and validation status.
@@ -485,7 +486,8 @@
 - [x] Task 6.3: Add dated modification notices to all GPL-covered modified files.
 
   Scanned the 96 committed PR files vs base `ae627f17` plus the 6 Phase 6
-  doc-only files in the uncommitted working tree (102 files vs base in total).
+  doc-only files (102 files vs base in total), all locally committed on
+  `fix/app-correctness-safety`.
   Every modified
   GPL-covered source file already carried a dated notice except those touched
   on 2026-11-25 without one; added `Modified 2026-11-25 … See NOTICE.` notices
@@ -524,7 +526,7 @@
 
   - `git diff --check`: **0** issues (clean).
   - `JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 PATH=/usr/lib/jvm/java-21-openjdk-amd64/bin:$PATH ANDROID_HOME=/usr/lib/android-sdk ./gradlew :app:testDebugUnitTest :app:lintDebug --no-daemon --console=plain`: exit 0;
-    **408 JVM tests, 0 failures / 0 errors / 0 skipped** (40 XML reports);
+    **409 JVM tests, 0 failures / 0 errors / 0 skipped** (40 XML reports);
     lint **0 errors**, 21 warnings present before the Phase 6 docs-only edits
     (one is a `PrivateApi` warning at `AndroidRunEnvironment.java:93`, a file
     added by PR #2 — not all 21 predate PR #2).

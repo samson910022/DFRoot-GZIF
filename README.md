@@ -231,8 +231,10 @@ gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 
 Non-privileged host verification only:
 
-- **408** JVM unit tests (`./gradlew :app:testDebugUnitTest`), 0 failures/errors/skips.
-- **113** host CTest cases, 0 failures.
+- **409** JVM unit tests (`./gradlew :app:testDebugUnitTest`), 0 failures/errors/skips.
+- **113** host CTest cases, 0 failures. The base suite is 111; the other 2 are
+  cleanup fixtures registered only when the mode probes fail and the fixture
+  roots are relocated, so 113 is the count in this environment.
 - `./gradlew :app:lintDebug`: **0 errors** (21 warnings present before the Phase 6 docs-only edits; one is a `PrivateApi` warning at `AndroidRunEnvironment.java:93`, a file added by PR #2 — so not all 21 predate PR #2).
 - `git diff --check`: clean; loader SHA-256 pins match the bundled `jniLibs`
   binaries; no generated/build outputs, secrets, or KO files are tracked.
