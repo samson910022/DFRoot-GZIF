@@ -281,6 +281,7 @@ jobs:
           apk=${apks[0]##*/}
           mkdir -p release
           cp -- "${apks[0]}" "release/$apk"
+          cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/
           (
             cd release
             sha256sum -- "$apk" > "$apk.sha256"
@@ -293,6 +294,9 @@ jobs:
           path: |
             release/DFRoot_*.apk
             release/DFRoot_*.apk.sha256
+            release/GPL-3.0.txt
+            release/NOTICE
+            release/THIRD_PARTY_NOTICES.md
           if-no-files-found: error
           overwrite: true
           # Signed APKs are consumed by the publish job in the same run; keep
@@ -347,5 +351,8 @@ jobs:
           files: |
             dist/DFRoot_*.apk
             dist/DFRoot_*.apk.sha256
+            dist/GPL-3.0.txt
+            dist/NOTICE
+            dist/THIRD_PARTY_NOTICES.md
           fail_on_unmatched_files: true
           overwrite_files: true

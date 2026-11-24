@@ -52,9 +52,23 @@ in `samson910022/Root-My-Galaxy-Payloads-Next`):
 Licences of the components:
 
 - kernelsu.ko (embedded/loaded kernel module, both loaders): GPL-2.0-only
-- KernelSU userspace (ksud, ksuinit): GPL-3.0-or-later
-- KernelSU-Next userspace (ksud, ksuinit): GPL-3.0-or-later
+- KernelSU userspace (ksud, ksuinit): GPL-3.0-or-later — see `GPL-3.0.txt`
+- KernelSU-Next userspace (ksud, ksuinit): GPL-3.0-or-later — see `GPL-3.0.txt`
 - DFRoot application source (this repository): GPL-2.0-only
+
+GPLv3 licence conveyance (userspace loaders)
+---------------------------------------------
+
+The two bundled userspace loaders are GPL-3.0-or-later. In addition to the
+source offer and the aggregation statement below, they carry the full GPLv3
+obligations (GPL-3.0 §5/§6): a copy of the licence must accompany the
+distribution and the complete corresponding source must be offered. The
+verbatim official licence text is therefore conveyed in this repository as
+`GPL-3.0.txt` (https://www.gnu.org/licenses/gpl-3.0.txt) and included in the
+signed release assets alongside this NOTICE. Nothing in this file should be
+read as saying the loaders have "no other obligations": the aggregation
+statement only explains why bundling the executables does not relicense the
+GPL-2.0-only DFRoot application source, or vice versa.
 
 Aggregation statement
 ---------------------
@@ -94,11 +108,19 @@ LKM (`dfroot.ko`)
 
 The LKM binary is intentionally NOT committed. It is built from
 `lkm/dfroot.c` (GPL-2.0-only, `MODULE_LICENSE("GPL")`) by the top-level
-`Makefile` (podman + DDK image `ghcr.io/ylarod/ddk-min:<kmi>-20260828`) or
-by CI (`.github/workflows/build.yml`), and copied to
-`app/src/main/jni/ko/dfroot-<kmi>.ko` (all `*.ko` under that directory are
-gitignored). Fresh clones must run the LKM build (or download CI artifacts)
-before `assembleRelease`; see README.md and PORTING-GZIF.md §8.
+`Makefile` (one podman build for the single KMI `android13-5.15`, using the
+digest-pinned image
+`ghcr.io/ylarod/ddk-min:android13-5.15-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd`
+resolved via `scripts/ddk-image.sh`) or by CI
+(`.github/workflows/build.yml`), and copied to
+`app/src/main/jni/ko/dfroot-android13-5.15.ko` (all `*.ko` under that directory
+are gitignored). CI strips `.note.gnu.build-id`, so the CI/release artifact
+(13,384 B, sha256
+`9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`) is not
+byte-identical to the local `make` build (13,504 B, sha256 `94f8be98…`, which
+retains the build-id note). Fresh clones must run the LKM build
+(or download CI artifacts) before `assembleRelease`; see README.md and
+PORTING-GZIF.md §8.
 
 References
 ----------

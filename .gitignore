@@ -31,5 +31,7 @@ out/
 app/src/main/jni/splicehelper
 app/src/main/jni/ko/*.ko
 
-# DDK/LKM build output (byte-identical twin of app/src/main/jni/ko/dfroot-android13-5.15.ko; rebuilt by make/CI)
+# Local DDK/LKM build output: 13,504 B with .note.gnu.build-id retained. The
+# stripped CI artifact placed at app/src/main/jni/ko/dfroot-android13-5.15.ko
+# is 13,384 B and not byte-identical; both are rebuilt, not committed.
 lkm/dfroot.ko

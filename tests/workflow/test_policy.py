@@ -106,6 +106,7 @@ PACKAGE_SIGNED_SCRIPT = (
     "apk=${apks[0]##*/}\n"
     "mkdir -p release\n"
     'cp -- "${apks[0]}" "release/$apk"\n'
+    "cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/\n"
     "(\n"
     "  cd release\n"
     '  sha256sum -- "$apk" > "$apk.sha256"\n'
@@ -173,8 +174,25 @@ CI_UPLOAD_PATH = (
     "app/build/outputs/apk/debug/DFRoot_*.apk\n"
     "app/build/outputs/apk/release/DFRoot_*.apk"
 )
-RELEASE_UPLOAD_PATH = "release/DFRoot_*.apk\nrelease/DFRoot_*.apk.sha256"
-PUBLISH_FILES = "dist/DFRoot_*.apk\ndist/DFRoot_*.apk.sha256"
+# Licence/notices are conveyed as release assets alongside the signed APK.
+LICENSE_ASSETS = ("GPL-3.0.txt", "NOTICE", "THIRD_PARTY_NOTICES.md")
+# Byte-exact pin of the verbatim official text from gnu.org; any edit to the
+# conveyed licence (or a truncated/substituted copy) is a policy violation.
+GPL_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+RELEASE_UPLOAD_PATH = (
+    "release/DFRoot_*.apk\n"
+    "release/DFRoot_*.apk.sha256\n"
+    "release/GPL-3.0.txt\n"
+    "release/NOTICE\n"
+    "release/THIRD_PARTY_NOTICES.md"
+)
+PUBLISH_FILES = (
+    "dist/DFRoot_*.apk\n"
+    "dist/DFRoot_*.apk.sha256\n"
+    "dist/GPL-3.0.txt\n"
+    "dist/NOTICE\n"
+    "dist/THIRD_PARTY_NOTICES.md"
+)
 LKM_UPLOAD_PATH = "out/dfroot-${{ matrix.kmi }}.ko"
 FORBIDDEN_ARTIFACT_TOKENS = ("keystore", "signing", ".jks", "..")
 EXPR_RE = re.compile(r"\$\{\{.*?\}\}")
@@ -698,6 +716,14 @@ def write_dist(root: Path, names: list[str]) -> Path:
     return dist
 
 
+def write_license_assets(root: Path) -> dict[str, bytes]:
+    """Create the three licence/notice source files at the checkout root."""
+    contents = {name: f"{name} fixture content\n".encode() for name in LICENSE_ASSETS}
+    for name, data in contents.items():
+        (root / name).write_bytes(data)
+    return contents
+
+
 def make_fake_sdk(root: Path, exit_code: int) -> tuple[Path, Path]:
     sdk = root / "sdk"
     tool = sdk / "build-tools" / "35.0.0" / "apksigner"
@@ -834,6 +860,32 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertNotIn(token, RELEASE_UPLOAD_PATH.lower())
                 self.assertNotIn(token, PUBLISH_FILES.lower())
                 self.assertNotIn(token, CI_UPLOAD_PATH.lower())
+
+    def test_gpl_license_text_is_sha256_pinned(self) -> None:
+        """GPL-3.0.txt must remain the verbatim official GPLv3 text."""
+        data = (ROOT / "GPL-3.0.txt").read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), GPL_SHA256)
+        self.assertIn(b"GNU GENERAL PUBLIC LICENSE", data)
+        self.assertIn(b"Version 3, 29 June 2007", data)
+
+    def test_license_and_notice_assets_are_exact_release_allowlist(self) -> None:
+        """Each licence asset is packaged, uploaded and published by name."""
+        for asset in LICENSE_ASSETS:
+            with self.subTest(asset=asset):
+                self.assertIn("cp -- " + " ".join(LICENSE_ASSETS) + " release/", PACKAGE_SIGNED_SCRIPT)
+                self.assertIn("release/" + asset, RELEASE_UPLOAD_PATH.splitlines())
+                self.assertIn("dist/" + asset, PUBLISH_FILES.splitlines())
+                self.assertTrue((ROOT / asset).is_file(), f"missing source asset {asset}")
+                self.assertGreater((ROOT / asset).stat().st_size, 0)
+        # The allowlists remain closed: no asset outside the exact set is added.
+        self.assertEqual(
+            [line.removeprefix("release/") for line in RELEASE_UPLOAD_PATH.splitlines()][2:],
+            list(LICENSE_ASSETS),
+        )
+        self.assertEqual(
+            [line.removeprefix("dist/") for line in PUBLISH_FILES.splitlines()][2:],
+            list(LICENSE_ASSETS),
+        )
 
     def test_ddk_stays_digest_pinned_non_privileged_and_uploads_one_ko(self) -> None:
         job = self.jobs["build-lkms"]
@@ -1183,6 +1235,23 @@ class MutationDetectionTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             assert_safe_artifact_entries("files", PUBLISH_FILES + "\n../keystore.jks")
 
+    def test_removing_a_license_asset_is_rejected(self) -> None:
+        """Dropping a licence asset from packaging/upload/publish is a violation."""
+        for old in ("            release/GPL-3.0.txt\n", "            dist/NOTICE\n"):
+            with self.subTest(removal=old):
+                mutated = self.mutate(old, "")
+                with self.assertRaisesRegex(AssertionError, "must be exactly"):
+                    assert_exact_artifact_inputs(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+        package_mutation = self.mutate(
+            "          cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/\n", ""
+        )
+        with self.assertRaisesRegex(AssertionError, "run script must be exactly"):
+            assert_exact_release_run_scripts(package_mutation)
+        with self.assertRaises(AssertionError):
+            validate_workflow(package_mutation)
+
     def test_ancestry_step_cannot_be_skipped_or_tolerated(self) -> None:
         anchor = "      - name: Verify tag is on master\n"
         cases = {
@@ -1424,6 +1493,7 @@ class BehavioralScriptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_release_apks(root, ["DFRoot_one.apk"])
+            write_license_assets(root)
             apk = root / "app/build/outputs/apk/release/DFRoot_one.apk"
             stale = root / "release/DFRoot_one.apk.sha256"
             stale.parent.mkdir(parents=True)
@@ -1435,6 +1505,19 @@ class BehavioralScriptTests(unittest.TestCase):
             self.assertEqual(packaged.read_bytes(), apk.read_bytes())
             expected = hashlib.sha256(apk.read_bytes()).hexdigest() + "  DFRoot_one.apk\n"
             self.assertEqual(stale.read_text(encoding="utf-8"), expected)
+
+    def test_package_script_conveys_license_and_notice_assets(self) -> None:
+        """The signed release package must include all three licence files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_release_apks(root, ["DFRoot_signed.apk"])
+            contents = write_license_assets(root)
+
+            result = run_in_dir(self.package_script, root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for name, data in contents.items():
+                with self.subTest(asset=name):
+                    self.assertEqual((root / "release" / name).read_bytes(), data)
 
     def test_publisher_checksum_script_accepts_one_valid_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
