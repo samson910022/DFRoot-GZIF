@@ -1,4 +1,7 @@
+import com.android.build.api.artifact.SingleArtifact
+import java.security.MessageDigest
 import java.util.Properties
+import java.util.zip.ZipFile
 // Modified 2026-11-17 (DFRoot GZIF): compileSdk/targetSdk 37→36; versionCode 407→408; versionName 4.7→4.8-gzif. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): signing.properties is now optional at configuration time.
 // Reason: PR CI / fresh clones have no signing.properties. Reading it unconditionally made
@@ -8,6 +11,78 @@ plugins {
     // Modified 2026-11-24 (DFRoot GZIF): use the version catalog alias so the AGP
     // version is defined in exactly one place (gradle/libs.versions.toml).
     alias(libs.plugins.android.application)
+}
+
+val bundledLoaderPins = mapOf(
+    "libksud.so" to "aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940",
+    "libksudnext.so" to "679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d"
+)
+val requiredBundledLoaders = setOf("libksud.so", "libksudnext.so")
+require(bundledLoaderPins.keys == requiredBundledLoaders) {
+    "bundledLoaderPins must define exactly $requiredBundledLoaders; found ${bundledLoaderPins.keys}"
+}
+require(bundledLoaderPins.all { (loader, pin) -> pin.matches(Regex("[0-9a-f]{64}")) }) {
+    "bundledLoaderPins must contain lowercase SHA-256 values for $requiredBundledLoaders"
+}
+
+abstract class VerifyPackagedLoaderPinsTask : DefaultTask() {
+    @get:InputDirectory
+    abstract val loaderDirectory: DirectoryProperty
+
+    @get:InputDirectory
+    abstract val apkDirectory: DirectoryProperty
+
+    @get:Input
+    abstract val loaderPins: MapProperty<String, String>
+
+    @TaskAction
+    fun verify() {
+        val pins = loaderPins.get()
+        if (pins.keys != requiredBundledLoaders) {
+            throw GradleException("bundledLoaderPins must define exactly $requiredBundledLoaders; " +
+                    "found ${pins.keys}")
+        }
+
+        for ((loaderName, expectedPin) in pins) {
+            val repositoryLoader = loaderDirectory.get().file(loaderName).asFile
+            if (!repositoryLoader.isFile) {
+                throw GradleException("authoritative repository loader is missing: $repositoryLoader")
+            }
+            val repositoryPin = sha256(repositoryLoader.readBytes())
+            if (repositoryPin != expectedPin) {
+                throw GradleException("repository loader $loaderName does not match its bundled-loader pin: " +
+                        "expected $expectedPin, got $repositoryPin")
+            }
+        }
+
+        val apks = apkDirectory.get().asFileTree.matching { include("**/*.apk") }.files
+        if (apks.size != 1) {
+            throw GradleException("expected exactly one packaged APK in ${apkDirectory.get().asFile}, " +
+                    "found ${apks.size}; refusing to verify a stale or ambiguous artifact")
+        }
+        ZipFile(apks.single()).use { apk ->
+            for ((loaderName, expectedPin) in pins) {
+                val entryName = "lib/arm64-v8a/$loaderName"
+                val entry = apk.getEntry(entryName)
+                    ?: throw GradleException("packaged APK is missing $entryName; loader pins cannot be verified")
+                if (entry.isDirectory) {
+                    throw GradleException("packaged APK entry $entryName is a directory")
+                }
+                val actualPin = apk.getInputStream(entry).use { sha256(it.readBytes()) }
+                if (actualPin != expectedPin) {
+                    throw GradleException("packaged loader $entryName does not match its bundled-loader pin: " +
+                            "expected $expectedPin, got $actualPin")
+                }
+                logger.lifecycle("Verified $entryName against bundled-loader pin $expectedPin")
+            }
+        }
+    }
+
+    private fun sha256(bytes: ByteArray): String {
+        return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
+            "%02x".format(it)
+        }
+    }
 }
 
 val signingProps = Properties()
@@ -52,6 +127,10 @@ android {
         targetSdk = 36
         versionCode = 408
         versionName = "4.8-gzif"
+        buildConfigField("String", "BUNDLED_LOADER_CLASSIC_SHA256",
+                "\"${bundledLoaderPins.getValue("libksud.so")}\"")
+        buildConfigField("String", "BUNDLED_LOADER_NEXT_SHA256",
+                "\"${bundledLoaderPins.getValue("libksudnext.so")}\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -96,6 +175,15 @@ android {
         checkReleaseBuilds = false
     }
 
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all {
+                it.systemProperty("dfroot.repoRoot", rootProject.projectDir.absolutePath)
+            }
+        }
+    }
+
     externalNativeBuild {
         cmake {
             // Pin CMake so AGP uses a fixed version (must satisfy CMakeLists.txt's
@@ -108,6 +196,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // AGP strips jniLibs when an NDK is configured. These prebuilt
+            // loaders are authoritative pinned artifacts, not debug symbols.
+            keepDebugSymbols += listOf("**/libksud.so", "**/libksudnext.so")
         }
     }
 }
@@ -116,6 +207,15 @@ androidComponents {
     onVariants { variant ->
         variant.outputs.forEach { output ->
             output.outputFileName.set(output.versionName.map { vn -> "DFRoot_${vn}.apk" })
+        }
+        if (variant.buildType == "debug" || variant.buildType == "release") {
+            val variantTaskName = variant.name.replaceFirstChar { it.uppercase() }
+            tasks.register<VerifyPackagedLoaderPinsTask>("verify${variantTaskName}PackagedLoaderPins") {
+                loaderDirectory.set(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
+                apkDirectory.set(variant.artifacts.get(SingleArtifact.APK))
+                loaderPins.set(bundledLoaderPins)
+                dependsOn("package$variantTaskName")
+            }
         }
     }
 }

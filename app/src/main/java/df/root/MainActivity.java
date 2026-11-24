@@ -1,3 +1,4 @@
+// Modified 2026-11-24 (DFRoot GZIF): selection-specific fail-closed preflight and pure typed result messages. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -26,7 +27,7 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -43,7 +44,8 @@ public class MainActivity extends Activity implements IReporter {
     private Context mDeCtx;
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private final ExecutorService mExec = Executors.newSingleThreadExecutor();
-    private int mValidSuManagerPos = 0;
+    private String mPrecheckReason = "";
+    private int mPrecheckRequestId;
     // Set on the main thread in onDestroy(); read from the background executor
     // and from posted UI runnables. Guards against a still-running exploit
     // updating the destroyed Activity's views or showing stray Toasts after a
@@ -80,11 +82,6 @@ public class MainActivity extends Activity implements IReporter {
         outputView = findViewById(R.id.outputView);
         spinnerSuManager = findViewById(R.id.spinnerSuManager);
 
-        if (!ExploitRunner.hasBundledLoader(mDeCtx)) {
-            report("WARNING: no bundled Samsung-patched ksud loader found in this APK.\n" +
-                   "Reinstall DFRoot GZIF before trying to install root.\n");
-        }
-
         PackageManager pm = getPackageManager();
         List<SuManagerEntry> entries = new ArrayList<>();
         for (String pkg : ExploitRunner.KSU_MANAGER_PACKAGES) {
@@ -111,7 +108,6 @@ public class MainActivity extends Activity implements IReporter {
         for (int i = 1; i < entries.size(); i++) {
             if (entries.get(i).packageName.equals(saved)) {
                 spinnerSuManager.setSelection(i);
-                mValidSuManagerPos = i;
                 savedFound = true;
                 break;
             }
@@ -128,7 +124,6 @@ public class MainActivity extends Activity implements IReporter {
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
                 SuManagerEntry e = entries.get(pos);
                 if (e.packageName == null) return;
-                mValidSuManagerPos = pos;
                 // commit(), not apply(): the selected manager is read by native
                 // bootstrap.c straight from the DE prefs XML during a run, and
                 // apply()'s asynchronous disk flush can expose a stale value.
@@ -174,9 +169,64 @@ public class MainActivity extends Activity implements IReporter {
     }
 
     private void updateRunButton() {
-        btnRun.setEnabled(mValidSuManagerPos >= 1
-                && ExploitRunner.hasBundledLoader(mDeCtx)
-                && !new File("/dev/df").exists());
+        // Hashing the selected loader is file I/O, so keep it off the main thread.
+        btnRun.setEnabled(false);
+        final int requestId = ++mPrecheckRequestId;
+        final String selectedPackage = selectedManagerPackage();
+        mExec.execute(() -> {
+            boolean alreadyHooked;
+            try {
+                alreadyHooked = HookMarkerProbe.defaultMarkerPresent();
+            } catch (IOException | SecurityException e) {
+                Log.w(TAG, "Hook marker inspection failed", e);
+                postRunUnavailable(requestId, "hook marker could not be inspected: " + e.getMessage());
+                return;
+            }
+            if (alreadyHooked) {
+                postRunUnavailable(requestId, "device is already hooked");
+                return;
+            }
+
+            final RunPreflight.Result preflight = preflightForSelection(selectedPackage);
+            boolean ready = preflight != null && preflight.isReady();
+            String reason = ready ? "" : preflight == null
+                    ? "precheck could not be completed" : preflight.getReason();
+            mMain.post(() -> {
+                if (mDestroyed || requestId != mPrecheckRequestId) return;
+                btnRun.setEnabled(ready);
+                mPrecheckReason = reason;
+                if (!reason.isEmpty()) {
+                    report("Run unavailable: " + reason + "\n");
+                }
+            });
+        });
+    }
+
+    private void postRunUnavailable(int requestId, String reason) {
+        mMain.post(() -> {
+            if (mDestroyed || requestId != mPrecheckRequestId) return;
+            btnRun.setEnabled(false);
+            if (!reason.equals(mPrecheckReason)) {
+                mPrecheckReason = reason;
+                report("Run unavailable: " + reason + "\n");
+            }
+        });
+    }
+
+    private RunPreflight.Result preflightForSelection(String selectedPackage) {
+        try {
+            return RunPreflight.check(AndroidRunEnvironment.forSelection(
+                    mDeCtx, selectedPackage));
+        } catch (Exception e) {
+            Log.w(TAG, "Run precheck unavailable", e);
+            return null;
+        }
+    }
+
+    private String selectedManagerPackage() {
+        Object selected = spinnerSuManager.getSelectedItem();
+        return selected instanceof SuManagerEntry
+                ? ((SuManagerEntry) selected).packageName : null;
     }
 
     private void runExploit() {
@@ -188,6 +238,7 @@ public class MainActivity extends Activity implements IReporter {
         if (pm == null) {
             Log.w(TAG, "PowerManager unavailable; running without wake lock");
         }
+        RunResult result;
         try {
             // Acquire inside try so an exception here still reaches finally:
             // the lock is released and updateRunButton() is always posted,
@@ -196,15 +247,11 @@ public class MainActivity extends Activity implements IReporter {
                 wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:manual");
                 wl.acquire(ExploitRunner.WAKELOCK_TIMEOUT_MS);
             }
-            int rc = ExploitRunner.run(mDeCtx, this);
-            String msg = resultMessage(rc);
-            mMain.post(() -> {
-                if (mDestroyed) return; // don't pop a Toast for a dead Activity
-                Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
-            });
+            result = ExploitRunner.runDetailed(mDeCtx, this);
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");
+            result = RunResult.exception(e);
         } finally {
             if (wl != null && wl.isHeld()) {
                 wl.release();
@@ -214,19 +261,11 @@ public class MainActivity extends Activity implements IReporter {
                 updateRunButton();
             });
         }
-    }
-
-    /** User-facing text for every ExploitRunner.RESULT_* code; keep in sync with its contract. */
-    private static String resultMessage(int rc) {
-        switch (rc) {
-            case ExploitRunner.RESULT_OK:                  return "DFRoot: SUCCESS";
-            case ExploitRunner.RESULT_KSUD_ERROR:          return "DFRoot: Error - ksud nonzero exit";
-            case ExploitRunner.RESULT_PRECHECK_FAILED:     return "DFRoot: Error - precheck failed (see output)";
-            case ExploitRunner.RESULT_PATCH_FAILED:        return "DFRoot: Error - failed to patch files";
-            case ExploitRunner.RESULT_SOFT_REBOOT_PENDING: return "DFRoot: root active — device may soft-reboot shortly";
-            case ExploitRunner.RESULT_NATIVE_SETUP_FAILED: return "DFRoot: Error - native setup/timeout (see logcat & dmesg)";
-            default:                                       return "DFRoot: Error - unknown result (" + rc + ")";
-        }
+        String msg = ResultMessages.message(result);
+        mMain.post(() -> {
+            if (mDestroyed) return; // don't pop a Toast for a dead Activity
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+        });
     }
 
     private static class SuManagerEntry {

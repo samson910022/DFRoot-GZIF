@@ -252,6 +252,14 @@ jobs:
             sleep 30
           done
 
+      - name: Verify packaged loader pins
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain
+          else
+            ./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
+          fi
+
       - name: Verify APK counts
         # Fail closed if the build produced zero or more than one APK of either
         # variant; a missing release APK is not a successful unsigned CI build.

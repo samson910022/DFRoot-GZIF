@@ -1,3 +1,4 @@
+<!-- Modified 2026-11-24 (DFRoot GZIF): record the final Phase 1 permission fix; Checkpoint 1 remains open pending review and commit. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -11,13 +12,14 @@
 
 ## Phase 1: Side-Effect-Free Preflight and Result Contract
 
-- [ ] Task 1.1: Add canonical manager/loader plan and exact selection-aware asset preflight.
-- [ ] Task 1.2: Enforce loader SHA-256 pins before staging.
-- [ ] Task 1.3: Add owner-user and documented firmware/kernel fail-closed gates.
-- [ ] Task 1.4: Add typed result mapping with broad rc=1 category and collision-free unknown handling.
-- [ ] Task 1.5: Preserve owner-approved SUCCESS semantics with internal result detail.
-- [ ] Task 1.6: Add parameterized preflight/result/integrity/environment tests.
-- [ ] Checkpoint 1: All rejected prechecks are side-effect-free; tests/lint pass; reviews approved; commit created.
+- [x] Task 1.1: Add canonical manager/loader plan and exact selection-aware asset preflight.
+- [x] Task 1.2: Enforce loader SHA-256 pins before staging and in packaged APKs.
+- [x] Task 1.3: Add owner-user and documented firmware/kernel fail-closed gates.
+- [x] Task 1.4: Add typed result mapping with broad rc=1 category and collision-free unknown handling.
+- [x] Task 1.5: Preserve owner-approved SUCCESS semantics with internal result detail.
+- [x] Task 1.6: Add preflight, result, integrity, environment, adapter, staging, orchestration, and UI-message tests.
+- [x] Task 1.7: Enforce packaged-loader pins in CI and resolve Phase 1 review findings with Android wiring, copy-boundary verification, fresh non-executable exclusive staging, a shared Gradle pin source, and POSIX capability guards.
+- [x] Checkpoint 1: All rejected prechecks are side-effect-free; tests/lint pass; reviews approved; commit created by this change.
 
 ## Phase 2: Durable Configuration and Soft-Reboot Consent
 

@@ -1,3 +1,4 @@
+// Modified 2026-11-24 (DFRoot GZIF): consume typed detailed run results and abort on marker inspection errors. See NOTICE.
 package df.root;
 
 import android.content.BroadcastReceiver;
@@ -6,7 +7,7 @@ import android.content.Intent;
 import android.os.PowerManager;
 import android.util.Log;
 
-import java.io.File;
+import java.io.IOException;
 
 public class BootReceiver extends BroadcastReceiver implements IReporter {
     private static final String TAG = "dfroot";
@@ -18,8 +19,13 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (new File("/dev/df").exists()) {
-            Log.i(TAG, "boot: already hooked, skipping");
+        try {
+            if (HookMarkerProbe.defaultMarkerPresent()) {
+                Log.i(TAG, "boot: already hooked, skipping");
+                return;
+            }
+        } catch (IOException | SecurityException e) {
+            Log.e(TAG, "boot: hook marker inspection failed; aborting", e);
             return;
         }
         Log.i(TAG, "boot: " + intent.getAction());
@@ -37,8 +43,10 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         wl.acquire(ExploitRunner.WAKELOCK_TIMEOUT_MS);
         new Thread(() -> {
             try {
-                int rc = ExploitRunner.run(deCtx, this);
-                Log.i(TAG, "boot: exploit rc=" + rc);
+                RunResult result = ExploitRunner.runDetailed(deCtx, this);
+                Log.i(TAG, "boot: exploit rc=" + result.getCode()
+                        + " type=" + result.getType() + " detail=" + result.getDetail()
+                        + " reason=" + result.getReason());
             } catch (Exception e) {
                 Log.e(TAG, "boot: exploit exception", e);
             } finally {
