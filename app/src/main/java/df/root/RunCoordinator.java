@@ -38,7 +38,7 @@ public final class RunCoordinator {
     /** Engine implementations return only after actual completion, never merely on timeout. */
     public interface Engine {
         RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
-                      RunConfig.ExecutionMode mode, RunEventListener events,
+                      RunConfig.ExecutionMode mode, String operationId, RunEventListener events,
                       IReporter reporter) throws Exception;
     }
 
@@ -296,7 +296,7 @@ public final class RunCoordinator {
             };
             IReporter reporter = message -> appendOperationLog(operation, message);
             RunResult completed = engine.run(operation.context, admission, operation.mode,
-                    events, reporter);
+                    operation.id, events, reporter);
             if (completed == null) {
                 throw new IllegalStateException("engine returned null");
             }
@@ -478,8 +478,9 @@ public final class RunCoordinator {
 
     private static RunResult runProductionEngine(
             Context context, ConfigurationRepository.RunAdmission admission,
-            RunConfig.ExecutionMode mode, RunEventListener events, IReporter reporter) {
-        return ExploitRunner.runDetailed(context, admission, mode, reporter, events);
+            RunConfig.ExecutionMode mode, String operationId, RunEventListener events,
+            IReporter reporter) {
+        return ExploitRunner.runDetailed(context, admission, mode, operationId, reporter, events);
     }
 
     public static final class Submission {

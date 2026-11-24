@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): map native exit codes without Java/native collisions. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): rc=1 now covers run-config/bootstrap rather than preference XML. See NOTICE.
 package df.root;
 
 /** Pure mapper for the native process exit-code contract. */
@@ -11,7 +12,7 @@ public final class NativeResultMapper {
                 return new RunResult(ExploitRunner.RESULT_OK, RunResult.Type.SUCCESS,
                         RunResult.Detail.LATE_LOAD_COMPLETED, null);
             case 1:
-                // Broad by contract: preferences, modules, staging, or late-load failed.
+                // Broad by contract: run-config/bootstrap, modules, staging, or late-load failed.
                 return new RunResult(ExploitRunner.RESULT_KSUD_ERROR,
                         RunResult.Type.BOOTSTRAP_ERROR, RunResult.Detail.NATIVE_EXIT, null);
             case 2:

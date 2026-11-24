@@ -584,7 +584,7 @@ public class SettingsFragmentTest {
     private void installIdleCoordinator() {
         coordinatorWorker = new QueueExecutor();
         coordinator = new RunCoordinator(repository, coordinatorWorker, Runnable::run,
-                (context, admission, mode, events, reporter) -> NativeResultMapper.map(0), 0L);
+                (context, admission, mode, operationId, events, reporter) -> NativeResultMapper.map(0), 0L);
         RunCoordinator.setInstanceForTesting(coordinator);
     }
 
@@ -681,8 +681,8 @@ public class SettingsFragmentTest {
 
         @Override
         public RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
-                             RunConfig.ExecutionMode mode, RunEventListener events,
-                             IReporter reporter) {
+                             RunConfig.ExecutionMode mode, String operationId,
+                             RunEventListener events, IReporter reporter) {
             if (indeterminate) {
                 events.onTimeout();
             }

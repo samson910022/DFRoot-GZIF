@@ -53,7 +53,7 @@ public class RunCoordinatorProcessIntegrationTest {
         try {
             AtomicReference<ConfigurationRepository.RunAdmission> admitted =
                     new AtomicReference<>();
-            RunCoordinator.Engine engine = (context, admission, mode, events, reporter) -> {
+            RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
                 admitted.set(admission);
                 ChildProcessSupervisor.Result result = new ChildProcessSupervisor(
                         ignored -> process, TEST_TIMEOUT_MS,
@@ -115,7 +115,7 @@ public class RunCoordinatorProcessIntegrationTest {
             AtomicInteger outputErrors = new AtomicInteger();
             AtomicReference<ConfigurationRepository.RunAdmission> admitted =
                     new AtomicReference<>();
-            RunCoordinator.Engine engine = (context, admission, mode, events, reporter) -> {
+            RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
                 admitted.set(admission);
                 IReporter observedReporter = message -> {
                     reporter.report(message);
@@ -194,7 +194,7 @@ public class RunCoordinatorProcessIntegrationTest {
                     new AtomicReference<>();
             AtomicReference<Thread> coordinatorWorker = new AtomicReference<>();
             AtomicBoolean interruptRestored = new AtomicBoolean();
-            RunCoordinator.Engine engine = (context, admission, mode, events, reporter) -> {
+            RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
                 coordinatorWorker.set(Thread.currentThread());
                 admitted.set(admission);
                 // Acquisition has already notified. Only the actual release notifies;

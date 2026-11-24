@@ -1,3 +1,4 @@
+# Modified 2026-11-25 (DFRoot GZIF): gate nonprivileged host-native run-config tests in app-checks. See NOTICE.
 name: Build
 
 on:
@@ -96,6 +97,7 @@ jobs:
       - name: Clean previous test and lint reports
         run: rm -rf app/build/test-results app/build/reports
 
+      # Harmless host-only fixtures: no KO, NDK toolchain, privileged container, or device.
       - name: Run host-native run-config tests
         run: |
           cmake -S app/src/main/jni/host-tests -B build/host-run-config-tests -DCMAKE_BUILD_TYPE=Debug

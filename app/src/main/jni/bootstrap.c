@@ -1,4 +1,5 @@
 /* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): read only the admitted run-config artifact, never SharedPreferences XML. See NOTICE. */
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -8,51 +9,13 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include "run_config_codec.h"
 
 #define BLKROSET   0x125d
 #define KSUD_STAGE "/data/user_de/0/df.root/ksud"
 #define KSUD       "/data/adb/ksud"
-#define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
+#define RUN_CONFIG_PATH "/data/user_de/0/df.root/run_config"
 #define MODULES_DIR "/data/adb/modules"
-
-static int pref_true(const char *buf, const char *key)
-{
-    char needle[64];
-    snprintf(needle, sizeof(needle), "name=\"%s\"", key);
-    char *p = strstr(buf, needle);
-    if (!p) return 0;
-    char *tag_end = strchr(p, '>');
-    char *v = strstr(p, "value=\"true\"");
-    return v && tag_end && v < tag_end;
-}
-
-static int read_prefs(char *su_manager, size_t su_manager_size, int *soft_reboot,
-                      int *disable_modules)
-{
-    int fd = open(PREFS_PATH, O_RDONLY);
-    if (fd < 0) return -1;
-
-    char buf[4096];
-    int n = read(fd, buf, sizeof(buf) - 1);
-    close(fd);
-    if (n <= 0) return -1;
-    buf[n] = '\0';
-
-    char *p = strstr(buf, "name=\"su_manager\">");
-    if (!p) return -1;
-    p += strlen("name=\"su_manager\">");
-    char *end = strchr(p, '<');
-    if (!end) return -1;
-    size_t len = end - p;
-    if (len == 0 || len >= su_manager_size) return -1;
-    memcpy(su_manager, p, len);
-    su_manager[len] = '\0';
-
-    *soft_reboot = pref_true(buf, "soft_reboot");
-    *disable_modules = pref_true(buf, "disable_modules");
-
-    return 0;
-}
 
 static int adopt_zygote_env(void)
 {
@@ -197,9 +160,8 @@ static int disable_modules(void)
 int main(void)
 {
     touch("/dev/dfm1");
-    char su_manager[256];
-    int soft_reboot, disable_mods;
-    if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
+    struct run_config config;
+    if (run_config_parse_file(RUN_CONFIG_PATH, &config) != 0) {
         touch("/dev/dfme0");
         return 1;
     }
@@ -212,7 +174,7 @@ int main(void)
     if (set_partitions_ro())
         touch("/dev/dfmw1");
 
-    if (disable_mods) {
+    if (config.disable_modules) {
         touch("/dev/dfm4");
         if (disable_modules()) {
             touch("/dev/dfme1");
@@ -227,9 +189,10 @@ int main(void)
         touch("/dev/dfme2");
         return 1;
     }
-    if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load", "--package-name", su_manager, NULL }) == 0) {
+    if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
+                                  "--package-name", config.manager, NULL }) == 0) {
         touch("/dev/dfm6");
-        if (soft_reboot) {
+        if (config.soft_reboot) {
             while (late_load_running()) sleep(1);
             run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
         }

@@ -898,8 +898,8 @@ public class RunCoordinatorTest {
 
         @Override
         public RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
-                             RunConfig.ExecutionMode mode, RunEventListener events,
-                             IReporter reporter) throws Exception {
+                             RunConfig.ExecutionMode mode, String operationId,
+                             RunEventListener events, IReporter reporter) throws Exception {
             calls.incrementAndGet();
             Plan plan;
             synchronized (plans) {

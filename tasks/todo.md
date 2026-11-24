@@ -1,4 +1,6 @@
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -48,7 +50,53 @@
 
 ## Phase 4: Native Snapshot, Completion Protocol, and Staging Hardening
 
-- [ ] Task 4.1: Publish atomic versioned run-config artifact and replace native SharedPreferences parsing.
+- [x] Task 4.1: Publish atomic versioned run-config artifact and replace native SharedPreferences parsing.
+
+  **Slice 4A review-fix round (uncommitted).** Scope note: this slice *intentionally*
+  hardened native argv parsing (strict, range-checked `--encap-port`, `--sender-port`,
+  `--spi`, `--aes-key`, and mandatory `--run-config` before any patch work). This is a
+  deliberate deviation from the older note that called an "AES-key argv redesign"
+  out of scope; no public API, SUCCESS contract, or root-probe policy changed.
+  Slice 4B terminal/staging work remains untouched and all 4B tasks stay unchecked.
+
+  Production: Java `validateText` now rejects `=` as well as ISO controls (so a
+  fingerprint/kernel cannot create a second `key=value` separator); temp-file safety
+  checks a regular non-symlink before chmod and requires 0600 only *after* chmod;
+  the native manager buffer is `MAX + 1`; stale native marker strings now say
+  run-config instead of preferences; the codec has a compile-time-only host test
+  mutation seam. Tests exercise the real `effectsFor` closure through narrow
+  package-visible seams (real publish ID and real `--run-config` argv captured),
+  and the host suite covers uppercase hex, empty paths, NULL outputs, and a mid-read
+  identity/size change. CI uses `--no-tests=error`, every host `add_test` has
+  `TIMEOUT 30`, relocated mktemp roots are re-probed and emptied after CTest.
+
+  Mutation evidence (each mutation applied, the named test run, then the source
+  restored; "killed" = targeted test failed while the mutation was present):
+
+  - Java `=` acceptance removed (`|| codePoint == '='` → `false`) — killed by
+    `RunConfigArtifactTest.rejectsInvalidSnapshotInputsBeforeCreatingFiles`.
+  - Native extra-`=` separator check removed — killed by host
+    `run_config.malformed_extra_equals` and `run_config.equals_in_value`.
+  - Full pre-chmod 0600 check restored before chmod — killed by
+    `RunConfigArtifactTest.createTempFilePermissionsAreIgnoredUntilExplicitChmod`.
+  - Pre-chmod no-follow/regular-file check dropped entirely — killed by
+    `RunConfigArtifactTest.symlinkTemporaryFileIsRejectedBeforeAnyChmod`.
+  - `operationId` final hop dropped (`newOperationId()` substituted in
+    `effectsFor.execute`) — killed by `ExploitRunnerProductionEffectsTest`.
+  - `--run-config` argument pair removed from `runBinary` — killed by
+    `ExploitRunnerProductionEffectsTest`.
+  - Empty-CTest guard removed — demonstrated by `ctest` on an empty test project:
+    without `--no-tests=error` exit 0 ("No tests were found!!!"), with the guard
+    exit 8; the CI step now always passes the guard.
+  - TOCTOU final recheck removed (dev/ino/size comparison dropped) — killed by
+    host `run_config.toctou_identity_mismatch`.
+  - Lowercase-only `parse_hex_key` — killed by host `run_config.args_key_uppercase`.
+  - Lowercase-only `valid_loader_hash` — killed by host
+    `run_config.valid_hash_uppercase`.
+
+  Verification: `git diff --check` clean; 65/65 host tests passed (0 failures);
+  368 JVM tests (0 failures/errors/skips); lint 0 errors (20 pre-existing warnings).
+
 - [ ] Task 4.2: Make `dfm6` non-terminal and add terminal completion/error protocol.
 - [ ] Task 4.3: Bound late-load wait and check waitpid/marker errors.
 - [ ] Task 4.4: Emit rc=4 only after successful soft-reboot command; add distinct failure code.

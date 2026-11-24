@@ -742,8 +742,8 @@ public class MainActivityTest {
 
         @Override
         public RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
-                             RunConfig.ExecutionMode mode, RunEventListener events,
-                             IReporter reporter) {
+                             RunConfig.ExecutionMode mode, String operationId,
+                             RunEventListener events, IReporter reporter) {
             calls.incrementAndGet();
             reporter.report("coordinator log line\n");
             return NativeResultMapper.map(0);
@@ -764,8 +764,8 @@ public class MainActivityTest {
 
         @Override
         public RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
-                             RunConfig.ExecutionMode mode, RunEventListener events,
-                             IReporter reporter) {
+                             RunConfig.ExecutionMode mode, String operationId,
+                             RunEventListener events, IReporter reporter) {
             reporter.report(line);
             if (indeterminate) {
                 events.onTimeout();
