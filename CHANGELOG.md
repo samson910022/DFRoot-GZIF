@@ -123,6 +123,10 @@ Residual risks / **release gates** (not closed by this PR):
   `ExploitRunner.run()` on a later boot. The UI hides the stale choice but
   cannot force the write to succeed. Mitigation is to clear app data / disable
   Start on Boot; tracked as a residual risk, not fixed by this PR.
+- The 32-byte AES key is still passed to the native binary on `argv`
+  (`/proc/<pid>/cmdline` exposure). Both in-process copies are wiped on all
+  paths, but fully removing this residual needs a Java→native fd/pipe contract
+  change; the CLI format is preserved to avoid a cross-branch conflict.
 
 ## 4.8-gzif (2026-11-17)
 
