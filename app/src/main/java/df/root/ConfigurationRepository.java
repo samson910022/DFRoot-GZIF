@@ -216,11 +216,21 @@ public final class ConfigurationRepository {
     }
 
     public String getRunAdmissionBlockReason(RunConfig.ExecutionMode mode) {
+        return getRunAdmissionBlockReason(mode, null);
+    }
+
+    public String getRunAdmissionBlockReason(RunConfig.ExecutionMode mode,
+                                             Long expectedGeneration) {
         Objects.requireNonNull(mode, "mode");
         synchronized (lock) {
             String reason = baseAdmissionBlockReason();
             if (!reason.isEmpty()) {
                 return reason;
+            }
+            if (expectedGeneration != null
+                    && confirmedSnapshot.getGeneration() != expectedGeneration) {
+                return "configuration generation changed (expected " + expectedGeneration
+                        + ", confirmed " + confirmedSnapshot.getGeneration() + ")";
             }
             try {
                 confirmedSnapshot.validateFor(mode);
@@ -297,9 +307,19 @@ public final class ConfigurationRepository {
 
     /** Atomically freezes configuration and returns a mode-bound live run capability. */
     public RunAdmission acquireRunSnapshot(RunConfig.ExecutionMode mode) {
+        return acquireRunSnapshot(mode, null);
+    }
+
+    /** Freezes only the generation confirmed when the caller requested the run. */
+    public RunAdmission acquireRunSnapshot(RunConfig.ExecutionMode mode,
+                                           Long expectedGeneration) {
         Objects.requireNonNull(mode, "mode");
         synchronized (lock) {
             if (frozen || writePending || status.state != State.VERIFIED || confirmedSnapshot == null) {
+                return null;
+            }
+            if (expectedGeneration != null
+                    && confirmedSnapshot.getGeneration() != expectedGeneration) {
                 return null;
             }
             try {

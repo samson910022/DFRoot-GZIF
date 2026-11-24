@@ -1,4 +1,4 @@
-// Modified 2026-11-24 (DFRoot GZIF): add an immutable typed run result with explicit origin detail. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): add an immutable typed run result with explicit origin and process-uncertainty detail. See NOTICE.
 package df.root;
 
 /** Immutable result contract shared by native mapping, preflight, and callers. */
@@ -20,7 +20,9 @@ public final class RunResult {
         ALREADY_HOOKED,
         NATIVE_EXIT,
         PREFLIGHT_REJECTION,
-        EXCEPTION
+        EXCEPTION,
+        PROCESS_TIMEOUT,
+        PROCESS_INTERRUPTION
     }
 
     private final int code;
@@ -73,5 +75,19 @@ public final class RunResult {
                 + (message == null || message.isEmpty() ? "" : ": " + message);
         return new RunResult(ExploitRunner.RESULT_INDETERMINATE, Type.INDETERMINATE,
                 Detail.EXCEPTION, reason);
+    }
+
+    /** A started child exceeded its observation bound; its effect remains unknown until exit. */
+    public static RunResult processTimeout() {
+        return new RunResult(ExploitRunner.RESULT_INDETERMINATE, Type.INDETERMINATE,
+                Detail.PROCESS_TIMEOUT,
+                "child process timed out; outcome remains indeterminate until actual exit");
+    }
+
+    /** The supervising thread was interrupted; the child continues and remains owned until exit. */
+    public static RunResult processInterrupted() {
+        return new RunResult(ExploitRunner.RESULT_INDETERMINATE, Type.INDETERMINATE,
+                Detail.PROCESS_INTERRUPTION,
+                "child supervision was interrupted; outcome remains indeterminate until actual exit");
     }
 }

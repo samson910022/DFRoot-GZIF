@@ -10,7 +10,8 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import android.app.AlertDialog;
-import android.os.Looper;
+import android.content.ComponentName;
+import android.content.Context;
 import android.preference.Preference;
 import android.preference.SwitchPreference;
 
@@ -20,6 +21,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
+import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
@@ -31,28 +33,51 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 37)
 public class SettingsFragmentTest {
+    private static final long TEST_TIMEOUT_MS = 5_000L;
     private ActivityController<SettingsActivity> activityController;
     private SettingsFragment fragment;
     private FakeStore store;
     private QueueExecutor configExecutor;
     private ConfigurationRepository repository;
+    private RunCoordinator coordinator;
+    private QueueExecutor coordinatorWorker;
+    private final List<BlockingEngine> blockingEngines = new ArrayList<>();
+    private final List<ExecutorService> workers = new ArrayList<>();
 
     @Before
     public void resetConfiguration() {
         ConfigurationRepository.resetForTesting();
+        RunCoordinator.resetForTesting();
         ShadowAlertDialog.reset();
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
         if (activityController != null) {
             activityController.pause().stop().destroy();
         }
+        for (BlockingEngine engine : blockingEngines) {
+            engine.finish();
+        }
+        if (coordinatorWorker != null) {
+            coordinatorWorker.runAll();
+        }
+        for (ExecutorService worker : workers) {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        }
+        RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
     }
@@ -122,7 +147,7 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void failedWriteShowsErrorDisablesDangerousSwitchesAndKeepsBootToggleSeparate() {
+    public void failedWriteShowsErrorAndDisablesBootAndDangerousSwitches() {
         launch(RunConfig.defaults());
         store.results.add(false);
         store.results.add(true);
@@ -136,7 +161,7 @@ public class SettingsFragmentTest {
         assertFalse(disableModules.isChecked());
         assertFalse(disableModules.isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
-        assertTrue(boot.isEnabled());
+        assertFalse(boot.isEnabled());
         assertTrue(preference("configuration_status").getSummary().toString()
                 .contains("Configuration error"));
         assertFalse(repository.getConfirmedSnapshot().isDisableModules());
@@ -230,21 +255,28 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void configurationListenerIsRemovedOnPauseAndDestroy() {
+    public void configurationAndCoordinatorListenersAreRemovedOnPauseAndDestroy() {
         launch(RunConfig.defaults());
-        ConfigurationRepository.Listener listener = ReflectionHelpers.getField(
+        ConfigurationRepository.Listener configurationListener = ReflectionHelpers.getField(
                 fragment, "mConfigurationListener");
-        assertTrue(repository.hasListener(listener));
+        RunCoordinator.Listener coordinatorListener = ReflectionHelpers.getField(
+                fragment, "mCoordinatorListener");
+        Set<?> coordinatorListeners = ReflectionHelpers.getField(coordinator, "listeners");
+        assertTrue(repository.hasListener(configurationListener));
+        assertTrue(coordinatorListeners.contains(coordinatorListener));
 
         activityController.pause();
-        assertFalse(repository.hasListener(listener));
+        assertFalse(repository.hasListener(configurationListener));
+        assertFalse(coordinatorListeners.contains(coordinatorListener));
 
         activityController.resume();
-        assertTrue(repository.hasListener(listener));
+        assertTrue(repository.hasListener(configurationListener));
+        assertTrue(coordinatorListeners.contains(coordinatorListener));
 
         activityController.stop().destroy();
         activityController = null;
-        assertFalse(repository.hasListener(listener));
+        assertFalse(repository.hasListener(configurationListener));
+        assertFalse(coordinatorListeners.contains(coordinatorListener));
     }
 
     @Test
@@ -256,12 +288,82 @@ public class SettingsFragmentTest {
 
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
-        assertTrue(preference("boot_start").isEnabled());
+        assertFalse(preference("boot_start").isEnabled());
 
         admission.close();
         ShadowLooper.idleMainLooper();
         assertTrue(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertTrue(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
+    }
+
+    @Test
+    public void startingCoordinatorDisablesBootAndDangerousSwitchesUntilTerminal() {
+        launch(RunConfig.defaults());
+        FakeLease lease = new FakeLease();
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        ShadowLooper.idleMainLooper();
+
+        assertDangerousControlsDisabled();
+        assertActiveChangeListenersRejected();
+        assertEquals(0, store.writes.size());
+
+        coordinatorWorker.runAll();
+        ShadowLooper.idleMainLooper();
+        assertDangerousControlsEnabled();
+    }
+
+    @Test
+    public void activeCoordinatorDismissesPendingSoftRebootConsent() {
+        launch(RunConfig.defaults());
+        SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
+        toggle(softReboot);
+        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
+        assertNotNull(dialog);
+        assertTrue(dialog.isShowing());
+
+        FakeLease lease = new FakeLease();
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        ShadowLooper.idleMainLooper();
+
+        assertFalse(dialog.isShowing());
+        assertEquals(Long.valueOf(-1L), ReflectionHelpers.getField(fragment,
+                "mPendingSoftRebootGeneration"));
+        assertDangerousControlsDisabled();
+        assertEquals(0, store.writes.size());
+        coordinatorWorker.runAll();
+        ShadowLooper.idleMainLooper();
+        assertDangerousControlsEnabled();
+    }
+
+    @Test
+    public void runningCoordinatorDisablesBootAndDangerousSwitches() throws Exception {
+        assertActiveCoordinatorDisablesDangerousControls(false);
+    }
+
+    @Test
+    public void indeterminateCoordinatorDisablesBootAndDangerousSwitches() throws Exception {
+        assertActiveCoordinatorDisablesDangerousControls(true);
+    }
+
+    private void assertActiveCoordinatorDisablesDangerousControls(boolean indeterminate)
+            throws Exception {
+        store = new FakeStore(RunConfig.defaults());
+        configExecutor = new QueueExecutor();
+        repository = new ConfigurationRepository(store, configExecutor, Runnable::run);
+        repository.start();
+        configExecutor.runNext();
+        ConfigurationRepository.setInstanceForTesting(repository);
+        BlockingEngine engine = installBlockingCoordinator(indeterminate);
+        launchWithExistingConfiguration();
+
+        assertEquals(indeterminate ? RunCoordinator.State.INDETERMINATE
+                : RunCoordinator.State.RUNNING, coordinator.getSnapshot().getState());
+        assertDangerousControlsDisabled();
+        assertActiveChangeListenersRejected();
+        assertEquals(0, store.writes.size());
+        engine.finish();
     }
 
     @Test
@@ -374,6 +476,68 @@ public class SettingsFragmentTest {
         assertTrue(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
     }
 
+    @Test
+    public void startingCoordinatorKeepsErrorRetryVisibleButDisablesReloadUntilTerminal() {
+        RunConfig initial = RunConfig.defaults();
+        store = new FakeStore(initial);
+        configExecutor = new QueueExecutor();
+        repository = new ConfigurationRepository(store, configExecutor, Runnable::run);
+        repository.start();
+        configExecutor.runNext();
+        ConfigurationRepository.setInstanceForTesting(repository);
+        installIdleCoordinator();
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        assertSame(initial, repository.getConfirmedSnapshot());
+
+        store.results.add(false);
+        assertTrue(repository.setDisableModules(true));
+        configExecutor.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+        assertSame(initial, repository.getConfirmedSnapshot());
+        assertSame(initial, store.durable);
+        int writesAfterFailedWrite = store.writes.size();
+
+        FakeLease lease = new FakeLease();
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        assertEquals(RunCoordinator.State.STARTING, coordinator.getSnapshot().getState());
+        assertFalse(repository.isFrozen());
+        assertFalse(repository.isWritePending());
+        launchWithExistingConfiguration();
+        Preference retry = retryPreference();
+
+        assertTrue(isVisible(retry));
+        assertFalse(retry.isEnabled());
+        assertNotNull(retry.getOnPreferenceClickListener());
+        Shadows.shadowOf(retry).click();
+        assertTrue(retry.getOnPreferenceClickListener().onPreferenceClick(retry));
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(RunCoordinator.State.STARTING, coordinator.getSnapshot().getState());
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+        assertSame(initial, repository.getConfirmedSnapshot());
+        assertSame(initial, store.durable);
+        assertEquals(writesAfterFailedWrite, store.writes.size());
+        assertEquals(0, lease.closeCount.get());
+
+        coordinatorWorker.runAll();
+        ShadowLooper.idleMainLooper();
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.TERMINAL, terminal.getState());
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertTrue(terminal.getReason().contains("configuration write failed"));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(repository.isFrozen());
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+        assertSame(initial, repository.getConfirmedSnapshot());
+        assertSame(initial, store.durable);
+        assertEquals(writesAfterFailedWrite, store.writes.size());
+        assertTrue(isVisible(retry));
+        assertTrue(retry.isEnabled());
+    }
+
     private void assertSoftRebootEnableFailure(boolean throwFailure) {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
@@ -411,9 +575,72 @@ public class SettingsFragmentTest {
             configExecutor.runNext();
         }
         ConfigurationRepository.setInstanceForTesting(repository);
+        installIdleCoordinator();
         activityController = Robolectric.buildActivity(SettingsActivity.class).setup();
         fragment = (SettingsFragment) activityController.get().getFragmentManager()
                 .findFragmentById(R.id.settingsContainer);
+    }
+
+    private void installIdleCoordinator() {
+        coordinatorWorker = new QueueExecutor();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, Runnable::run,
+                (context, admission, mode, events, reporter) -> NativeResultMapper.map(0), 0L);
+        RunCoordinator.setInstanceForTesting(coordinator);
+    }
+
+    private void launchWithExistingConfiguration() {
+        activityController = Robolectric.buildActivity(SettingsActivity.class).setup();
+        fragment = (SettingsFragment) activityController.get().getFragmentManager()
+                .findFragmentById(R.id.settingsContainer);
+    }
+
+    private BlockingEngine installBlockingCoordinator(boolean indeterminate) throws Exception {
+        BlockingEngine engine = new BlockingEngine(indeterminate);
+        blockingEngines.add(engine);
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        workers.add(worker);
+        coordinator = new RunCoordinator(repository, worker,
+                ConfigurationRepository.newMainExecutor(), engine, 0L);
+        RunCoordinator.setInstanceForTesting(coordinator);
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, new FakeLease()).isAccepted());
+        assertTrue(engine.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        ShadowLooper.idleMainLooper();
+        return engine;
+    }
+
+    private void assertDangerousControlsDisabled() {
+        assertFalse(preference("boot_start").isEnabled());
+        assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
+        assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
+    }
+
+    private void assertActiveChangeListenersRejected() {
+        int bootStateBefore = fragment.getActivity().getPackageManager()
+                .getComponentEnabledSetting(new ComponentName(fragment.getActivity(), BootReceiver.class));
+        Object bootAccepted = ReflectionHelpers.callInstanceMethod(preference("boot_start"),
+                "callChangeListener", ReflectionHelpers.ClassParameter.from(Object.class, true));
+        Object softRebootAccepted = ReflectionHelpers.callInstanceMethod(
+                preference(ConfigurationKeys.PREF_SOFT_REBOOT), "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
+        Object disableModulesAccepted = ReflectionHelpers.callInstanceMethod(
+                preference(ConfigurationKeys.PREF_DISABLE_MODULES), "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
+
+        assertEquals(Boolean.FALSE, bootAccepted);
+        assertEquals(Boolean.FALSE, softRebootAccepted);
+        assertEquals(Boolean.FALSE, disableModulesAccepted);
+        assertEquals(bootStateBefore, fragment.getActivity().getPackageManager()
+                .getComponentEnabledSetting(new ComponentName(fragment.getActivity(), BootReceiver.class)));
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertEquals(0, store.writes.size());
+        assertFalse(repository.isWritePending());
+    }
+
+    private void assertDangerousControlsEnabled() {
+        assertTrue(preference("boot_start").isEnabled());
+        assertTrue(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
+        assertTrue(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
     }
 
     @SuppressWarnings("unchecked")
@@ -432,6 +659,45 @@ public class SettingsFragmentTest {
     private boolean isVisible(Preference preference) {
         return preference != null
                 && fragment.getPreferenceScreen().findPreference(preference.getKey()) != null;
+    }
+
+    private static final class FakeLease implements ResourceLease {
+        final AtomicInteger closeCount = new AtomicInteger();
+
+        @Override
+        public void close() {
+            closeCount.incrementAndGet();
+        }
+    }
+
+    private static final class BlockingEngine implements RunCoordinator.Engine {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        final boolean indeterminate;
+
+        BlockingEngine(boolean indeterminate) {
+            this.indeterminate = indeterminate;
+        }
+
+        @Override
+        public RunResult run(Context context, ConfigurationRepository.RunAdmission admission,
+                             RunConfig.ExecutionMode mode, RunEventListener events,
+                             IReporter reporter) {
+            if (indeterminate) {
+                events.onTimeout();
+            }
+            entered.countDown();
+            try {
+                release.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return NativeResultMapper.map(0);
+        }
+
+        void finish() {
+            release.countDown();
+        }
     }
 
     private static final class FakeStore implements ConfigurationStore {
@@ -476,6 +742,12 @@ public class SettingsFragmentTest {
 
         void runNext() {
             commands.remove().run();
+        }
+
+        void runAll() {
+            while (!commands.isEmpty()) {
+                runNext();
+            }
         }
     }
 }

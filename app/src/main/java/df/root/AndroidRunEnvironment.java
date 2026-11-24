@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): adapt read-only Android observations and fail closed on unreadable properties. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): build environments only from confirmed RunConfig snapshots. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): remove the unused repository-coupled environment factory; admitted engines pass explicit snapshots. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -27,10 +28,6 @@ final class AndroidRunEnvironment implements RunPreflight.Environment {
 
     interface SystemPropertyReader {
         String get(String key, String defaultValue);
-    }
-
-    static AndroidRunEnvironment fromConfirmedConfiguration(Context context) {
-        return forConfig(context, ConfigurationRepository.get(context).getConfirmedSnapshot());
     }
 
     static AndroidRunEnvironment forConfig(Context context, RunConfig config) {

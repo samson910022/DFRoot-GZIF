@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): wire Process/package observations and fail-closed property reads on API 37. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): verify environment selection comes only from confirmed snapshots. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): pass explicit confirmed snapshots after removing the repository-coupled factory. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -55,15 +56,19 @@ public class AndroidRunEnvironmentTest {
     @Test
     public void confirmedRepositorySelectionTracksTheConfirmedPackage() {
         installConfiguration(RunConfig.defaults());
-        assertNull(AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+        assertNull(AndroidRunEnvironment.forConfig(context,
+                ConfigurationRepository.get(context).getConfirmedSnapshot()).getSelectedManagerPackage());
 
         installConfiguration(new RunConfig(SuManager.CLASSIC.getPackageName(),
                 false, false, 0, 1));
         assertEquals(SuManager.CLASSIC.getPackageName(),
-                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+                AndroidRunEnvironment.forConfig(context,
+                        ConfigurationRepository.get(context).getConfirmedSnapshot())
+                        .getSelectedManagerPackage());
 
         installConfiguration(RunConfig.defaults());
-        assertNull(AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+        assertNull(AndroidRunEnvironment.forConfig(context,
+                ConfigurationRepository.get(context).getConfirmedSnapshot()).getSelectedManagerPackage());
     }
 
     @Test
@@ -79,7 +84,9 @@ public class AndroidRunEnvironmentTest {
         assertEquals(SuManager.NEXT.getPackageName(), environment.getSelectedManagerPackage());
         assertEquals(SuManager.NEXT.getPackageName(), configured.getSelectedManagerPackage());
         assertEquals(SuManager.CLASSIC.getPackageName(),
-                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+                AndroidRunEnvironment.forConfig(context,
+                        ConfigurationRepository.get(context).getConfirmedSnapshot())
+                        .getSelectedManagerPackage());
     }
 
     @Test
@@ -91,7 +98,9 @@ public class AndroidRunEnvironmentTest {
                         SuManager.CLASSIC.getPackageName()).commit();
 
         assertEquals(SuManager.NEXT.getPackageName(),
-                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+                AndroidRunEnvironment.forConfig(context,
+                        ConfigurationRepository.get(context).getConfirmedSnapshot())
+                        .getSelectedManagerPackage());
     }
 
     @Test

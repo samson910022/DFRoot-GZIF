@@ -407,6 +407,32 @@ public class ConfigurationRepositoryTest {
     }
 
     @Test
+    public void expectedGenerationAdmissionRejectsNewerConfigurationWithoutFreezing() {
+        FakeStore store = new FakeStore(INITIAL);
+        ConfigurationRepository repository = repository(store, new DirectExecutor());
+        repository.start();
+        assertTrue(repository.setDisableModules(true));
+        RunConfig confirmed = repository.getConfirmedSnapshot();
+
+        assertNull(repository.acquireRunSnapshot(RunConfig.ExecutionMode.MANUAL,
+                INITIAL.getGeneration()));
+        assertFalse(repository.isFrozen());
+        assertTrue(repository.getRunAdmissionBlockReason(RunConfig.ExecutionMode.MANUAL,
+                INITIAL.getGeneration()).contains("generation changed"));
+        ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
+                RunConfig.ExecutionMode.MANUAL, confirmed.getGeneration());
+        assertSame(confirmed, admission.getSnapshot());
+        assertTrue(repository.isFrozen());
+        admission.close();
+
+        ConfigurationRepository.RunAdmission legacy = repository.acquireRunSnapshot(
+                RunConfig.ExecutionMode.MANUAL);
+        assertSame(confirmed, legacy.getSnapshot());
+        legacy.close();
+        assertFalse(repository.isFrozen());
+    }
+
+    @Test
     public void savingAndErrorStatesNeverAdmitRuns() {
         FakeStore savingStore = new FakeStore(INITIAL);
         QueueExecutor savingExecutor = new QueueExecutor();

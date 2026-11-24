@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): wire settings to confirmed configuration and require durable modal consent. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): gate boot and dangerous settings on writable configuration plus an idle coordinator. See NOTICE.
 package df.root;
 
 import android.app.AlertDialog;
@@ -13,6 +14,8 @@ import android.preference.SwitchPreference;
 
 public class SettingsFragment extends PreferenceFragment {
     private ConfigurationRepository mConfiguration;
+    private RunCoordinator mCoordinator;
+    private SwitchPreference mBootStartPreference;
     private SwitchPreference mSoftRebootPreference;
     private SwitchPreference mDisableModulesPreference;
     private Preference mStatusPreference;
@@ -23,6 +26,7 @@ public class SettingsFragment extends PreferenceFragment {
 
     private final ConfigurationRepository.Listener mConfigurationListener =
             this::renderConfirmedConfiguration;
+    private final RunCoordinator.Listener mCoordinatorListener = snapshot -> renderConfirmedConfiguration();
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -31,13 +35,18 @@ public class SettingsFragment extends PreferenceFragment {
 
         Context ctx = getActivity();
         mConfiguration = ConfigurationRepository.get(ctx);
+        mCoordinator = RunCoordinator.get(ctx);
 
         ComponentName bootReceiver = new ComponentName(ctx, BootReceiver.class);
-        SwitchPreference bootPref = (SwitchPreference) findPreference("boot_start");
-        bootPref.setPersistent(false);
+        mBootStartPreference = (SwitchPreference) findPreference("boot_start");
+        mBootStartPreference.setPersistent(false);
         int state = ctx.getPackageManager().getComponentEnabledSetting(bootReceiver);
-        bootPref.setChecked(state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
-        bootPref.setOnPreferenceChangeListener((pref, value) -> {
+        mBootStartPreference.setChecked(state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        mBootStartPreference.setOnPreferenceChangeListener((pref, value) -> {
+            if (!areControlsWritable()) {
+                renderConfirmedConfiguration();
+                return false;
+            }
             ctx.getPackageManager().setComponentEnabledSetting(bootReceiver,
                     (Boolean) value ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
                                     : PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
@@ -50,6 +59,9 @@ public class SettingsFragment extends PreferenceFragment {
         mRetryPreference = findPreference("configuration_retry");
         mPreferenceScreen.removePreference(mRetryPreference);
         mRetryPreference.setOnPreferenceClickListener(preference -> {
+            if (!isCoordinatorIdle()) {
+                return true;
+            }
             if (!mConfiguration.reload()) {
                 renderConfirmedConfiguration();
             }
@@ -59,7 +71,7 @@ public class SettingsFragment extends PreferenceFragment {
                 ConfigurationKeys.PREF_SOFT_REBOOT);
         mSoftRebootPreference.setPersistent(false);
         mSoftRebootPreference.setOnPreferenceChangeListener((pref, value) -> {
-            if (!isConfigurationWritable()) return false;
+            if (!areControlsWritable()) return false;
             if ((Boolean) value) {
                 showSoftRebootAcknowledgement();
             } else {
@@ -73,7 +85,7 @@ public class SettingsFragment extends PreferenceFragment {
                 ConfigurationKeys.PREF_DISABLE_MODULES);
         mDisableModulesPreference.setPersistent(false);
         mDisableModulesPreference.setOnPreferenceChangeListener((pref, value) -> {
-            if (!isConfigurationWritable()) return false;
+            if (!areControlsWritable()) return false;
             mConfiguration.setDisableModules((Boolean) value);
             return false;
         });
@@ -83,14 +95,15 @@ public class SettingsFragment extends PreferenceFragment {
     public void onResume() {
         super.onResume();
         mConfiguration.addListener(mConfigurationListener);
+        mCoordinator.addListener(mCoordinatorListener);
         renderConfirmedConfiguration();
     }
 
     @Override
     public void onPause() {
         mConfiguration.removeListener(mConfigurationListener);
+        mCoordinator.removeListener(mCoordinatorListener);
         dismissConfirmation();
-        mPendingSoftRebootGeneration = -1;
         super.onPause();
     }
 
@@ -101,9 +114,25 @@ public class SettingsFragment extends PreferenceFragment {
                 && !mConfiguration.isFrozen();
     }
 
+    private boolean isCoordinatorIdle() {
+        if (mCoordinator == null) {
+            return false;
+        }
+        RunCoordinator.State state = mCoordinator.getSnapshot().getState();
+        return state == RunCoordinator.State.IDLE || state == RunCoordinator.State.TERMINAL;
+    }
+
+    private boolean areControlsWritable() {
+        return isConfigurationWritable() && isCoordinatorIdle();
+    }
+
     private void renderConfirmedConfiguration() {
         if (!isAdded() || mConfiguration == null) return;
-        boolean writable = isConfigurationWritable();
+        if (!isCoordinatorIdle()) {
+            dismissConfirmation();
+        }
+        boolean writable = areControlsWritable();
+        mBootStartPreference.setEnabled(writable);
         mSoftRebootPreference.setEnabled(writable);
         mDisableModulesPreference.setEnabled(writable);
 
@@ -133,14 +162,14 @@ public class SettingsFragment extends PreferenceFragment {
         } else if (!error && mPreferenceScreen.findPreference("configuration_retry") != null) {
             mPreferenceScreen.removePreference(mRetryPreference);
         }
-        mRetryPreference.setEnabled(error);
+        mRetryPreference.setEnabled(error && isCoordinatorIdle());
     }
 
     private void showSoftRebootAcknowledgement() {
         dismissConfirmation();
         Context ctx = getActivity();
         RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
-        if (ctx == null || confirmed == null || !isConfigurationWritable()) {
+        if (ctx == null || confirmed == null || !areControlsWritable()) {
             renderConfirmedConfiguration();
             return;
         }
@@ -160,7 +189,7 @@ public class SettingsFragment extends PreferenceFragment {
                     long expectedGeneration = mPendingSoftRebootGeneration;
                     mPendingSoftRebootGeneration = -1;
                     RunConfig current = mConfiguration.getConfirmedSnapshot();
-                    if (isConfigurationWritable() && current != null
+                    if (areControlsWritable() && current != null
                             && current.getGeneration() == expectedGeneration) {
                         mConfiguration.setSoftReboot(true);
                     } else {
@@ -175,5 +204,6 @@ public class SettingsFragment extends PreferenceFragment {
             mConfirmationDialog.dismiss();
             mConfirmationDialog = null;
         }
+        mPendingSoftRebootGeneration = -1;
     }
 }

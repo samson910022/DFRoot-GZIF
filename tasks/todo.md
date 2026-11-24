@@ -1,4 +1,4 @@
-<!-- Modified 2026-11-24 (DFRoot GZIF): record the final Phase 2 safety/test and API-32 diagnostic-validation fixes; Checkpoint 2 remains open pending independent review and commit. See NOTICE. -->
+<!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -36,13 +36,15 @@
 
 ## Phase 3: Operation Coordinator, Foreground Service, and Activity Detachment
 
-- [ ] Task 3.1: Add process-scoped single-flight `RunCoordinator` with observable state/log/result.
-- [ ] Task 3.2: Add Direct Boot-aware `ExploitService` with notification and timed WakeLock.
-- [ ] Task 3.3: Route manual execution through service; make Activity detach-only on destroy.
-- [ ] Task 3.4: Add supervised child process, async stdout drain, timed wait, and indeterminate timeout policy.
-- [ ] Task 3.5: Lock manager/settings while operation or configuration write is active.
-- [ ] Task 3.6: Add fake-process, rotation, duplicate-request, and resource-ownership tests.
-- [ ] Checkpoint 3: Rotation/finish never interrupts work; one operation is observable process-wide; reviews approved; commit created.
+- [x] Task 3.1: Add process-scoped single-flight `RunCoordinator` with observable state/log/result.
+- [x] Task 3.2: Add Direct Boot-aware `ExploitService` with notification and timed WakeLock.
+- [x] Task 3.3: Route manual execution through service; make Activity detach-only on destroy.
+- [x] Task 3.4: Add supervised child process, async stdout drain, timed wait, and indeterminate timeout policy.
+- [x] Task 3.5: Lock manager/settings while operation or configuration write is active.
+- [x] Task 3.6: Add fake-process, rotation, duplicate-request, and resource-ownership tests.
+- [x] Task 3.7: Resolve Phase 3 review findings with service-failure recovery snapshots, generation-bound manual admission, latest-start-ID shutdown, active listener/consent gating, and production Activity/service regression tests; verify 353 tests (0 failures/errors/skips), 0 lint errors, 99 focused tests forced 3 times, and 12/12 required mutations killed without committing.
+- [x] Task 3.8: Gate configuration Retry on ERROR plus an idle coordinator, recheck coordinator idleness before reload, and cover the queued STARTING-to-TERMINAL precheck-failure transition with a deterministic Settings regression test; verify 354 tests (0 failures/errors/skips), 0 lint errors, 20 focused Settings tests forced 3 times, and 2/2 required guard mutations killed without committing.
+- [x] Checkpoint 3: Rotation/finish never interrupts work; one operation is observable process-wide; reviews approved; commit created by this change.
 
 ## Phase 4: Native Snapshot, Completion Protocol, and Staging Hardening
 
