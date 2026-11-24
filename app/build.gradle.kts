@@ -70,12 +70,28 @@ android {
         debug {
             isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
+            externalNativeBuild {
+                cmake {
+                    // Authoritative variant label for the native KO policy:
+                    // a cached CMAKE_BUILD_TYPE of Debug must never weaken a
+                    // release build. Debug may use the local skip policy only
+                    // with an explicit reason and no automation marker.
+                    arguments += "-DDFROOT_ANDROID_VARIANT=debug"
+                }
+            }
         }
         release {
             signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            externalNativeBuild {
+                cmake {
+                    // Release is authoritative: the skip guard in CMakeLists
+                    // and verify_ko_sha256.cmake rejects it unconditionally.
+                    arguments += "-DDFROOT_ANDROID_VARIANT=release"
+                }
+            }
         }
     }
 

@@ -59,10 +59,36 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Host status-protocol tests
-        run: make -C tests/native test
+        run: |
+          set -euo pipefail
+          make -C tests/native test
+          echo "native-ok" > "$RUNNER_TEMP/marker-native"
 
       - name: KO hash policy tests (CMake, host-only)
-        run: cmake -P tests/cmake/ko_hash_policy_test.cmake
+        run: |
+          set -euo pipefail
+          cmake -P tests/cmake/ko_hash_policy_test.cmake
+          echo "ko-policy-ok" > "$RUNNER_TEMP/marker-ko-policy"
+
+      - name: Packaged-KO byte-gate tests (CMake, host-only)
+        run: |
+          set -euo pipefail
+          cmake -P tests/cmake/packaged_ko_test.cmake
+          echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"
+
+      # Pins/sizes are read from CMakeLists.txt so the standalone checks and
+      # the real APK gate use exactly the reviewed values, never a copy.
+      - name: Extract reviewed KO pins and sizes
+        run: |
+          set -euo pipefail
+          sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9a-f]{64}' | paste -sd';' - > "$RUNNER_TEMP/ko-pins.txt"
+          sed -n '/set(KO_EXPECTED_SIZES/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9]+' | paste -sd';' - > "$RUNNER_TEMP/ko-sizes.txt"
+          test -s "$RUNNER_TEMP/ko-pins.txt"
+          test -s "$RUNNER_TEMP/ko-sizes.txt"
+          echo "reviewed pins: $(cat "$RUNNER_TEMP/ko-pins.txt")"
+          echo "reviewed sizes: $(cat "$RUNNER_TEMP/ko-sizes.txt")"
 
       - name: Validate signing config
         if: github.event_name != 'pull_request'
@@ -98,12 +124,11 @@ jobs:
           KO=app/src/main/jni/ko/dfroot-android13-5.15.ko
           STAMP="$RUNNER_TEMP/dfroot-ko.sha256.verified"
           MANIFEST="$RUNNER_TEMP/dfroot-ko.sha256.manifest"
-          PINS=$(sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \
-                 | grep -oE '[0-9a-f]{64}' | paste -sd';' -)
+          PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")
           test -n "$PINS"
           CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
               -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
-              -DDFROOT_BUILD_TYPE=Release -P "$SCRIPT"
+              -DDFROOT_BUILD_TYPE=Release -DDFROOT_ANDROID_VARIANT=release -P "$SCRIPT"
           if CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
                  -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
                  -DDFROOT_BUILD_TYPE=Debug -DDFROOT_SKIP=ON \
@@ -111,7 +136,19 @@ jobs:
             echo "::error::KO hash skip unexpectedly passed under CI=true"
             exit 1
           fi
-          echo "KO hash policy OK: verified under CI, skip rejected"
+          # Variant authority: with no automation marker and a stale Debug
+          # build type, an Android release variant must still reject skip.
+          if env -u CI -u GITHUB_ACTIONS -u DFROOT_RELEASE \
+                 cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
+                 -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
+                 -DDFROOT_BUILD_TYPE=Debug -DDFROOT_ANDROID_VARIANT=release \
+                 -DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON='negative variant policy check' \
+                 -P "$SCRIPT"; then
+            echo "::error::KO hash skip unexpectedly passed for release variant"
+            exit 1
+          fi
+          echo "KO hash policy OK: verified under CI, skip rejected, release variant authoritative"
+          echo "ko-ci-policy-ok" > "$RUNNER_TEMP/marker-ko-ci-policy"
 
       - uses: actions/setup-java@v6
         with:
@@ -121,7 +158,55 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
 
       - name: Java preference-persistence unit tests
-        run: ./gradlew :app:testDebugUnitTest
+        run: |
+          set -euo pipefail
+          ./gradlew :app:testDebugUnitTest
+          echo "jvm-ok" > "$RUNNER_TEMP/marker-jvm"
+
+      # Explicit XML assertion: a green Gradle exit code alone cannot hide a
+      # skipped test class or a failure recorded only in the report.
+      - name: Assert JUnit XML (8 tests, 0 failures)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          files = sorted(glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"))
+          if not files:
+              raise SystemExit("::error::No JUnit XML found for testDebugUnitTest")
+          tests = failures = errors = skipped = 0
+          for path in files:
+              root = ET.parse(path).getroot()
+              tests += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+              skipped += int(root.get("skipped", 0))
+              print("report %s: tests=%s failures=%s errors=%s skipped=%s" %
+                    (path, root.get("tests"), root.get("failures"),
+                     root.get("errors"), root.get("skipped")))
+          print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %
+                (tests, failures, errors, skipped))
+          if tests != 8 or failures != 0 or errors != 0 or skipped != 0:
+              raise SystemExit("::error::JUnit XML assertion failed: expected 8 tests, 0 failures/errors/skips")
+          PY
+          echo "junit-ok" > "$RUNNER_TEMP/marker-junit"
+
+      # Every suite writes its own marker; this single gate fails if any suite
+      # was skipped/conditioned away, so one failure cannot hide the others.
+      - name: Assert all test suites reached
+        run: |
+          set -euo pipefail
+          missing=0
+          for marker in marker-native marker-ko-policy marker-packaged-ko \
+                        marker-ko-ci-policy marker-jvm marker-junit; do
+            if [ ! -s "$RUNNER_TEMP/$marker" ]; then
+              echo "::error::Test suite marker missing: $marker"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "All native/CMake/JVM suites reached (6/6 markers)"
 
       - name: Build DFRoot APK
         run: |
@@ -164,6 +249,135 @@ jobs:
             exit 1
           fi
           echo "DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF confirmed in all CMakeCache files"
+
+      # Real (not fixture) packaged-byte gate. Runs only for tags, before the
+      # artifact upload and GitHub Release; no continue-on-error. If the final
+      # embedded bytes are not one of the reviewed pins, the release is blocked
+      # until a deliberate re-pin is reviewed.
+      - name: Verify packaged KO bytes in release APK
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          APK=$(ls app/build/outputs/apk/release/DFRoot_*.apk | head -1)
+          test -f "$APK"
+          EXTRACT="$RUNNER_TEMP/apk-native-libs"
+          rm -rf "$EXTRACT"
+          mkdir -p "$EXTRACT"
+          unzip -q "$APK" 'lib/arm64-v8a/libdfroot.so' -d "$EXTRACT"
+          SO="$EXTRACT/lib/arm64-v8a/libdfroot.so"
+          test -f "$SO"
+
+          # Prefer the NDK's llvm-objcopy: host binutils may not understand
+          # AArch64 objects. Fall back to an llvm-objcopy/objcopy on PATH.
+          OBJCOPY=""
+          for candidate in \
+              "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy" \
+              "${ANDROID_HOME:-}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy; do
+            if [ -x "$candidate" ]; then OBJCOPY="$candidate"; break; fi
+          done
+          if [ -z "$OBJCOPY" ]; then
+            OBJCOPY="$(command -v llvm-objcopy || command -v objcopy || true)"
+          fi
+          if [ -z "$OBJCOPY" ]; then
+            echo "::error::No objcopy/llvm-objcopy available for the packaged-KO gate"
+            exit 1
+          fi
+
+          PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")
+          SIZES=$(cat "$RUNNER_TEMP/ko-sizes.txt")
+          PMAN="$RUNNER_TEMP/dfroot-packaged-ko.manifest"
+          rm -f "$PMAN"
+          cmake -DPACKAGED_SO="$SO" -DKO_OBJCOPY="$OBJCOPY" \
+              "-DKO_EXPECTED_SHA256S=$PINS" "-DKO_EXPECTED_SIZE=$SIZES" \
+              -DKO_MANIFEST="$PMAN" \
+              -DDFROOT_SOURCE_DIR="$GITHUB_WORKSPACE" \
+              -P app/src/main/jni/verify_packaged_ko.cmake
+          grep -q '^status: verified$' "$PMAN"
+          echo "packaged-apk-ok" > "$RUNNER_TEMP/marker-packaged-apk"
+
+      # One place that ties the evidence together. A failure here fails the
+      # job BEFORE upload/release; it is not an informational upload.
+      - name: Verify release evidence
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          bad=0
+          EVIDENCE="$RUNNER_TEMP/release-evidence.txt"
+
+          # 1. checked-out source is exactly the release commit.
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::git HEAD $HEAD_SHA != GITHUB_SHA $GITHUB_SHA"
+            bad=1
+          fi
+
+          # 2. every native cache has the KO hash gate enabled (skip OFF).
+          caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)
+          if [ -z "$caches" ]; then
+            echo "::error::No CMakeCache.txt found under app/.cxx"
+            bad=1
+          fi
+          while IFS= read -r cache; do
+            [ -n "$cache" ] || continue
+            if ! grep -qs '^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$' "$cache"; then
+              echo "::error::DFROOT_SKIP_KO_HASH_CHECK not OFF in $cache"
+              bad=1
+            fi
+          done <<< "$caches"
+
+          # 3. source-KO manifest is verified and its hash is a reviewed pin.
+          KO_HASH=""
+          KOMAN=$(find app/.cxx -type f -name dfroot-ko.sha256.manifest -print -quit 2>/dev/null || true)
+          if [ -z "$KOMAN" ]; then
+            echo "::error::No dfroot-ko.sha256.manifest found"
+            bad=1
+          else
+            if ! grep -q '^status: verified$' "$KOMAN"; then
+              echo "::error::KO gate manifest is not verified: $KOMAN"
+              bad=1
+            fi
+            KO_HASH=$(sed -n 's/^sha256: //p' "$KOMAN" | head -1)
+            if ! tr ';' '\n' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$KO_HASH"; then
+              echo "::error::KO manifest hash '$KO_HASH' is not in the reviewed pins"
+              bad=1
+            fi
+          fi
+
+          # 4. packaged manifest is verified with the SAME hash.
+          PKG_HASH=""
+          PMAN="$RUNNER_TEMP/dfroot-packaged-ko.manifest"
+          if [ ! -f "$PMAN" ]; then
+            echo "::error::No packaged-KO manifest found"
+            bad=1
+          else
+            if ! grep -q '^status: verified$' "$PMAN"; then
+              echo "::error::Packaged-KO manifest is not verified"
+              bad=1
+            fi
+            PKG_HASH=$(sed -n 's/^sha256: //p' "$PMAN" | head -1)
+            if [ "$PKG_HASH" != "$KO_HASH" ]; then
+              echo "::error::Packaged hash '$PKG_HASH' != KO gate hash '$KO_HASH'"
+              bad=1
+            fi
+          fi
+
+          # 5. the release APK hash is present in the evidence record.
+          APK=$(ls app/build/outputs/apk/release/DFRoot_*.apk | head -1)
+          APK_HASH=$(sha256sum "$APK" | awk '{print $1}')
+          {
+            echo "git_sha: $HEAD_SHA"
+            echo "ko_gate_sha256: $KO_HASH"
+            echo "packaged_ko_sha256: $PKG_HASH"
+            echo "apk_sha256: $APK_HASH"
+          } > "$EVIDENCE"
+          grep -q '^apk_sha256: [0-9a-f][0-9a-f]*$' "$EVIDENCE"
+          cat "$EVIDENCE"
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::Release evidence checks failed; blocking upload/release"
+            exit 1
+          fi
+          echo "release-evidence-ok" > "$RUNNER_TEMP/marker-release-evidence"
 
       - name: Upload DFRoot APK
         uses: actions/upload-artifact@v7

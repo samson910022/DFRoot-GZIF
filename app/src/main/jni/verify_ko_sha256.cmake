@@ -5,6 +5,7 @@
 #         "-DKO_EXPECTED_SHA256S=<hash1>;<hash2>;..." \
 #         -DKO_STAMP=<build>/dfroot-ko.sha256.verified \
 #         -DDFROOT_BUILD_TYPE=<Debug|Release|...>
+#         [-DDFROOT_ANDROID_VARIANT=<debug|release>]
 #         [-DKO_VERIFY_MANIFEST=<build>/dfroot-ko.sha256.manifest]
 #         [-DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON=<local reason>]
 #         -P verify_ko_sha256.cmake
@@ -39,6 +40,13 @@ endif()
 if(NOT DEFINED DFROOT_SOURCE_DIR OR "${DFROOT_SOURCE_DIR}" STREQUAL "")
     get_filename_component(DFROOT_SOURCE_DIR "${script_dir}/../../.." ABSOLUTE)
 endif()
+if(NOT DEFINED DFROOT_ANDROID_VARIANT OR "${DFROOT_ANDROID_VARIANT}" STREQUAL "")
+    set(DFROOT_ANDROID_VARIANT "unspecified")
+endif()
+
+# Pin normalization/validation is shared with the packaged-byte verifier so the
+# two gates cannot drift apart. It never adds or relaxes a pin.
+include("${script_dir}/ko_pin_policy.cmake")
 
 # The blob must exist even when the hash check is skipped: exp.c still .incbin's
 # it, so a missing/unreadable KO can never silently produce an artifact. Check
@@ -61,27 +69,16 @@ endif()
 
 # Normalize and validate every pin up front, including in skip mode: the
 # manifest records the accepted-pin count and a malformed pin list is always a
-# configuration error. CMake's MATCHES has no interval quantifier ({64}), so
-# check length and forbidden characters separately.
-set(expected_list "")
-foreach(raw_expected IN LISTS KO_EXPECTED_SHA256S)
-    string(STRIP "${raw_expected}" expected)
-    string(TOLOWER "${expected}" expected)
-    string(LENGTH "${expected}" expected_len)
-    if(NOT expected_len EQUAL 64 OR expected MATCHES "[^0-9a-f]")
-        message(FATAL_ERROR
-            "verify_ko_sha256: KO_EXPECTED_SHA256S contains an invalid SHA-256 "
-            "pin (expected exactly 64 hex digits): '${expected}'")
-    endif()
-    list(APPEND expected_list "${expected}")
-endforeach()
+# configuration error.
+dfroot_validate_ko_pins("${KO_EXPECTED_SHA256S}" "verify_ko_sha256" expected_list)
 list(LENGTH expected_list accepted_pins)
 
 if(DFROOT_SKIP)
     # Skip policy is enforced here (not only in CMakeLists.txt) so a direct
     # `cmake -P` invocation cannot bypass it. Presence of any automation /
-    # release environment marker, a Release build, or an absent reason is
-    # always fatal. The env markers (CI / GITHUB_ACTIONS / DFROOT_RELEASE) are
+    # release environment marker, a Release build type, an Android release
+    # variant (DFROOT_ANDROID_VARIANT=release), or an absent reason is always
+    # fatal. The env markers (CI / GITHUB_ACTIONS / DFROOT_RELEASE) are
     # authoritative: DFROOT_BUILD_TYPE comes from the caller/CMake cache and
     # can be stale (e.g. a cached Debug config reused for a release build), so
     # it is only a secondary signal. CI exports DFROOT_RELEASE=1 for releases.
@@ -96,6 +93,14 @@ if(DFROOT_SKIP)
         message(FATAL_ERROR
             "verify_ko_sha256: KO hash-check skip is forbidden for "
             "DFROOT_BUILD_TYPE=${DFROOT_BUILD_TYPE} (Release).")
+    endif()
+    # The Gradle-supplied Android variant is authoritative: a stale/cached
+    # CMAKE_BUILD_TYPE of Debug must never weaken a release variant.
+    string(TOLOWER "${DFROOT_ANDROID_VARIANT}" android_variant_lower)
+    if(android_variant_lower STREQUAL "release")
+        message(FATAL_ERROR
+            "verify_ko_sha256: KO hash-check skip is forbidden for Android "
+            "release variant (DFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT}).")
     endif()
     if(NOT DEFINED DFROOT_SKIP_REASON OR "${DFROOT_SKIP_REASON}" STREQUAL "")
         message(FATAL_ERROR
@@ -174,6 +179,7 @@ else()
 endif()
 string(APPEND manifest_text
     "build_type: ${DFROOT_BUILD_TYPE}\n"
+    "android_variant: ${DFROOT_ANDROID_VARIANT}\n"
     "timestamp_utc: ")
 string(TIMESTAMP manifest_timestamp "%Y-%m-%dT%H:%M:%SZ" UTC)
 string(APPEND manifest_text "${manifest_timestamp}\n")

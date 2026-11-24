@@ -55,21 +55,55 @@ set(KO_VERIFY_SCRIPT "${JNI_DIR}/verify_ko_sha256.cmake")
 set(KO_VERIFY_STAMP "${CMAKE_CURRENT_BINARY_DIR}/dfroot-ko.sha256.verified")
 set(KO_VERIFY_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/dfroot-ko.sha256.manifest")
 
+# Final packaged-byte gate: verify the bytes ACTUALLY linked into libdfroot.so,
+# not just the .ko on disk. objcopy is mandatory for that gate -- fail configure
+# rather than silently produce an unchecked artifact. The NDK supplies
+# llvm-objcopy as CMAKE_OBJCOPY for this toolchain.
+if(NOT CMAKE_OBJCOPY OR "${CMAKE_OBJCOPY}" STREQUAL "")
+    message(FATAL_ERROR
+        "CMAKE_OBJCOPY is required by the packaged-KO byte gate but is "
+        "unavailable in this toolchain. Refusing to configure without it; "
+        "never skip the packaged-byte verification.")
+endif()
+set(PACKAGED_KO_VERIFY_SCRIPT "${JNI_DIR}/verify_packaged_ko.cmake")
+set(PACKAGED_KO_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.manifest")
+# Accepted byte counts of the two reviewed artifacts: the local make output
+# (13504 B, WITH .note.gnu.build-id) and the CI artifact (13384 B, build-id
+# stripped). These are sizes only; a size can never make an unknown hash pass
+# and no hash pin is added or relaxed here.
+set(KO_EXPECTED_SIZES
+    13504
+    13384
+)
+
 option(DFROOT_SKIP_KO_HASH_CHECK "Skip the pinned dfroot.ko SHA-256 check (local experiments only)" OFF)
 set(DFROOT_SKIP_REASON "" CACHE STRING "Required local justification when DFROOT_SKIP_KO_HASH_CHECK=ON")
 
 # CMake can be driven without CMAKE_BUILD_TYPE (multi-config generators); pass
 # an explicit label so the verify script's required argument is always present.
-# Policy authority: the environment markers (CI, GITHUB_ACTIONS, DFROOT_RELEASE)
-# are authoritative for build-time policy. CMAKE_BUILD_TYPE is read from the
-# CMake cache and can be stale when a cached build directory is reused for a
-# different build type, so it is only a secondary signal -- a stale "Debug"
-# label must never weaken the skip guard below (or the one in the verify
-# script). CI exports DFROOT_RELEASE=1 for release builds as an explicit marker.
-if(CMAKE_BUILD_TYPE STREQUAL "")
+# Policy authority, strongest first: the environment markers (CI,
+# GITHUB_ACTIONS, DFROOT_RELEASE) are authoritative, and so is the Android
+# variant Gradle passes as -DDFROOT_ANDROID_VARIANT=<debug|release>. Both beat
+# CMAKE_BUILD_TYPE, which is read from the cache and can be stale when a cached
+# build directory is reused for a different build type -- a stale "Debug" label
+# must never weaken the skip guard below (or the one in the verify script).
+# CI exports DFROOT_RELEASE=1 for release builds as an additional marker.
+if(DEFINED DFROOT_ANDROID_VARIANT AND NOT "${DFROOT_ANDROID_VARIANT}" STREQUAL "")
+    string(TOLOWER "${DFROOT_ANDROID_VARIANT}" dfroot_variant_lower)
+    if(dfroot_variant_lower STREQUAL "release")
+        set(DFROOT_EFFECTIVE_BUILD_TYPE "Release")
+    elseif(dfroot_variant_lower STREQUAL "debug")
+        set(DFROOT_EFFECTIVE_BUILD_TYPE "Debug")
+    else()
+        set(DFROOT_EFFECTIVE_BUILD_TYPE "${DFROOT_ANDROID_VARIANT}")
+    endif()
+elseif(CMAKE_BUILD_TYPE STREQUAL "")
     set(DFROOT_EFFECTIVE_BUILD_TYPE "Unspecified")
 else()
     set(DFROOT_EFFECTIVE_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+endif()
+if(NOT DEFINED DFROOT_ANDROID_VARIANT OR "${DFROOT_ANDROID_VARIANT}" STREQUAL "")
+    set(DFROOT_ANDROID_VARIANT "unspecified")
 endif()
 
 if(DFROOT_SKIP_KO_HASH_CHECK)
@@ -84,7 +118,15 @@ if(DFROOT_SKIP_KO_HASH_CHECK)
     if(dfroot_build_type_upper STREQUAL "RELEASE")
         message(FATAL_ERROR
             "DFROOT_SKIP_KO_HASH_CHECK is forbidden for Release builds "
-            "(CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE})")
+            "(CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}, "
+            "DFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT})")
+    endif()
+    # The Gradle-supplied variant is authoritative independently of the
+    # effective label above (defense in depth against a stale cache).
+    if(dfroot_variant_lower STREQUAL "release")
+        message(FATAL_ERROR
+            "DFROOT_SKIP_KO_HASH_CHECK is forbidden for the Android release "
+            "variant (DFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT})")
     endif()
     message(WARNING
         "DFROOT_SKIP_KO_HASH_CHECK=ON: the pinned dfroot.ko SHA-256 check is "
@@ -122,6 +164,7 @@ add_custom_command(
             "-DKO_STAMP=${KO_VERIFY_STAMP}"
             "-DKO_VERIFY_MANIFEST=${KO_VERIFY_MANIFEST}"
             "-DDFROOT_BUILD_TYPE=${DFROOT_EFFECTIVE_BUILD_TYPE}"
+            "-DDFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT}"
             "-DDFROOT_SKIP=${DFROOT_SKIP_KO_HASH_CHECK}"
             "-DDFROOT_SKIP_REASON=${DFROOT_SKIP_REASON}"
             -P "${KO_VERIFY_SCRIPT}"
@@ -137,6 +180,16 @@ add_custom_target(ko_sha256_check DEPENDS "${KO_VERIFY_STAMP}")
 # It is evidence, not an independent reproducible-build proof.
 set(PROVENANCE_SCRIPT "${JNI_DIR}/record_build_provenance.cmake")
 set(PROVENANCE_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/dfroot-build-provenance.txt")
+# Always-running target: touch a real file so provenance is refreshed whenever
+# its inputs (toolchain, KO gate manifest, this CMake file) change, instead of
+# going stale in a reused build directory. The provenance record contains a
+# timestamp, so it is intentionally rewritten on every build.
+set(PROVENANCE_FORCE_FILE "${CMAKE_CURRENT_BINARY_DIR}/dfroot-provenance.force")
+add_custom_target(dfroot_provenance_force
+    COMMAND "${CMAKE_COMMAND}" -E touch "${PROVENANCE_FORCE_FILE}"
+    BYPRODUCTS "${PROVENANCE_FORCE_FILE}"
+    COMMENT "Scheduling DFRoot provenance refresh"
+)
 add_custom_command(
     OUTPUT "${PROVENANCE_OUTPUT}"
     COMMAND "${CMAKE_COMMAND}"
@@ -146,6 +199,7 @@ add_custom_command(
             "-DKO_VERIFY_MANIFEST=${KO_VERIFY_MANIFEST}"
             "-DKO_VERIFY_STAMP=${KO_VERIFY_STAMP}"
             "-DDFROOT_BUILD_TYPE=${DFROOT_EFFECTIVE_BUILD_TYPE}"
+            "-DDFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT}"
             "-DDFROOT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../.."
             "-DCMAKE_C_COMPILER_ID=${CMAKE_C_COMPILER_ID}"
             "-DCMAKE_C_COMPILER_VERSION=${CMAKE_C_COMPILER_VERSION}"
@@ -155,7 +209,13 @@ add_custom_command(
             "-DCMAKE_ASM_FLAGS=${CMAKE_ASM_FLAGS}"
             "-DDFROOT_CMAKE_VERSION=${CMAKE_VERSION}"
             -P "${PROVENANCE_SCRIPT}"
-    DEPENDS "${SPLICEHELPER}" "${KO_VERIFY_STAMP}" "${PROVENANCE_SCRIPT}"
+    DEPENDS "${SPLICEHELPER}"
+            "${KO_VERIFY_STAMP}"
+            "${KO_VERIFY_MANIFEST}"   # provenance must cross-check the KO gate
+            "${PROVENANCE_SCRIPT}"
+            "${CMAKE_CURRENT_LIST_FILE}" # re-record if the policy changes
+            "${PROVENANCE_FORCE_FILE}"
+            dfroot_provenance_force   # target-level ordering: force runs first
     COMMENT "Recording DFRoot build provenance"
     VERBATIM
 )
@@ -178,6 +238,23 @@ set_source_files_properties(exp.c PROPERTIES
 
 target_link_libraries(dfroot log)
 target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
+
+# Final packaged-byte gate: dump the dedicated .dfroot_ko section from the
+# LINKED .so and compare it with the SAME reviewed pins (and expected sizes)
+# used for the source KO. POST_BUILD guarantees we inspect the exact bytes AGP
+# will put in the APK. No skip option: failure fails the build, no manifest.
+add_custom_command(TARGET dfroot POST_BUILD
+    COMMAND "${CMAKE_COMMAND}"
+            "-DPACKAGED_SO=$<TARGET_FILE:dfroot>"
+            "-DKO_OBJCOPY=${CMAKE_OBJCOPY}"
+            "-DKO_EXPECTED_SHA256S=${KO_EXPECTED_SHA256S}"
+            "-DKO_EXPECTED_SIZE=${KO_EXPECTED_SIZES}"
+            "-DKO_MANIFEST=${PACKAGED_KO_MANIFEST}"
+            "-DDFROOT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../.."
+            -P "${PACKAGED_KO_VERIFY_SCRIPT}"
+    COMMENT "Verifying packaged .dfroot_ko bytes in libdfroot.so"
+    VERBATIM
+)
 
 add_executable(bootstrap bootstrap.c status_protocol.c final_status_publish.c proc_scan_policy.c)
 set_target_properties(bootstrap PROPERTIES

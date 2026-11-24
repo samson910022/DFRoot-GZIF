@@ -3,11 +3,12 @@
 # Run from anywhere:
 #   cmake -P tests/cmake/ko_hash_policy_test.cmake
 #
-# 20 cases across 14 numbered groups (some groups have a/b subcases):
+# 23 cases across 16 numbered groups (some groups have a/b subcases):
 # accepted pin 1 / pin 2, mismatch, skip forbidden under CI / GITHUB_ACTIONS /
-# DFROOT_RELEASE / Release / no reason, local skip allowed (incl. a clean-env
-# variant), missing blob, blob is a directory, malformed pins, stable stamp,
-# missing required arguments, and a positive verify with CI injected.
+# DFROOT_RELEASE / Release / Android release variant / no reason, local skip
+# allowed (incl. a clean-env variant), missing blob, blob is a directory,
+# malformed pins, stable stamp, missing required arguments, a positive verify
+# with CI injected, and android_variant manifest recording.
 # No device, NDK or signing material is needed.
 #
 # Every child verifier runs with CI, GITHUB_ACTIONS and DFROOT_RELEASE unset so
@@ -123,6 +124,7 @@ endfunction()
 set(RE_SHA_MISMATCH "SHA-256 MISMATCH")
 set(RE_SKIP_AUTOMATION "skip is forbidden when CI, GITHUB_ACTIONS or DFROOT_RELEASE is set")
 set(RE_SKIP_RELEASE "skip is forbidden for DFROOT_BUILD_TYPE=[Rr]elease")
+set(RE_SKIP_VARIANT "skip is forbidden for Android release variant")
 set(RE_SKIP_REASON "-DDFROOT_SKIP_REASON=<reason> is required")
 set(RE_BLOB_MISSING "blob not found")
 set(RE_BLOB_DIR "path is a directory")
@@ -153,6 +155,7 @@ if(NOT manifest_text MATCHES "status: verified" OR
    NOT manifest_text MATCHES "sha256: ${H1}" OR
    NOT manifest_text MATCHES "accepted_pins: 2" OR
    NOT manifest_text MATCHES "build_type: Debug" OR
+   NOT manifest_text MATCHES "android_variant: unspecified" OR
    NOT manifest_text MATCHES "env_CI: unset" OR
    NOT manifest_text MATCHES "env_GITHUB_ACTIONS: unset" OR
    NOT manifest_text MATCHES "env_DFROOT_RELEASE: unset" OR
@@ -283,5 +286,23 @@ expect_failure("14b missing KO_FILE" "${RE_MISSING_KO_FILE}"
     "-DKO_STAMP=${STAMP}"
     "-DKO_VERIFY_MANIFEST=${MANIFEST}"
     "-DDFROOT_BUILD_TYPE=Debug")
+
+# 15. The Android variant is authoritative in the verify script itself:
+# a release variant forbids skip even with a stale Debug label and no marker.
+# Matching is case-insensitive.
+standard_args(Debug)
+expect_failure("15 skip forbidden for Android release variant" "${RE_SKIP_VARIANT}"
+    ${ARGS} "-DDFROOT_ANDROID_VARIANT=release" "-DDFROOT_SKIP=ON")
+expect_failure("15b skip forbidden for uppercase Android release variant" "${RE_SKIP_VARIANT}"
+    ${ARGS} "-DDFROOT_ANDROID_VARIANT=RELEASE" "-DDFROOT_SKIP=ON")
+
+# 16. A positive verify records the Android variant in its manifest.
+standard_args(Debug)
+expect_case("16 Android variant recorded in manifest" ${ARGS}
+    "-DDFROOT_ANDROID_VARIANT=Release")
+file(READ "${MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "android_variant: Release")
+    message(FATAL_ERROR "FAIL: manifest missing android_variant:\n${manifest_text}")
+endif()
 
 message(STATUS "ko_hash_policy_test: all cases passed")

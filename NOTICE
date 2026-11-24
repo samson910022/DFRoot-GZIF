@@ -133,16 +133,32 @@ The run6/run8 hardware results recorded in `PORTING-GZIF.md` and `CHANGELOG.md`
 multi-marker status protocol, the then-current `dfroot.ko` pins and the old
 preference-write path. The current round-2 PR #3 changes (single `/dev/dffinal`
 outcome, KO hash-skip policy, build provenance, Java preference persistence)
-are **host-tested only and UNVALIDATED on device**.
+are **host-tested only and UNVALIDATED on device**. The round-3 phase-2 build
+and packaging gates described below are likewise host-tested only.
 
 - **No release with obsolete KO pins.** If a DDK rebuild no longer matches the
   two reviewed SHA-256 pins in `app/src/main/jni/CMakeLists.txt`, stop and
   verify out of band; update pins in a reviewed commit or do not release. Skip
-  mode is forbidden in CI/release builds.
-- **Provenance is not proof.** The build/provenance manifests record hashes,
-  toolchain identity, git HEAD and KO gate status for auditing; they are not an
-  independent reproducible-build proof, and splicehelper is not claimed to be
-  bit-for-bit deterministic across toolchains.
+  mode is forbidden in CI/release builds. Gradle passes the Android variant
+  (`release` / `debug`) as the authoritative native policy signal.
+- **Final packaged bytes (no skip).** The KO is linked into a dedicated
+  `.dfroot_ko` section; `verify_packaged_ko.cmake` dumps it from
+  `libdfroot.so` with objcopy and compares it to the SAME reviewed pins and
+  expected sizes. Configure fails without `CMAKE_OBJCOPY`; the gate has no
+  skip option and writes a manifest only on success. Tag CI repeats it on the
+  real APK before upload. **This real gate is blocked until KO re-pin**: the
+  final embedded bytes must be reviewed and deliberately re-pinned before a
+  tag can ship. Host-only fixture tests are not device validation.
+- **Provenance is evidence, not proof or attestation.** The build/provenance
+  manifests record hashes, toolchain identity, git HEAD, Android variant and
+  KO gate status for auditing, and fail closed on a missing/stale KO manifest;
+  they are not an independent reproducible-build proof, and splicehelper is
+  not claimed to be bit-for-bit deterministic across toolchains.
+- **All CI suites are asserted.** Every native/CMake/JVM suite writes a marker
+  that CI checks, the JUnit XML must report 8 tests with 0 failures/errors, and
+  a release-evidence step cross-checks git SHA, skip OFF in every CMakeCache,
+  verified KO and packaged manifests with the same hash, and the APK hash.
+  Only the informational provenance uploads remain best-effort.
 - **Auto Soft Reboot / Start on Boot remain disabled by default and
   unvalidated** on S9180ZHU8GZIF.
 - **P1-08 release gate.** The bundled loaders hardcode

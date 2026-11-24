@@ -322,10 +322,17 @@ extern uint32_t libcxx_len;
 extern char libcxx_first_inst_copy[];
 extern uint32_t libcxx_ko_target_off;
 
+/* The KO lives in its own allocatable section so the final packaged-byte gate
+ * can dump it from libdfroot.so with `objcopy --dump-section .dfroot_ko` and
+ * hash the exact bytes that will be loaded in ring0. The symbol names and the
+ * .incbin input are unchanged; .previous restores the assembler's prior
+ * section (no C-side behaviour changes). */
 asm(
-    ".section .rodata\n"
+    ".section .dfroot_ko,\"a\",@progbits\n"
+    ".balign 16\n"
     ".global dfroot_ko_13_5_15_start\n.global dfroot_ko_13_5_15_end\n"
     "dfroot_ko_13_5_15_start:\n.incbin \"ko/dfroot-android13-5.15.ko\"\ndfroot_ko_13_5_15_end:\n"
+    ".previous\n"
 );
 
 /* Path to the generated splicehelper blob. CMake points this at the build

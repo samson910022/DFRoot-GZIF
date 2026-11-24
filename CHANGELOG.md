@@ -1,5 +1,64 @@
 # Changelog — DFRoot GZIF
 
+## Unreleased — round-3 PR #3, phase 2 (build / packaging gates)
+
+**All changes in this section are host-tested only and UNVALIDATED on device.**
+No hardware run has exercised these gates; a tag build that fails them must
+not be published.
+
+- **Android variant is authoritative (P2-04).** `app/build.gradle.kts` passes
+  `-DDFROOT_ANDROID_VARIANT=release` / `=debug` through each build type's
+  `externalNativeBuild.cmake.arguments`. `CMakeLists.txt` maps `release` →
+  effective `Release` (and `debug` → `Debug`) ahead of the cache's
+  `CMAKE_BUILD_TYPE`, so a stale cached Debug label can no longer weaken the
+  skip guard. `verify_ko_sha256.cmake` independently rejects
+  `DFROOT_SKIP=ON` with `DFROOT_ANDROID_VARIANT=release` (case-insensitive),
+  even with no CI marker and a stale Debug label, and records
+  `android_variant` in its manifest. Signing guards are unchanged.
+- **Final packaged bytes are verified (P2-04).** `exp.c` now emits the KO into
+  a dedicated `.dfroot_ko,"a",@progbits` section (`.balign 16`, same symbol
+  names and `.previous`; no C changes). A new POST_BUILD step runs
+  `verify_packaged_ko.cmake`, which extracts that section from the linked
+  `libdfroot.so` with `CMAKE_OBJCOPY` and compares its SHA-256 against the
+  **same unchanged pins** plus the reviewed artifact sizes (13504 / 13384 B).
+  Configure fails if `CMAKE_OBJCOPY` is unavailable. The verifier has **no
+  skip option** (a skip flag is a hard error), fails closed with distinct
+  reasons (objcopy unavailable / section not found / size mismatch / packaged
+  KO SHA-256 MISMATCH) and writes a manifest with status, sha256, bytes,
+  section, so_sha256, pins, timestamp and git HEAD. No pin was added or
+  relaxed. `ko_pin_policy.cmake` shares pin validation between both verifiers.
+- **Real APK gate (P2-04).** Tag builds unzip `lib/arm64-v8a/libdfroot.so`
+  from the release APK, run the same verifier with the NDK's llvm-objcopy and
+  assert `status: verified` **before** artifact upload / GitHub Release, with
+  no `continue-on-error`. **This real gate is blocked until KO re-pin**: the
+  final linked bytes must be reviewed and deliberately re-pinned before a tag
+  can ship; an unknown blob fails closed rather than being accepted by a skip
+  flag. Do not treat a passing host fixture run as device validation.
+- **Provenance is evidence, never stale (P2-06).**
+  `record_build_provenance.cmake` now fails closed if the KO manifest is
+  missing, malformed or disagrees with the stable stamp (status and hash), and
+  records `ko_manifest_sha256` and `android_variant`. An always-run force
+  target plus `KO_VERIFY_MANIFEST`, `CMakeLists.txt` and the force file in
+  `DEPENDS` refresh the record when inputs change. It remains an informational
+  audit record, **not an independent reproducible-build proof or attestation**.
+- **All suites reached (P2-07).** New host-only
+  `tests/cmake/packaged_ko_test.cmake` (deterministic harmless ELF64 fixtures
+  from `make_packaged_ko_fixture.py`) covers valid pin, ANY-pin, mismatch,
+  corrupted byte, missing section, wrong size, bad objcopy, skip-cannot-bypass
+  and fail-closed manifest behaviour. CI asserts a marker from every native /
+  CMake / JVM suite and parses the JUnit XML for exactly **8 tests, 0
+  failures/errors/skips**, so one failure cannot hide another. Required gates
+  have no `continue-on-error`; only the informational provenance uploads stay
+  best-effort. A release-evidence step checks the git SHA, skip OFF in every
+  CMakeCache, a verified KO manifest whose hash is in the pins, a verified
+  packaged manifest with the same hash, and the APK hash.
+- **Unchanged gates / boundary.** P1-08 (`/data/local/tmp/.ksud-stage`
+  race-at-creation fixed, but a `shell`-uid process could still swap the file
+  before the loader renames it) remains a release gate requiring a loader
+  rebuild. run6/run8 validated the historical implementation only; everything
+  above is host-tested only and UNVALIDATED on device. Auto Soft Reboot and
+  Start on Boot stay disabled by default and unvalidated.
+
 ## Unreleased — PR #3 hardening pass (round 2)
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**

@@ -18,8 +18,16 @@
 > KO pins and the old preference-write path — and must not be read as validation
 > of the current code. No release may ship with obsolete KO pins (stop and
 > review if the DDK artifact no longer matches the two reviewed pins; never
-> skip in CI/release). Provenance records are informational, **not** an
-> independent reproducible-build proof. Auto Soft Reboot and Start on Boot
+> skip in CI/release). Gradle passes the Android variant (`release` / `debug`)
+> as the authoritative native policy signal, and the KO is linked into a
+> dedicated `.dfroot_ko` section whose final bytes in `libdfroot.so` are
+> SHA-256-checked against the same pins (no skip option) before a tag is
+> published. That real packaged-byte gate is **blocked until KO re-pin**; host
+> fixture tests are not device validation. Provenance records are
+> informational evidence and fail closed on stale/missing KO manifests, but
+> are **not** an independent reproducible-build proof or attestation. CI
+> asserts a marker from every native/CMake/JVM suite plus 8 JUnit tests with
+> 0 failures before the APK is uploaded. Auto Soft Reboot and Start on Boot
 > remain disabled/unvalidated, and the residual `/data/local/tmp/.ksud-stage`
 > trust issue (P1-08) is a release gate requiring a loader rebuild.
 
@@ -387,6 +395,13 @@ git clone https://github.com/samson910022/DFRoot-GZIF.git && cd DFRoot-GZIF
 ./gradlew :app:assembleRelease        # or the top-level Makefile (needs podman + keystore)
 # → app/build/outputs/apk/release/DFRoot_4.8-gzif.apk
 ```
+
+The release variant passes `-DDFROOT_ANDROID_VARIANT=release` to CMake (the
+authoritative policy signal; a cached Debug label cannot weaken it). CMake
+requires `CMAKE_OBJCOPY` and verifies the final `.dfroot_ko` bytes in
+`libdfroot.so` after linking, with no skip path; tag CI repeats the check on
+the APK's native library before upload. No hashes were added or relaxed: a
+rebuilt KO must be re-pinned in a reviewed commit before a tag can ship.
 
 ### 8.3 Install & run (device)
 
