@@ -1,5 +1,6 @@
 /* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -163,13 +164,13 @@ static int run_ctx(const char *ctx, char *const argv[])
         _exit(127);
     }
     int status;
-    waitpid(pid, &status, 0);
+    TEMP_FAILURE_RETRY(waitpid(pid, &status, 0));
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 static void touch(const char *path)
 {
-    int fd = open(path, O_CREAT | O_WRONLY, 0666);
+    int fd = open(path, O_CREAT | O_WRONLY, 0600);
     if (fd >= 0)
         close(fd);
 }
@@ -228,12 +229,41 @@ int main(void)
         return 1;
     }
     if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load", "--package-name", su_manager, NULL }) == 0) {
+        /* CRITICAL: /dev/dfmsr must be touched BEFORE /dev/dfm6. exp.c scans
+         * its marker table in array order within one poll; if dfm6 (rc=0)
+         * were seen first the App would print SUCCESS and only afterwards the
+         * device hard-reboots, misleading the user. dfmsr (rc=4) makes exp.c
+         * report SOFT REBOOT PENDING even though dfm6 also exists. The dfm6
+         * semantics (ksud late-load SUCCESS) are unchanged. */
+        if (soft_reboot)
+            touch("/dev/dfmsr");
+
         touch("/dev/dfm6");
+
         if (soft_reboot) {
-            while (late_load_running()) sleep(1);
-            run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
+            /* Bound the wait: never block indefinitely. 60 x 1s is well under
+             * the 10-minute WakeLock held by the App. */
+            int waited = 0;
+            while (waited < 60 && late_load_running()) {
+                sleep(1);
+                waited++;
+            }
+            if (late_load_running()) {
+                /* Still running at the bound. Root is already active (dfmsr
+                 * -> rc=4), so skip soft-reboot instead of waiting forever. */
+                touch("/dev/dfmw2");
+            } else {
+                int sr_rc = run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
+                if (sr_rc != 0) {
+                    /* soft-reboot command failed. Do NOT mark root as failed:
+                     * dfmsr already told exp.c that root is active. */
+                    touch("/dev/dfmw3");
+                }
+            }
         }
     } else {
+        /* late-load failed: deliberately do NOT touch dfmsr, so exp.c reports
+         * the genuine failure (dfme2 -> rc=1). */
         touch("/dev/dfme2");
     }
         

