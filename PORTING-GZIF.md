@@ -117,9 +117,12 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
   `ksud soft-reboot` refining the token to `REBOOT_REQUESTED` (exit 0) or
   `REBOOT_FAILED` (otherwise). A failed refinement publication leaves the
   final token at `ROOT_ONLY`. Any nonzero `late-load` exit → `ERROR`, no
-  reboot. `exp.c` awaits this single file for up to 70 s (plus a 10 s grace
-  after a first ROOT_ONLY observation, covering the 5 s child wait) and releases the patched files exactly
-  once on observation or timeout.
+  reboot. `exp.c` awaits this single file for **at most 70 s total**; a first
+  `ROOT_ONLY` observation opens a 10 s grace window for a refinement, but the
+  effective deadline is `min(observation + 10 s, start + 70 s)` — the grace is
+  capped by the overall budget and cannot extend the wait past 70 s. The
+  patched files are released exactly once, on a terminal observation or on
+  timeout.
 
 **(7) Samsung-patched ksud late-load.** The bundled loader (classic FZG1 v3.3.0 — log tag **`KernelSU`**; or Next generic 3.4.2 — log tag **`KernelSU Next`**):
 - logs `ksud::cli: command: LateLoad {… package_name: "…"}` (`ksud::late_load: late-load command triggered!` … `Detected KMI: android13-5.15` — **2-part KMI always**, verified);

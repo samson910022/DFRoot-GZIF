@@ -92,10 +92,14 @@
   PR builds now configure without `signing.properties`: the release signing
   config is a harmless placeholder unless the real keystore and all secrets
   are present, and `assembleRelease` fails closed otherwise.
-- Test/docs truthfulness (P2-07): 18-case (14 numbered groups, some with a/b
+- Test/docs truthfulness (P2-07): 20-case (14 numbered groups, some with a/b
   subcases) host-only `tests/cmake/ko_hash_policy_test.cmake` is wired into CI
   alongside the existing `make -C tests/native test` step; docs below state
   the validation boundary explicitly.
+- Round-3 docs correction: `PORTING-GZIF.md` §4's "70 s plus a 10 s grace" was
+  inaccurate — the wait is capped at 70 s total, with the ROOT_ONLY grace
+  `min(observation + 10 s, start + 70 s)` and cleanup once on observation or
+  timeout. Documentation-only; `status_protocol.c` is unchanged in this phase.
 
 Residual risks / **release gates** (not closed by this PR):
 
