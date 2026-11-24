@@ -97,9 +97,60 @@
   alongside the existing `make -C tests/native test` step; docs below state
   the validation boundary explicitly.
 - Round-3 docs correction: `PORTING-GZIF.md` §4's "70 s plus a 10 s grace" was
-  inaccurate — the wait is capped at 70 s total, with the ROOT_ONLY grace
+  inaccurate — the wait is capped at 70 s total, with the grace
   `min(observation + 10 s, start + 70 s)` and cleanup once on observation or
-  timeout. Documentation-only; `status_protocol.c` is unchanged in this phase.
+  timeout. Documentation-only; `status_protocol.c` is unchanged in that phase.
+  The native phase below subsequently raises the grace cap to the 85 s overall
+  deadline and retires the ROOT_ONLY grace entirely.
+
+## Unreleased — round-3 PR #3, phase 1b (native only, Java mapping later)
+
+**Host-tested only and UNVALIDATED on device.** No hardware run has exercised
+this protocol. Java result-code strings/map are deliberately untouched.
+
+- **Nonce-bound v2 token.** `exp.c` generates a 128-bit nonce with `getrandom`
+  (`/dev/urandom` fallback), writes it atomically (0644, `fchmod`, `fsync`,
+  `rename`) to `/data/user_de/0/df.root/files/dfinv` **before**
+  `createOrphanProcess()`, and uses it for the consumer. `bootstrap.c` strictly
+  reads/validates the same 32-hex-char nonce at startup; missing/malformed →
+  publish ERROR with the reserved zero nonce, force `soft_reboot=0`, and no
+  reboot or late-load at all. The single final token is now
+  `dfroot-v2:<nonce>:<outcome>\n`; `df_format_final_token()` /
+  `df_parse_final_token()` reject embedded NUL, truncated or extra bytes, a
+  stale/foreign nonce and unknown/`none` outcomes. `df_publish_final()`
+  validates canonical shape before any write, keeping 0644 + `O_EXCL|O_NOFOLLOW`
+  + `fsync` + `rename` + unlink-on-failure; both real read adapters use
+  `O_NOFOLLOW` + `fstat(S_ISREG)` + size bound + exact read and pass an explicit
+  byte count to the strict parser (no C-string prefix acceptance).
+- **New outcomes and truthful preflight.** `ROOT_ONLY` now means ONLY "no
+  reboot requested" and is terminal immediately (no grace). A soft-reboot
+  attempt publishes `REBOOT_PENDING` as its non-terminal preflight; a failed
+  refinement publishes `REBOOT_ATTEMPT_UNKNOWN` — never a fallback to
+  `ROOT_ONLY`. `REBOOT_PENDING` opens the grace window, which is clamped to the
+  **overall** deadline (85 s), not the 70 s budget; a pending observation with
+  no refinement becomes `REBOOT_ATTEMPT_UNKNOWN`. New rc constants:
+  `DF_RC_ATTEMPT_UNKNOWN=7`, `DF_RC_ALREADY_HOOKED=9`,
+  `DF_RC_RECOVERY_FAILED_BIT=64`; both pending and unknown map to rc 7.
+- **Cleanup before the extended wait.** `status_flow_run()` calls `cleanup_cb`
+  exactly once **before** `consumer_await()`, so patched files are released
+  before the bounded wait; producer-side confirms absence only if the checked
+  deadline has not expired. `/proc` scanning uses the new pure
+  `proc_scan_policy.{c,h}` verdict (benign ENOENT/ESRCH/zero bytes, incomplete
+  on other errno or a full buffer without a match, match wins), strict PID
+  `strtol` validation and a tri-state -1/0/1 result. `run_ctx()` and
+  `wait_child_bounded()` use bounded `WNOHANG` waits with a 5 s/5 s cap and
+  `kill_and_reap_bounded()`; timeout/clock failure is -1.
+- **Recovery bit.** Every final rc from `exp.c` is OR'ed with 64 when cleanup
+  failed (instead of downgrading only rc 0 to 1). `cleanup()` now reads each
+  restored region back, `memcmp`s it with the saved original and logs
+  `VERIFICATION FAILED` + marks failure on any mismatch.
+- **Tests:** `status_protocol_test.c` has 34 mock cases (strict v2
+  format/parse, new outcomes, pending preflight, unknown on refinement failure,
+  grace past budget and clamped by overall, cleanup-before-first-read, pending
+  timeout, clock/deadline boundaries); new `proc_scan_policy_test.c` has 13
+  table cases; `final_publish_test.c` exercises canonical tokens and rejects
+  malformed ones with the prior final untouched. `make -C tests/native test`,
+  host compiles and `git diff --check` are clean.
 
 Residual risks / **release gates** (not closed by this PR):
 

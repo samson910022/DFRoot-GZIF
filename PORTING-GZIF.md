@@ -109,20 +109,29 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **`set_partitions_ro()`** — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` pref set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
 - **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud` into `/data/local/tmp/.ksud-stage`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). The path must stay `/data/local/tmp/.ksud-stage` because the bundled loaders have it baked into their self-staging constant. Then execs **`/data/local/tmp/.ksud-stage late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
+- `exp.c` first writes a fresh 128-bit run nonce to
+  `/data/user_de/0/df.root/files/dfinv` (atomic 0644 replace + fsync); bootstrap
+  strictly reads it at startup. A missing/malformed nonce publishes `ERROR`
+  with the reserved zero nonce, forces `soft_reboot=0` and skips late-load and
+  any reboot. Every final token is bound to that nonce:
+  `dfroot-v2:<32-hex nonce>:<outcome>\n`.
 - on **exit 0** → the pure producer publishes one atomically replaced final
-  token in `/dev/dffinal`: `ROOT_ONLY` when Auto Soft Reboot is off; with it
-  on, a 60 s monotonic-clock wait for `late-load` to disappear (unknown or
-  timeout → `REBOOT_SKIPPED`, **no reboot**), a successful ROOT_ONLY preflight
-  publication, then a bounded `WNOHANG`/kill/reap child wait for
-  `ksud soft-reboot` refining the token to `REBOOT_REQUESTED` (exit 0) or
-  `REBOOT_FAILED` (otherwise). A failed refinement publication leaves the
-  final token at `ROOT_ONLY`. Any nonzero `late-load` exit → `ERROR`, no
-  reboot. `exp.c` awaits this single file for **at most 70 s total**; a first
-  `ROOT_ONLY` observation opens a 10 s grace window for a refinement, but the
-  effective deadline is `min(observation + 10 s, start + 70 s)` — the grace is
-  capped by the overall budget and cannot extend the wait past 70 s. The
-  patched files are released exactly once, on a terminal observation or on
-  timeout.
+  token in `/dev/dffinal`: `ROOT_ONLY` when Auto Soft Reboot is off (terminal
+  immediately: it means ONLY "no reboot requested"); with it on, a 60 s
+  monotonic-clock wait for `late-load` to disappear (unknown, timeout or an
+  absence confirmed after the deadline → `REBOOT_SKIPPED`, **no reboot**), a
+  successful `REBOOT_PENDING` preflight publication, then a bounded
+  `WNOHANG`/kill/reap child wait for `ksud soft-reboot` refining the token to
+  `REBOOT_REQUESTED` (exit 0) or `REBOOT_FAILED` (otherwise). A failed
+  refinement publication publishes `REBOOT_ATTEMPT_UNKNOWN` — never a fallback
+  to `ROOT_ONLY`. Any nonzero `late-load` exit → `ERROR`, no reboot.
+  `exp.c` awaits this single file with a **70 s budget**; a `REBOOT_PENDING`
+  observation opens a 10 s grace window clamped ONLY to the **85 s overall
+  deadline** (`min(observation + 10 s, start + 85 s)`), so a refinement can
+  arrive after the budget. An unrefined pending is reported as
+  `REBOOT_ATTEMPT_UNKNOWN`. The patched files are released exactly once,
+  **before** the extended wait; a failed restore sets the 64 recovery-failed
+  bit on every app rc.
 
 **(7) Samsung-patched ksud late-load.** The bundled loader (classic FZG1 v3.3.0 — log tag **`KernelSU`**; or Next generic 3.4.2 — log tag **`KernelSU Next`**):
 - logs `ksud::cli: command: LateLoad {… package_name: "…"}` (`ksud::late_load: late-load command triggered!` … `Detected KMI: android13-5.15` — **2-part KMI always**, verified);
@@ -137,14 +146,22 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 **Final-status map** (single atomically published file, replaced by the new
 protocol — `status_protocol.{c,h}` + `bootstrap.c` / `exp.c`):
 
+All tokens have the form `dfroot-v2:<32-hex nonce>:<outcome>\n`. A token with a
+stale/foreign nonce, an unknown outcome, embedded NUL or extra bytes is ignored
+by the consumer. App rc 9 (`DF_RC_ALREADY_HOOKED`) is reserved for the Java-side
+`/dev/df` gate; 64 is a **recovery-failed bit** OR'ed into any rc below when a
+restore could not be verified.
+
 | `/dev/dffinal` token | App rc | Meaning |
 |---|---|---|
-| `root_only` | 0 | late-load exited 0; **root not verified** |
-| `error` | 1 | bootstrap failed before/at late-load; no reboot |
+| `root_only` | 0 | late-load exited 0, no reboot requested; **root not verified** (terminal) |
+| `error` | 1 | bootstrap failed before/at late-load (also on missing/malformed nonce); no reboot |
 | *(absent / no valid token)* | 2 | unknown — check logcat & dmesg |
 | `reboot_requested` | 4 | soft-reboot command exited 0; **reboot not confirmed** |
-| `reboot_skipped` | 5 | soft reboot not attempted (late-load state unknown or timeout) |
+| `reboot_skipped` | 5 | soft reboot not attempted (late-load state unknown or deadline expired) |
 | `reboot_failed` | 6 | soft-reboot command failed or timed out |
+| `reboot_pending` | 7 | soft reboot requested; non-terminal preflight (unknown until refined) |
+| `reboot_attempt_unknown` | 7 | attempt result unknown (refinement publish failed or grace expired) |
 
 Progress markers (`/dev/df`, `/dev/dfm0`–`dfm5`, `/dev/dfmw0`/`dfmw1`,
 `/dev/dfme0`/`dfme1`) are still touched for diagnostics. `exp.c` observes
@@ -383,7 +400,9 @@ git clone https://github.com/samson910022/DFRoot-GZIF.git && cd DFRoot-GZIF
    su -v             # 3.3.0:KernelSU   (run6)   |   3.4.2:KernelSU   (run8)
    getenforce        # Enforcing
    cat /proc/modules | grep kernelsu   # kernelsu ... Live
-   cat /dev/dffinal  # root_only | reboot_requested | reboot_skipped | reboot_failed | error
+   cat /dev/dffinal  # dfroot-v2:<nonce>:<root_only | reboot_pending |
+                     #   reboot_requested | reboot_skipped | reboot_failed |
+                     #   reboot_attempt_unknown | error>
    ```
 6. **After every reboot: re-run LAUNCH ROOT.** There is no persistence. Do **not** enable "Start on Boot" or "Auto Soft Reboot" until you have tested them (see §9.6 / §10).
 
@@ -429,7 +448,7 @@ The classic manager therefore cannot manage root on this firmware **even on a fu
 
 ### 9.7 Other failure modes & logcat tags
 - Tags to capture: **`dfroot`** (exploit + app; line markers `* app version`, `=== setup ===`, `=== exploit ===`, `=== init ===`, `=== cleanup ===`), **`KernelSU`** (classic ksud), **`KernelSU Next`** (Next ksud), and (for manager UX) the manager's own tags. Always capture both KSU tags or none (`next-failure-evidence.txt` is a negative example).
-- "DFRoot: unknown result - check logcat & dmesg" (rc=2) → either IpSec setup failed or no valid final token appeared before the checked 70 s monotonic deadline; look at `dfroot` lines; `dmesg` requires root (unavailable exactly when you need it).
+- "DFRoot: unknown result - check logcat & dmesg" (rc=2) → either IpSec setup failed or no valid final token appeared before the checked 70 s budget (85 s overall cap when a `reboot_pending` preflight opened the grace window); look at `dfroot` lines; `dmesg` requires root (unavailable exactly when you need it). A final rc ≥ 64 means a restore failed (recovery bit).
 - Log buffer size Off → DFRoot refuses ("Log buffer size is set to Off") — set it to anything else in Developer Options.
 - `/dev/df` lingering after a failed run: press the button again is refused — **reboot is the only re-arm**.
 - Intermittent: `Failed to set feature 5: ksuctl failed: Operation not supported on transport endpoint (os error 95)` (seen run8) — non-fatal; KSU continued and loaded 5 other features. Do not chase it.
@@ -523,6 +542,7 @@ rebuild.
 | 19 | CVE-2026-98260-dm3q port | **Not attempted** | — |
 | 20 | "Both managers" success (classic manager UI + Next UI) | **Half-validated**: both manager APKs present and exercised as *failures*; both **loader lineages** validated as successes (run6 = classic 3.3.0 lineage; run8 = Next 3.4.2 lineage). `me.weishu.kernelsu`-selected success run: **not performed** | §5.1 |
 | 21 | Round-2 PR #3 single `/dev/dffinal` status flow + truthful rc strings | **UNVALIDATED on device** — host-tested only (28 mock cases + real-file permission/atomicity test) | `tests/native/status_protocol_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` Unreleased |
+| 22 | Round-3 PR #3 phase 1b: nonce-bound v2 token, `REBOOT_PENDING`/`REBOOT_ATTEMPT_UNKNOWN`, cleanup-before-wait, 85 s grace cap, recovery bit, `/proc` scan verdict | **UNVALIDATED on device** — host-tested only (34 status cases, 13 proc-scan cases, real-file publisher test, host compiles) | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` Unreleased |
 
 Confidence rollup: **the chain works on this firmware today; it has survived exactly two cold-boot runs with the Samsung-patched loaders; every other CVE/module/persistence aspect remains unverified.**
 
@@ -555,7 +575,7 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
 11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle 9.7.1 → `./gradlew :app:assembleRelease`, `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
-13. Troubleshooting: `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single final outcome (`error` = ksud/staging failed, `root_only` = root not verified, `reboot_*` = reboot states); dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status flow is host-tested but UNVALIDATED on device.**
+13. Troubleshooting: `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown, other `reboot_*` = reboot states); rc ≥ 64 ⇒ restore verification failed; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
 
@@ -619,6 +639,59 @@ these changes. Do not read a passing host test as a device success claim.
   of `elf_parser.c`, `device_version.c` and `exp.c` are clean. Device
   re-validation of the whole chain is still required before any reliability
   or success claim is made.
+
+---
+
+## 16. Round-3 PR #3 phase 1b — native protocol hardening (host-tested only, device-unvalidated)
+
+**Status: none of this has run on the S23U.** The evidence below is host unit
+tests and compile checks only; the hardware ledger in §5 predates these
+changes. The Java rc-string mapping is deliberately untouched and belongs to a
+later phase.
+
+- **Nonce / v2 token.** `exp.c` generates 128 random bits (`getrandom`, with a
+  `/dev/urandom` fallback) and atomically writes 32 lowercase hex characters to
+  `/data/user_de/0/df.root/files/dfinv` (0644, `fchmod`, `fsync`, `rename`)
+  before arming the hook. `bootstrap.c` strictly validates the file (regular
+  file, exactly 32 lowercase hex bytes) at startup. Missing/malformed → publish
+  `ERROR` with the reserved zero nonce, force `soft_reboot=0`, and do not run
+  `late-load` or any reboot. Final tokens are
+  `dfroot-v2:<nonce>:<outcome>\n`; the parser rejects embedded NUL, truncation,
+  extra bytes, unknown/`none` outcomes and stale/foreign nonces.
+- **Outcomes / rc.** `ROOT_ONLY` now means ONLY "no reboot requested" and is
+  terminal immediately. A soft-reboot attempt publishes the non-terminal
+  `REBOOT_PENDING` preflight; if the refinement publish fails, it publishes
+  `REBOOT_ATTEMPT_UNKNOWN` instead of silently falling back to `ROOT_ONLY`.
+  New codes: rc 7 for pending/unknown, rc 9 reserved for the Java "already
+  hooked" gate (`DF_RC_ALREADY_HOOKED`), and the additive bit 64 for a failed
+  recovery. `df_outcome_to_rc()` maps pending and unknown to 7; `exp.c` ORs 64
+  into **every** rc when cleanup failed instead of only downgrading rc 0.
+- **Wait semantics.** `status_flow_run()` invokes `cleanup_cb` exactly once
+  **before** `consumer_await()`, so the patched files are released before the
+  extended wait. `consumer_await()` uses a 70 s budget, a 10 s grace opened only
+  by `REBOOT_PENDING`, and an 85 s overall deadline; the grace deadline is
+  `min(observation + 10 s, start + 85 s)` and is deliberately **not** clamped to
+  the 70 s budget. Timing out while pending yields
+  `REBOOT_ATTEMPT_UNKNOWN`. All deadlines are checked monotonic `int64_t`
+  values; clock failure fails closed on both sides.
+- **Strict scanning.** The pure `proc_scan_policy.{c,h}` classifier maps each
+  `/proc/<pid>/cmdline` observation to benign (ENOENT/ESRCH/zero bytes), match
+  or incomplete (other errno, or a full buffer with no match). A match wins;
+  incomplete prevents "absent" from ever authorizing a reboot. PIDs are
+  validated with strict `strtol`. `run_ctx()` and `wait_child_bounded()` use
+  bounded `WNOHANG` waits (5 s each) with a clock-checked kill/reap; timeout or
+  clock failure returns -1. The producer re-checks the deadline before
+  accepting a confirmed-absent late-load.
+- **Truthful restore.** `cleanup()` reads every restored region back, compares
+  it with the pre-write originals and logs `VERIFICATION FAILED` on any
+  mismatch, setting the recovery-failed bit rather than reporting success.
+- **Host verification only.** `make -C tests/native test` runs 34 status
+  protocol cases, 13 proc-scan verdict cases, the real-file canonical publisher
+  test plus the existing ELF/version tests; standalone `-D_GNU_SOURCE` compiles
+  of `bootstrap.c`, `exp.c` (with a stub `DFROOT_SPLICEHELPER_PATH`) and the new
+  pure modules, and `git diff --check`, are clean. Device re-validation of the
+  whole chain — including the nonce path, the 85 s wait and the v2 token — is
+  still required before any reliability or success claim.
 
 ---
 

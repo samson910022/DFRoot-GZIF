@@ -32,6 +32,7 @@ app/src/main/jni/splicehelper
 app/src/main/jni/ko/*.ko
 tests/native/status_protocol_test
 tests/native/final_publish_test
+tests/native/proc_scan_policy_test
 tests/native/elf_parser_test
 tests/native/device_version_test
 tests/cmake/.work/

@@ -3,6 +3,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 
 #include "status_protocol.h"
 #include "final_status_publish.h"
+#include "proc_scan_policy.h"
 
 #define BLKROSET   0x125d
 /* The bundled Samsung-patched loaders have /data/local/tmp/.ksud-stage baked
@@ -30,11 +32,17 @@
  * informational; only /dev/dffinal carries the result. */
 #define DF_FINAL_PATH "/dev/dffinal"
 #define DF_FINAL_TMP  "/dev/dffinal.tmp"
+#define DF_NONCE_PATH "/data/user_de/0/df.root/files/dfinv"
 #define LATE_LOAD_WAIT_MS 60000
 #define SOFT_REBOOT_WAIT_MS 5000
 /* Secondary deadline for reaping a SIGKILLed child. A stuck child must never
  * turn a bounded wait into an unbounded blocking waitpid(). */
 #define SIGKILL_REAP_WAIT_MS 2000
+/* The late-load command itself must not hold bootstrap forever either. */
+#define RUN_CTX_WAIT_MS 5000
+
+static void kill_and_reap_bounded(pid_t pid);
+static int64_t monotonic_ms(void);
 
 static int pref_true(const char *buf, const char *key)
 {
@@ -143,10 +151,12 @@ static int set_partitions_ro(void)
     return 0;
 }
 
-/* Returns 1 when a ksud late-load process exists, 0 when it is absent, and
- * -1 when /proc cannot be scanned. Unknown must never be treated as absent:
- * a readdir() error is indistinguishable from end-of-directory except through
- * errno, so a failed scan must be reported as unknown (no reboot authorized). */
+/* Returns 1 when a ksud late-load process exists, 0 when it is confirmed
+ * absent, and -1 when the scan is incomplete. Unknown must never be treated as
+ * absent: readdir() signals errors only through errno, a truncated cmdline can
+ * hide the marker, and an unexpected open/read errno means we did not see
+ * everything. df_proc_entry_verdict() is the single place that encodes this
+ * tri-state classification. */
 static int late_load_running(void)
 {
     DIR *d = opendir("/proc");
@@ -158,7 +168,9 @@ static int late_load_running(void)
 
     for (;;) {
         char *end;
-        int fd, n;
+        long pid;
+        int fd, n, open_errno = 0, read_errno = 0, buf_full;
+        enum df_proc_verdict verdict;
 
         /* Reset immediately before every readdir(): open/read/close/strtol
          * in the body can set errno, and readdir() only signals an error by
@@ -170,30 +182,64 @@ static int late_load_running(void)
                 rc = -1;
             break;
         }
-        strtol(e->d_name, &end, 10);
-        if (*end) continue;
-        snprintf(path, sizeof(path), "/proc/%s/cmdline", e->d_name);
-        fd = open(path, O_RDONLY | O_CLOEXEC);
-        if (fd < 0) continue; /* benign per-PID race: process already gone */
-        n = (int)read(fd, buf, sizeof(buf) - 1);
-        close(fd);
-        if (n <= 0) continue; /* benign per-PID race: cmdline vanished */
-        buf[n] = '\0';
-        for (int i = 0; i < n; i++)
-            if (!buf[i]) buf[i] = ' ';
-        if (strstr(buf, "ksud") && strstr(buf, "late-load")) {
+        /* Strict PID validation: no sign, no trailing junk, no overflow, and
+         * PID 0 (or a negative value) is never a process directory. */
+        errno = 0;
+        pid = strtol(e->d_name, &end, 10);
+        if (errno != 0 || end == e->d_name || *end != '\0' ||
+            pid <= 0 || pid > INT_MAX)
+            continue;
+        snprintf(path, sizeof(path), "/proc/%ld/cmdline", pid);
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0)
+            open_errno = errno;
+        n = -1;
+        if (fd >= 0) {
+            errno = 0;
+            n = (int)read(fd, buf, sizeof(buf) - 1);
+            if (n < 0)
+                read_errno = errno;
+            close(fd);
+        }
+        buf_full = (n == (int)sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            for (int i = 0; i < n; i++)
+                if (!buf[i]) buf[i] = ' ';
+        }
+        verdict = df_proc_entry_verdict(open_errno, read_errno,
+                                        n < 0 ? -1 : n, buf_full,
+                                        n > 0 &&
+                                        strstr(buf, "ksud") != NULL &&
+                                        strstr(buf, "late-load") != NULL);
+        if (verdict == DF_PROC_MATCH) {
             found = 1;
             break;
         }
+        if (verdict == DF_PROC_INCOMPLETE) {
+            rc = -1;
+            break;
+        }
+        /* BENIGN: benign per-PID race or a scanned non-matching entry. */
     }
     if (closedir(d) < 0)
         rc = -1;
     return rc ? -1 : found;
 }
 
+/* Spawn a helper and wait for it with a bounded WNOHANG loop. A blocking
+ * waitpid() here could hang forever (stuck child, no exit); a timeout or a
+ * clock failure is fail-closed (-1), never a success. */
 static int run_ctx(const char *ctx, char *const argv[])
 {
-    pid_t pid = fork();
+    pid_t pid;
+    int64_t start, now;
+    int status = 0;
+
+    start = monotonic_ms();
+    if (start < 0)
+        return -1; /* no clock, no safe deadline */
+    pid = fork();
     if (pid < 0)
         return -1;
     if (pid == 0) {
@@ -204,10 +250,19 @@ static int run_ctx(const char *ctx, char *const argv[])
         execv(argv[0], argv);
         _exit(127);
     }
-    int status = 0;
-    if (TEMP_FAILURE_RETRY(waitpid(pid, &status, 0)) < 0)
-        return -1;
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (w < 0 && errno != EINTR)
+            return -1;
+        now = monotonic_ms();
+        if (now < 0 || now - start >= RUN_CTX_WAIT_MS) {
+            kill_and_reap_bounded(pid);
+            return -1;
+        }
+        usleep(10000);
+    }
 }
 
 /* ---- Real status_io operations for the producer ---- */
@@ -249,31 +304,26 @@ static int io_late_load_state(void *ctx)
     return late_load_running();
 }
 
-/* Read the published final token. A failure (absent/unreadable/symlink) is
- * simply "not available yet" to the consumer. */
-static int io_read_final(void *ctx, char *buf, size_t cap)
+/* Read the published final token with the strict real adapter: O_NOFOLLOW,
+ * regular-file only, bounded size, exact read. A failure (absent/unreadable/
+ * symlink/oversize) is simply "not available yet" to the consumer. */
+static int io_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
 {
-    int fd, n;
     (void)ctx;
-    if (!buf || cap == 0) return -1;
-    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) return -1;
-    n = (int)read(fd, buf, cap - 1);
-    close(fd);
-    if (n < 0) return -1;
-    buf[n] = '\0';
-    return 0;
+    return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
 }
 
-/* Atomically publish one final token via df_publish_final(): O_EXCL|O_NOFOLLOW
- * temp, mode DF_FINAL_MODE (0644, fchmod-pinned against umask), fsync, rename.
- * rename(2) is atomic, so the consumer sees either the old token or the new
- * one, never a partial write. The token has no secrets but MUST be readable by
- * the app uid, which runs exp.c; a 0600 temp would make every consumer read
- * fail. Failure leaves the previous final status untouched. */
-static int io_publish_final(void *ctx, const char *token)
+/* Atomically publish one canonical, nonce-bound final token via
+ * df_publish_final(): O_EXCL|O_NOFOLLOW temp, mode DF_FINAL_MODE (0644,
+ * fchmod-pinned against umask), fsync, rename. rename(2) is atomic, so the
+ * consumer sees either the old token or the new one, never a partial write.
+ * Failure leaves the previous final status untouched. */
+static int io_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
 {
+    char token[DF_FINAL_TOKEN_CAP];
     (void)ctx;
+    if (df_format_final_token(token, sizeof(token), nonce, outcome) < 0)
+        return -1;
     return df_publish_final(DF_FINAL_TMP, DF_FINAL_PATH, token);
 }
 
@@ -442,10 +492,42 @@ static int disable_modules(void)
     return rc;
 }
 
+/* Strictly read the 16-byte nonce written by exp.c before createOrphanProcess.
+ * The file must be a regular file of exactly DF_NONCE_CHARS lowercase hex
+ * bytes; anything else is unknown and no reboot may be authorized. */
+static int read_nonce(char out[DF_NONCE_CHARS + 1])
+{
+    struct stat st;
+    size_t off = 0;
+    int fd;
+
+    fd = open(DF_NONCE_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != DF_NONCE_CHARS) {
+        close(fd);
+        return -1;
+    }
+    while (off < (size_t)st.st_size) {
+        ssize_t n = read(fd, out + off, (size_t)st.st_size - off);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            close(fd);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    out[DF_NONCE_CHARS] = '\0';
+    return df_nonce_is_valid(out) ? 0 : -1;
+}
+
 /* Build the injected IO and let the pure protocol decide + publish the one
  * final outcome. All progress markers are informational; nothing here reads
  * a marker to derive a result. */
-static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot)
+static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot,
+                                          const char *nonce)
 {
     struct status_io io;
     memset(&io, 0, sizeof(io));
@@ -456,6 +538,7 @@ static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot)
     io.late_load_state = io_late_load_state;
     io.wait_child      = wait_child_bounded;
     io.report          = io_report;
+    io.nonce           = nonce;
     return producer_decide_and_publish(&io, NULL, late_load_rc, soft_reboot,
                                        LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);
 }
@@ -463,13 +546,23 @@ static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot)
 int main(void)
 {
     char su_manager[256];
+    char nonce[DF_NONCE_CHARS + 1];
     int soft_reboot = 0, disable_mods = 0;
     int late_load_rc;
 
     touch("/dev/dfm1");
+    /* A missing or malformed nonce means the publisher cannot be bound to
+     * this run. Publish ERROR with the reserved zero nonce, force soft_reboot
+     * off, and never launch late-load or a reboot. */
+    if (read_nonce(nonce) != 0) {
+        memset(nonce, '0', DF_NONCE_CHARS);
+        nonce[DF_NONCE_CHARS] = '\0';
+        printf("bootstrap: nonce missing/malformed; publishing ERROR, no reboot\n");
+        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
+    }
     if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
         touch("/dev/dfme0");
-        return df_outcome_to_rc(decide_and_publish(-1, 0));
+        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
     }
 
     touch("/dev/dfm2");
@@ -484,16 +577,16 @@ int main(void)
         touch("/dev/dfm4");
         if (disable_modules()) {
             touch("/dev/dfme1");
-            return df_outcome_to_rc(decide_and_publish(-1, 0));
+            return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
         }
     }
 
     touch("/dev/dfm5");
     mkdir("/data/adb", 0700);
     if (stage_file(KSUD_STAGE_SRC, KSUD_STAGE) != 0)
-        return df_outcome_to_rc(decide_and_publish(-1, 0));
+        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
 
     late_load_rc = run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load",
                                             "--package-name", su_manager, NULL });
-    return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot));
+    return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot, nonce));
 }

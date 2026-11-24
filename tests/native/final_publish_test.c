@@ -11,11 +11,19 @@
 #include <unistd.h>
 
 #include "final_status_publish.h"
+#include "status_protocol.h"
+
+#define NONCE "0123456789abcdef0123456789abcdef"
+#define TOK_ROOT          "dfroot-v2:" NONCE ":root_only\n"
+#define TOK_REBOOT_REQ    "dfroot-v2:" NONCE ":reboot_requested\n"
+#define TOK_ERROR         "dfroot-v2:" NONCE ":error\n"
+#define GUARD_BYTE        0x5a /* sentinel placed one byte past the read cap */
 
 static char g_dir[256];
 static char g_tmp[288];
 static char g_final[288];
 static char g_victim[288];
+static char g_read[288];
 
 static void make_paths(void)
 {
@@ -33,6 +41,7 @@ static void make_paths(void)
     snprintf(g_tmp, sizeof(g_tmp), "%s/dffinal.tmp", g_dir);
     snprintf(g_final, sizeof(g_final), "%s/dffinal", g_dir);
     snprintf(g_victim, sizeof(g_victim), "%s/victim", g_dir);
+    snprintf(g_read, sizeof(g_read), "%s/readtoken", g_dir);
 }
 
 static void cleanup_files(void)
@@ -40,7 +49,116 @@ static void cleanup_files(void)
     unlink(g_tmp);
     unlink(g_final);
     unlink(g_victim);
+    unlink(g_read);
     rmdir(g_dir);
+}
+
+/* A read buffer with sentinel bytes at [cap] and [cap + 1] so any write past
+ * the caller's capacity is detected instead of silently corrupting the stack. */
+static char *guarded_buf(void)
+{
+    char *buf = malloc(DF_FINAL_READ_CAP + 2);
+    assert(buf != NULL);
+    memset(buf, GUARD_BYTE, DF_FINAL_READ_CAP + 2);
+    return buf;
+}
+
+static void assert_guard_intact(const char *buf)
+{
+    assert((unsigned char)buf[DF_FINAL_READ_CAP] == GUARD_BYTE);
+    assert((unsigned char)buf[DF_FINAL_READ_CAP + 1] == GUARD_BYTE);
+}
+
+/* Publish raw bytes (including embedded NULs) as a fresh regular file. */
+static void write_read_file(const char *data, size_t len)
+{
+    int fd = open(g_read, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+    size_t off = 0;
+    assert(fd >= 0);
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        assert(w > 0);
+        off += (size_t)w;
+    }
+    close(fd);
+}
+
+/* Reader regression: a file that is EXACTLY the caller's cap must be rejected.
+ * The old `st_size > cap` guard admitted it and then wrote buf[cap] = '\0' OOB. */
+static void test_read_exact_cap(void)
+{
+    char payload[DF_FINAL_READ_CAP];
+    char *buf = guarded_buf();
+    size_t len = 12345;
+
+    memset(payload, 'A', sizeof(payload));
+    write_read_file(payload, sizeof(payload)); /* st_size == cap */
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == -1);
+    assert(len == 0);          /* out_len cleared even on rejection */
+    assert_guard_intact(buf);  /* no 1-byte OOB stack/heap write */
+    free(buf);
+}
+
+/* Oversize files are rejected both by the absolute cap and by a smaller
+ * caller-supplied cap, without touching the guard bytes. */
+static void test_read_oversize(void)
+{
+    char payload[DF_FINAL_READ_CAP + 2];
+    char *buf = guarded_buf();
+    size_t len = 12345;
+
+    memset(payload, 'B', sizeof(payload));
+    write_read_file(payload, sizeof(payload)); /* > DF_FINAL_READ_CAP */
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == -1);
+    assert(len == 0);
+    assert_guard_intact(buf);
+
+    write_read_file("123456789", 9); /* <= DF_FINAL_READ_CAP, but > cap=8 */
+    assert(df_read_final_file(g_read, buf, 8, &len) == -1);
+    assert(len == 0);
+    assert((unsigned char)buf[8] == GUARD_BYTE); /* caller cap respected */
+    free(buf);
+}
+
+/* The reader preserves embedded NULs with an exact byte count; it is the
+ * strict parser that rejects them (never C-string truncation). */
+static void test_read_embedded_nul(void)
+{
+    char token[128];
+    char *buf = guarded_buf();
+    size_t len = 0, nul_at = strlen("dfroot-v2:") + 4; /* inside the nonce */
+    enum df_outcome o = ROOT_ONLY; /* sentinel: must be reset on rejection */
+    int n = snprintf(token, sizeof(token), TOK_ROOT);
+
+    assert(n > 0 && (size_t)n < sizeof(token));
+    token[nul_at] = '\0';
+    write_read_file(token, (size_t)n); /* NUL is part of the byte stream */
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(len == (size_t)n);
+    assert(buf[nul_at] == '\0');
+    assert(df_parse_final_token(buf, len, NONCE, &o) != 0);
+    assert(o == DF_OUTCOME_NONE); /* fail closed */
+    assert_guard_intact(buf);
+    free(buf);
+}
+
+/* A normal canonical token round-trips with its exact length, and no NUL
+ * convenience byte is written past that length. */
+static void test_read_canonical_token(void)
+{
+    char *buf = guarded_buf();
+    size_t len = 0;
+    enum df_outcome o = DF_OUTCOME_NONE;
+
+    write_read_file(TOK_REBOOT_REQ, strlen(TOK_REBOOT_REQ));
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(len == strlen(TOK_REBOOT_REQ));
+    assert(memcmp(buf, TOK_REBOOT_REQ, len) == 0);
+    assert((unsigned char)buf[len] == GUARD_BYTE); /* no buf[len] = '\0' */
+    assert(df_parse_final_token(buf, len, NONCE, &o) == 0);
+    assert(o == REBOOT_REQUESTED);
+    assert_guard_intact(buf);
+    free(buf);
 }
 
 static void assert_final(const char *expected)
@@ -65,6 +183,7 @@ static void assert_final(const char *expected)
     assert(n >= 0 && n < (ssize_t)sizeof(buf));
     buf[n] = '\0';
     assert(strcmp(buf, expected) == 0);
+    assert(df_token_is_canonical(buf));
 }
 
 static void assert_victim(const char *expected)
@@ -80,31 +199,60 @@ static void assert_victim(const char *expected)
     assert(strcmp(buf, expected) == 0);
 }
 
+static void assert_rejected(const char *token)
+{
+    assert(df_publish_final(g_tmp, g_final, token) == -1);
+    assert(access(g_tmp, F_OK) != 0); /* no temp file left behind */
+    assert_final(TOK_REBOOT_REQ);     /* prior final status untouched */
+}
+
 int main(void)
 {
     mode_t old_umask;
     char long_token[4097]; /* 4096 chars + NUL: df_publish_final rejects len >= 4096 */
+    char malformed[160];
 
     make_paths();
 
-    /* 1. Publish with a hostile umask: open() alone would yield 0000 here,
-     * so the explicit fchmod(DF_FINAL_MODE) is what makes the token readable. */
+    /* 1. Publish a canonical v2 token with a hostile umask: open() alone would
+     * yield 0000 here, so the explicit fchmod(DF_FINAL_MODE) is what makes the
+     * token readable. */
+    assert(df_token_is_canonical(TOK_ROOT));
+    assert(!df_token_is_canonical("root_only"));
     old_umask = umask(0777);
-    assert(df_publish_final(g_tmp, g_final, "root_only") == 0);
+    assert(df_publish_final(g_tmp, g_final, TOK_ROOT) == 0);
     umask(old_umask);
-    assert_final("root_only");
+    assert_final(TOK_ROOT);
 
     /* 2. Atomic refinement replaces the token and keeps the same mode. */
-    assert(df_publish_final(g_tmp, g_final, "reboot_requested") == 0);
-    assert_final("reboot_requested");
+    assert(df_publish_final(g_tmp, g_final, TOK_REBOOT_REQ) == 0);
+    assert_final(TOK_REBOOT_REQ);
 
-    /* 3. Invalid tokens fail without corrupting the published final status. */
+    /* 3. Invalid tokens fail BEFORE any file is created: the previous final
+     * status is untouched. Legacy v1, truncated/extra bytes, stale/foreign
+     * nonce, unknown/none outcome and oversize are all rejected. */
     memset(long_token, 'x', sizeof(long_token) - 1);
     long_token[sizeof(long_token) - 1] = '\0';
-    assert(df_publish_final(g_tmp, g_final, "") == -1);
-    assert(df_publish_final(g_tmp, g_final, NULL) == -1);
-    assert(df_publish_final(g_tmp, g_final, long_token) == -1);
-    assert_final("reboot_requested");
+    assert_rejected("");
+    assert_rejected(NULL);
+    assert_rejected(long_token);
+    assert_rejected("root_only");
+    snprintf(malformed, sizeof(malformed), "dfroot-v2:%s:root_only", NONCE);
+    assert_rejected(malformed);
+    snprintf(malformed, sizeof(malformed), "dfroot-v2:%s:root_only\n\n", NONCE);
+    assert_rejected(malformed);
+    /* Embedded NUL inside the nonce: the C-string view is truncated. */
+    snprintf(malformed, sizeof(malformed), TOK_ROOT);
+    malformed[15] = '\0';
+    assert_rejected(malformed);
+    /* A well-formed token with a DIFFERENT nonce is canonical in shape (the
+     * publisher binds the expected nonce itself); strict nonce checking is the
+     * consumer's job via df_parse_final_token(), covered in status_protocol_test.
+     */
+    snprintf(malformed, sizeof(malformed), "dfroot-v2:%s:nope\n", NONCE);
+    assert_rejected(malformed);
+    snprintf(malformed, sizeof(malformed), "dfroot-v2:%s:none\n", NONCE);
+    assert_rejected(malformed);
 
     /* 4. A pre-planted temp symlink is unlinked, never followed; the target
      * file is untouched and the real final status is still published. */
@@ -114,12 +262,19 @@ int main(void)
         assert(write(fd, "keep", 4) == 4);
         close(fd);
         assert(symlink(g_victim, g_tmp) == 0);
-        assert(df_publish_final(g_tmp, g_final, "error") == 0);
-        assert_final("error");
+        assert(df_publish_final(g_tmp, g_final, TOK_ERROR) == 0);
+        assert_final(TOK_ERROR);
         assert_victim("keep");
     }
 
+    /* 5. Real-file reader: exact-cap/oversize rejected with no OOB write,
+     * embedded NUL left for the strict parser, canonical token round-trips. */
+    test_read_exact_cap();
+    test_read_oversize();
+    test_read_embedded_nul();
+    test_read_canonical_token();
+
     cleanup_files();
-    puts("final_publish_test: all real-file permission/atomicity checks passed");
+    puts("final_publish_test: canonical-token / permission / atomicity / reader checks passed");
     return 0;
 }
