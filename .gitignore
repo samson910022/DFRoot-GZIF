@@ -32,6 +32,8 @@ app/src/main/jni/splicehelper
 app/src/main/jni/ko/*.ko
 tests/native/status_protocol_test
 tests/native/final_publish_test
+tests/native/elf_parser_test
+tests/native/device_version_test
 
 # Local DDK/LKM build output: 13,504 B with .note.gnu.build-id retained. The
 # stripped CI artifact placed at app/src/main/jni/ko/dfroot-android13-5.15.ko

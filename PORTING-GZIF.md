@@ -535,4 +535,65 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 
 ---
 
+## 15. Round-2 PR #3 native hardening (host-tested only, device-unvalidated)
+
+**Status: none of this section has been exercised on the S23U.** It is backed
+by host unit tests and compile checks only; the hardware ledger in §5 predates
+these changes. Do not read a passing host test as a device success claim.
+
+- **Preflight / P1-04.** `exp.c` builds a `struct preflight` before entering
+  the patch phase. It performs every read-only check — strict version parsing,
+  helper `stat`/`pread` of originals, KO-target length and padding, ELF target
+  selection, all hook alignment/branch/first-instruction-copy/overlap checks,
+  and all `pread` saves — before the first `patch_file_cbc()`. `exploit(pf)`
+  then only consumes precomputed buffers and offsets. Vendor originals are
+  captured after the `crash_dump64` helper patch and before the KO write, so
+  restore IVs are derived from the pre-write state. If preflight fails, **no
+  file has been written** and native returns rc 3.
+- **ELF contract / P1-05.** `elf_parser.h` defines
+  `ELF_PARSE_OK=0`, `ELF_PARSE_UNSUPPORTED=1`, `ELF_PARSE_INVALID=-1`.
+  INVALID is malformed/hostile metadata and is **never** permission to try a
+  second candidate; only UNSUPPORTED (e.g. missing symbol, absent `.dynsym`/
+  `.dynstr`, or no fitting placement) advances to `libbase.so`. The pure
+  `elf_parse_rc_try_next()` rule is the single place that encodes this
+  decision and is asserted directly by the host test. All out-parameters are
+  zeroed on failure. The parser validates ELF64/LE/AArch64/ET_DYN metadata, rejects
+  PN_XNUM/SHN_XINDEX and extended table counts, checks table and section
+  ranges, section-type whitelist, `entsize`/`link`/`info` consistency for
+  DYNSYM/DYNAMIC/RELA/REL, bounded NUL-terminated names, symbol section and
+  vaddr containment, duplicate-name ambiguity and BTI/PAC advance bounds.
+- **Placement proof.** `struct elf_layout` records every claimed metadata
+  extent (ELF header, phdr/shdr tables, file-backed sections, file-backed
+  segments other than the executable PT_LOAD which is the only legal cave
+  region). `placement_range_claimed()` must return 0 for the chosen tail or
+  zero-run placement, and zero-run candidates must be 4-byte aligned. The
+  tail candidate is **derived from the executable PT_LOAD's file end**, never
+  from the global EOF after the section-header table: it must be 4-aligned,
+  unclaimed, in-file and wholly on that segment's final page, otherwise the
+  parser falls back to an unclaimed zero run inside the PT_LOAD. On the host,
+  `valid-exec-tail.elf` proves the tail branch, `valid-basic.elf` and
+  `valid-tail-unclaimed.elf` prove the cave branch (the latter's `.claim`
+  section covers the exec-segment end), and `shdrs-other-page.elf` puts the
+  section headers on a different page with 0x200 of trailing global slack to
+  prove no out-of-segment EOF tail is ever returned.
+- **Strict versions / P2-01.** `device_version.c` accepts only bounded decimal
+  digits without signs/leading zeros/overflow and requires token boundaries;
+  ambiguous `androidN` tokens are rejected. `read_device_versions()` tags the
+  value as `VERSION_PROV_UNAME` or `VERSION_PROV_GETPROP_FALLBACK`; preflight
+  rejects the latter and requires an exact `android13`/`5`/`15` KMI match —
+  the old fuzzy major/minor KO pairing is gone.
+- **Truthful cleanup.** Every started write is recorded with its original
+  bytes and restored in reverse order, with an explicit `restore OK/FAILED`
+  line per target. `cleanup()` returns -1 if any restore fails; the status-flow
+  cleanup callback turns that into `pf.cleanup_failed`, and `main()` downgrades
+  a success rc 0 to error rc 1. A partially failed write is still restored.
+- **Host verification only.** `make -C tests/native test` runs
+  `elf_parser_test` (26 fixtures) and `device_version_test` plus the two
+  existing status-protocol tests; `git diff --check` and standalone compiles
+  of `elf_parser.c`, `device_version.c` and `exp.c` are clean. Device
+  re-validation of the whole chain is still required before any reliability
+  or success claim is made.
+
+---
+
 *Document produced read-only for the GZIF port. No files other than this one were written or modified; no adb was run; no git operation was performed. Log contents referenced by line range only. **Do not commit host logs or this device's raw dumps anywhere public.***

