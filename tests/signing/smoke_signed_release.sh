@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
-SMOKE_ROOT=${1:-/home/samson1357924}
+SMOKE_ROOT=${1:-$HOME}
 
 if [[ -z ${JAVA:-} ]]; then
     if [[ -x /usr/lib/jvm/java-21-openjdk-amd64/bin/java ]]; then

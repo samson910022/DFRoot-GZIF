@@ -165,6 +165,10 @@ Then: `./gradlew :app:assembleRelease` →
   builds and verifies a **signed Release**, and publishes it (with
   `GPL-3.0.txt`, `NOTICE` and `THIRD_PARTY_NOTICES.md`) as a GitHub Release.
   Branch/PR builds never see secrets and never publish.
+- The `KEYSTORE` value — the protected CI secret, or the environment value read
+  by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
+  (produce it with `base64 -w0 keystore.jks`). It is decoded and the resulting
+  JKS validated before any signing material is published; a raw JKS is rejected.
 
 > [!WARNING]
 > The release signing key is new. Android refuses to overwrite-update an

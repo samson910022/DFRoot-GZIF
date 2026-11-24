@@ -24,8 +24,9 @@ sources unchanged).
   Release** pair with no secrets, with no release signing on those events, and
   never publish. Ancestry check precedes any secret reference; the signed APK
   is `apksigner`-verified, checksummed and uploaded with 1-day retention; the
-  publish job only downloads, verifies and publishes. Action pins, permissions,
-  gates and exact step/run-script allowlists are unchanged.
+  publish job only downloads, verifies and publishes. Action references are
+  hardened/pinned to full 40-hex SHAs and permissions are least-privilege; the
+  gates and exact step/run-script allowlists remain enforced by contract tests.
 - **New release key identity warning**: releases from this hardened pipeline
   are signed with a **new key identity**. Android will not overwrite-update an
   installed application signed by a different key — uninstall any existing
@@ -62,6 +63,21 @@ sources unchanged).
   pass; new tests assert that the license and notice assets are packaged,
   uploaded and published, while still rejecting `secrets/`, `.jks`,
   `signing.properties` and `..` artifact entries.
+
+### Cross-PR integration note
+
+PRs #2–#5 were based on `38eebc3`; before merge they must rebase onto this
+hardened head and refresh every shared file they touch. In particular:
+
+- PR #5 changes the LKM bytes, so PR #3's `KO_EXPECTED_SHA256S` and every KO
+  hash/size quoted in the docs must be rebuilt and re-pinned against the new
+  artifact.
+- PR #4 must update its Gradle reference from **9.7.1** to **9.9.2** and refresh
+  the referenced PR #1 head to the current hardened commit.
+
+GPLv3 licence text is conveyed as release assets alongside the APK — the signed
+release bundle is the unit of conveyance, not the APK alone. Unsigned CI Release
+artifacts are internal CI outputs, not third-party conveyance.
 
 ## 4.8-gzif (2026-11-17)
 

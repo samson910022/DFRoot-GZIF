@@ -26,7 +26,7 @@ The suite covers:
 Run the disposable signed/unsigned release smoke on ext4:
 
 ```sh
-bash tests/signing/smoke_signed_release.sh /home/samson1357924
+bash tests/signing/smoke_signed_release.sh "$HOME"
 ```
 
 The smoke copies the current tracked and untracked non-ignored files to a temporary ext4 directory, creates a placeholder KO and disposable non-BMP credentials, builds signed and unsigned releases, verifies the signed APK with `apksigner`, and requires `apksigner` to reject the unsigned APK. Its trap removes the copy, keystore, properties, KO, and APKs. `JAVA`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `APKSIGNER` may be overridden. Never use real secrets in the smoke.

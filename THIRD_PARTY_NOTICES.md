@@ -10,7 +10,7 @@ Components bundled with, linked against, or built by this project, and their lic
 | `libksudnext.so` — Samsung-patched KernelSU-Next `ksud` 3.4.2 | bundled executable | userspace GPL-3.0-or-later (see `GPL-3.0.txt`); embeds four KMI modules — `android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`, `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko` — all GPL-2.0-only; GZIF uses `android13-5.15` | `KernelSU-Next/KernelSU-Next` v3.4.2 + patch in `samson910022/Root-My-Galaxy-Payloads-Next` |
 | `dfroot.ko` (not committed; built from `lkm/dfroot.c`) | LKM | GPL-2.0-only (`MODULE_LICENSE("GPL")`) | this repository, `lkm/` |
 | splicehelper / `jni/*.c`, `*.S` | payload sources | GPL-2.0-only | this repository (upstream DFRoot + GZIF modifications) |
-| libcxx/shellcode headers | payload sources | GPL-2.0-only | this repository |
+| libcxx/shellcode headers (app/src/main/jni/include.inc) | payload sources | BSD-3-Clause (Odzhan, Copyright (c) 2018 Odzhan) for include.inc; GPL-2.0-only for the rest | this repository + Odzhan |
 | Gradle / Android Gradle Plugin / Gradle wrapper | build | Apache-2.0 | gradle.org / Google Maven |
 | `GPL-3.0.txt` | licence text conveyed with signed release assets | verbatim GNU GPLv3 (official text) | https://www.gnu.org/licenses/gpl-3.0.txt |
 | `aes256.c/h`, `libcxx.h` etc. under `app/src/main/jni/` | payload sources | see file headers (GPL-2.0-only unless marked otherwise) | this repository |
@@ -45,3 +45,42 @@ Notes
 - The DFRoot chain does not sublicense any third-party component, and no
   third-party component changes the GPL-2.0-only reading of this repository's
   own source.
+
+### `app/src/main/jni/include.inc` — BSD-3-Clause notice (verbatim)
+
+`app/src/main/jni/include.inc` is a shellcode header by Odzhan, licensed
+BSD-3-Clause (not GPL-2.0-only). Because this `THIRD_PARTY_NOTICES.md` is
+conveyed as a signed release asset alongside the APK, the BSD clause-2 notice
+must be reproduced here verbatim. The notice below is copied exactly from
+`app/src/main/jni/include.inc` lines 2–28 (including the leading indentation and
+the closing `*/`):
+
+```
+  Copyright © 2018 Odzhan. All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  1. Redistributions of source code must retain the above copyright
+  notice, this list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright
+  notice, this list of conditions and the following disclaimer in the
+  documentation and/or other materials provided with the distribution.
+
+  3. The name of the author may not be used to endorse or promote products
+  derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY AUTHORS "AS IS" AND ANY EXPRESS OR
+  IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT,
+  INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+  HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+  STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+  POSSIBILITY OF SUCH DAMAGE. */
+```

@@ -35,6 +35,9 @@ OLD_KMIS = (
     "android17-6.18",
 )
 PLACEHOLDER = "${{ matrix.kmi }}"
+# Exact digest of the single digest-pinned DDK image that CI declares and that
+# scripts/ddk-image.sh resolves for the local podman build.
+DDK_IMAGE_DIGEST = "9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd"
 
 # Only these host variables are inherited; everything else is cleared so a
 # caller's KMIS/DDK_IMAGE/JAVA/MAKEFLAGS/credentials cannot change a result.
@@ -137,6 +140,15 @@ def assert_no_credential_echo(makefile_text: str) -> None:
             raise AssertionError(f"recipe echoes credentials via {token!r}")
 
 
+def assert_exact_ddk_image_digest(image: str) -> None:
+    """A format-valid but different digest is still a supply-chain change."""
+    match = re.search(r"@sha256:([0-9a-f]{64})$", image)
+    if not match or match.group(1) != DDK_IMAGE_DIGEST:
+        raise AssertionError(
+            f"DDK image digest must be exactly {DDK_IMAGE_DIGEST}, got {image!r}"
+        )
+
+
 class CredentialContractTests(unittest.TestCase):
     def test_command_line_credentials_are_rejected_at_parse_time(self) -> None:
         cases = (
@@ -227,8 +239,21 @@ class DdkImageScriptTests(unittest.TestCase):
         self.assertEqual(result.stdout, expected + "\n")
         self.assertIn("@sha256:", result.stdout)
         self.assertRegex(result.stdout, r"@sha256:[0-9a-f]{64}\n\Z")
+        assert_exact_ddk_image_digest(expected)
+        assert_exact_ddk_image_digest(result.stdout.strip())
+        self.assertEqual(result.stdout.strip().split("@sha256:", 1)[1], DDK_IMAGE_DIGEST)
         self.assertIn(KMI, result.stdout)
         self.assertNotIn(PLACEHOLDER, result.stdout)
+
+    def test_different_valid_ddk_digest_is_rejected(self) -> None:
+        # 64 `f` characters is a valid digest shape; only the exact pin may pass.
+        original = WORKFLOW.read_text(encoding="utf-8")
+        mutated = original.replace(
+            "@sha256:" + DDK_IMAGE_DIGEST, "@sha256:" + "f" * 64, 1
+        )
+        self.assertNotEqual(mutated, original)
+        with self.assertRaisesRegex(AssertionError, "DDK image digest must be exactly"):
+            assert_exact_ddk_image_digest(workflow_image(mutated))
 
     def test_make_uses_the_script_as_the_image_source(self) -> None:
         makefile = make_code()

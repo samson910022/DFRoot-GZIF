@@ -40,6 +40,17 @@ ACTION_PINS = {
     "softprops/action-gh-release": ("8a0cd651e5b2365bd640854a3fa5dfc70e4875f3", "v3"),
 }
 ALLOWED_SECRETS = {"${{ secrets." + name + " }}" for name in SIGNING_SECRETS}
+# Exact digest of the single digest-pinned DDK image used by build-lkms and by
+# the local podman build (scripts/ddk-image.sh).  A floating tag or a different
+# digest is a supply-chain change and must fail the policy suite.
+DDK_IMAGE_DIGEST = "9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd"
+# Closed allowlist for the top-level `on:` triggers.  `pull_request_target` is
+# deliberately absent: it would expose secrets/fork-controlled workflow context.
+EXPECTED_TRIGGERS: dict[str, object] = {
+    "push": {"branches": ["master", "main"], "tags": ["v*"]},
+    "pull_request": {"branches": ["master", "main"]},
+    "workflow_dispatch": {},
+}
 TEST_CI_COMMANDS = {
     "Run signing regression tests": "bash tests/signing/run_tests.sh",
     "Run signed and unsigned release smoke": 'bash tests/signing/smoke_signed_release.sh "$HOME"',
@@ -384,6 +395,77 @@ def mapping(block: str, key: str, indent: int) -> dict[str, str]:
     return values
 
 
+def parse_triggers(text: str) -> dict[str, object]:
+    """Parse the top-level `on:` block into a closed, comparable structure.
+
+    Only the exact block-style subset the workflow is allowed to use is
+    accepted; anything else is a hard error rather than being silently ignored.
+    """
+    lines = strip_yaml_comments(text).splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"^on:\s*$", line)), None)
+    if start is None:
+        raise AssertionError("workflow has no top-level on: block")
+    triggers: dict[str, object] = {}
+    index = start + 1
+    while index < len(lines):
+        line = lines[index]
+        if not line.strip():
+            index += 1
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        if indent == 0:
+            break
+        if indent != 2:
+            raise AssertionError(f"unexpected indentation in on: block: {line!r}")
+        header = re.match(r"^  (?P<key>[A-Za-z0-9_-]+):\s*(?P<value>.*?)\s*$", line)
+        if not header:
+            raise AssertionError(f"unexpected line in on: block: {line!r}")
+        key, value = header.group("key"), header.group("value")
+        index += 1
+        if value:
+            triggers[key] = scalar(value)
+            continue
+        members: dict[str, list[str]] = {}
+        while index < len(lines):
+            sub = lines[index]
+            if not sub.strip():
+                index += 1
+                continue
+            sub_indent = len(sub) - len(sub.lstrip(" "))
+            if sub_indent <= 2:
+                break
+            if sub_indent != 4:
+                raise AssertionError(f"unexpected indentation in on.{key}: {sub!r}")
+            sub_header = re.match(r"^    (?P<key>[A-Za-z0-9_-]+):\s*(?P<value>.*?)\s*$", sub)
+            if not sub_header or sub_header.group("value"):
+                raise AssertionError(f"unexpected line in on.{key}: {sub!r}")
+            list_key = sub_header.group("key")
+            index += 1
+            items: list[str] = []
+            while index < len(lines):
+                item = lines[index]
+                if not item.strip():
+                    index += 1
+                    continue
+                item_indent = len(item) - len(item.lstrip(" "))
+                if item_indent <= 4:
+                    break
+                if item_indent != 6:
+                    raise AssertionError(
+                        f"unexpected indentation in on.{key}.{list_key}: {item!r}"
+                    )
+                item_match = re.match(r"^      -\s+(?P<value>.*?)\s*$", item)
+                if not item_match:
+                    raise AssertionError(
+                        f"unexpected list item in on.{key}.{list_key}: {item!r}"
+                    )
+                items.append(scalar(item_match.group("value")))
+                index += 1
+            members[list_key] = items
+        triggers[key] = members
+    return triggers
+
+
 def job_blocks(active: str) -> dict[str, str]:
     jobs_header = re.search(r"^jobs:\s*$", active, re.MULTILINE)
     if not jobs_header:
@@ -461,6 +543,28 @@ def named_step(block: str, name: str) -> str:
 # --------------------------------------------------------------------------- #
 # Global, mutation-resistant assertions (each accepts arbitrary workflow text)
 # --------------------------------------------------------------------------- #
+def assert_exact_triggers(text: str) -> None:
+    """Lock the top-level event allowlist; no new/wider trigger may slip in."""
+    triggers = parse_triggers(text)
+    if "pull_request_target" in triggers:
+        raise AssertionError("pull_request_target must not be a workflow trigger")
+    if triggers != EXPECTED_TRIGGERS:
+        raise AssertionError(
+            f"top-level on: triggers must be exactly {EXPECTED_TRIGGERS!r}, got {triggers!r}"
+        )
+
+
+def assert_ddk_image_digest(text: str) -> None:
+    """The build-lkms container image must carry the exact pinned digest."""
+    job = job_blocks(strip_yaml_comments(text))["build-lkms"]
+    image = mapping(job, "container", 4).get("image", "")
+    match = re.search(r"@sha256:([0-9a-f]{64})$", image)
+    if not match or match.group(1) != DDK_IMAGE_DIGEST:
+        raise AssertionError(
+            f"DDK image digest must be exactly {DDK_IMAGE_DIGEST}, got {image!r}"
+        )
+
+
 def assert_no_continue_on_error(text: str) -> None:
     # Any occurrence of the key is forbidden, regardless of its value:
     # `continue-on-error: false`, `${{ true }}`, empty values, etc.  A tolerated
@@ -669,6 +773,8 @@ def validate_workflow(text: str) -> None:
     assert_exact_command_lines(text)
     assert_release_scripts_do_not_reference_signing_files(text)
     assert_exact_artifact_inputs(text)
+    assert_exact_triggers(text)
+    assert_ddk_image_digest(text)
 
 
 # --------------------------------------------------------------------------- #
@@ -750,6 +856,24 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_strict_yaml_allowlist_accepts_the_workflow(self) -> None:
         self.assertEqual(strict_violations(self.raw), [])
+
+    def test_top_level_triggers_are_an_exact_allowlist(self) -> None:
+        assert_exact_triggers(self.raw)
+        self.assertEqual(parse_triggers(self.raw), EXPECTED_TRIGGERS)
+        self.assertNotIn("pull_request_target", parse_triggers(self.raw))
+        triggers = parse_triggers(self.raw)
+        self.assertEqual(triggers["push"], {"branches": ["master", "main"], "tags": ["v*"]})
+        self.assertEqual(triggers["pull_request"], {"branches": ["master", "main"]})
+        self.assertEqual(triggers["workflow_dispatch"], {})
+
+    def test_ddk_image_digest_is_an_exact_constant(self) -> None:
+        assert_ddk_image_digest(self.raw)
+        image = mapping(self.jobs["build-lkms"], "container", 4).get("image", "")
+        self.assertEqual(
+            image,
+            "ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828@sha256:" + DDK_IMAGE_DIGEST,
+        )
+        self.assertEqual(image.split("@sha256:", 1)[1], DDK_IMAGE_DIGEST)
 
     def test_top_level_default_and_explicit_job_permissions_are_least_privilege(self) -> None:
         self.assertEqual(mapping(self.active, "permissions", 0), {"contents": "read"})
@@ -891,6 +1015,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         job = self.jobs["build-lkms"]
         image = mapping(job, "container", 4).get("image", "")
         self.assertRegex(image, r"@sha256:[0-9a-f]{64}$")
+        self.assertEqual(image.split("@sha256:", 1)[1], DDK_IMAGE_DIGEST)
         self.assertNotIn("--privileged", self.active)
         upload = action_steps(job, "actions/upload-artifact")
         self.assertEqual(len(upload), 1)
@@ -1045,6 +1170,49 @@ class MutationDetectionTests(unittest.TestCase):
     def mutate(self, old: str, new: str) -> str:
         self.assertIn(old, self.raw)
         return self.raw.replace(old, new, 1)
+
+    def test_adding_pull_request_target_trigger_is_rejected(self) -> None:
+        mutated = self.mutate(
+            "  workflow_dispatch:\n",
+            "  pull_request_target:\n"
+            "    branches:\n"
+            "      - master\n"
+            "      - main\n"
+            "  workflow_dispatch:\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "pull_request_target must not be"):
+            assert_exact_triggers(mutated)
+        with self.assertRaises(AssertionError):
+            validate_workflow(mutated)
+
+    def test_widening_the_tag_trigger_is_rejected(self) -> None:
+        cases = {
+            "extra tag pattern": (
+                "    tags:\n      - 'v*'\n",
+                "    tags:\n      - 'v*'\n      - '*'\n",
+            ),
+            "replaced tag pattern": (
+                "      - 'v*'\n",
+                "      - 'v*.*'\n",
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaisesRegex(AssertionError, "triggers must be exactly"):
+                    assert_exact_triggers(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_different_valid_ddk_digest_is_rejected(self) -> None:
+        # `f` * 64 is a syntactically valid digest, so format-only checks pass;
+        # the exact constant is what must reject it.
+        mutated = self.mutate("@sha256:" + DDK_IMAGE_DIGEST, "@sha256:" + "f" * 64)
+        self.assertIn("@sha256:" + "f" * 64, mutated)
+        with self.assertRaisesRegex(AssertionError, "DDK image digest must be exactly"):
+            assert_ddk_image_digest(mutated)
+        with self.assertRaises(AssertionError):
+            validate_workflow(mutated)
 
     def test_quoted_uses_key_is_rejected(self) -> None:
         mutated = self.mutate("        uses: actions/checkout@", '        "uses": actions/checkout@')
