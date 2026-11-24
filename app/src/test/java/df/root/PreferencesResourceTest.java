@@ -1,7 +1,9 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify preference resources load with safe defaults. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): verify manual-only soft-reboot copy and status preference. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import android.content.res.XmlResourceParser;
 
@@ -27,6 +29,7 @@ public class PreferencesResourceTest {
         XmlResourceParser parser = RuntimeEnvironment.getApplication()
                 .getResources().getXml(R.xml.preferences);
         Map<String, String> defaultValues = new HashMap<>();
+        Map<String, String> summaries = new HashMap<>();
         try {
             while (parser.next() != XmlPullParser.END_DOCUMENT) {
                 if (parser.getEventType() != XmlPullParser.START_TAG) {
@@ -36,6 +39,8 @@ public class PreferencesResourceTest {
                 if (key != null) {
                     defaultValues.put(key,
                             parser.getAttributeValue(ANDROID_NAMESPACE, "defaultValue"));
+                    summaries.put(key,
+                            parser.getAttributeValue(ANDROID_NAMESPACE, "summary"));
                 }
             }
         } finally {
@@ -44,11 +49,17 @@ public class PreferencesResourceTest {
 
         Set<String> expectedKeys = new HashSet<>();
         expectedKeys.add("boot_start");
+        expectedKeys.add("configuration_status");
+        expectedKeys.add("configuration_retry");
         expectedKeys.add("soft_reboot");
         expectedKeys.add("disable_modules");
 
         assertEquals(expectedKeys, defaultValues.keySet());
         assertEquals("false", defaultValues.get("soft_reboot"));
         assertEquals("false", defaultValues.get("disable_modules"));
+        assertTrue(summaries.get("soft_reboot").contains("manual runs only"));
+        assertTrue(summaries.get("soft_reboot").contains(
+                "Unattended Start at Boot remains disabled"));
+        assertTrue(summaries.get("soft_reboot").contains("pending hardware validation"));
     }
 }

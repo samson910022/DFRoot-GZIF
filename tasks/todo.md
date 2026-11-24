@@ -1,4 +1,4 @@
-<!-- Modified 2026-11-24 (DFRoot GZIF): record the final Phase 1 permission fix; Checkpoint 1 remains open pending review and commit. See NOTICE. -->
+<!-- Modified 2026-11-24 (DFRoot GZIF): record the final Phase 2 safety/test and API-32 diagnostic-validation fixes; Checkpoint 2 remains open pending independent review and commit. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -23,13 +23,16 @@
 
 ## Phase 2: Durable Configuration and Soft-Reboot Consent
 
-- [ ] Task 2.1: Add serialized off-main-thread `ConfigurationRepository` with checked persistence.
-- [ ] Task 2.2: Add saving/verified/error state and fail-closed coordinator admission hook.
-- [ ] Task 2.3: Add immutable `RunConfig` and versioned soft-reboot acknowledgement.
-- [ ] Task 2.4: Safe-off migrate legacy enabled soft reboot; block unattended soft reboot.
-- [ ] Task 2.5: Replace Toast consent with durable modal acknowledgement.
-- [ ] Task 2.6: Add commit-failure, ordering, exception, and upgrade-matrix tests.
-- [ ] Checkpoint 2: No failed write can enable a run; tests/lint pass; reviews approved; commit created.
+- [x] Task 2.1: Add serialized off-main-thread `ConfigurationRepository` with checked persistence.
+- [x] Task 2.2: Add saving/verified/error state and fail-closed coordinator admission hook.
+- [x] Task 2.3: Add immutable `RunConfig` and versioned soft-reboot acknowledgement.
+- [x] Task 2.4: Safe-off migrate legacy enabled soft reboot; block unattended soft reboot.
+- [x] Task 2.5: Replace Toast consent with durable modal acknowledgement.
+- [x] Task 2.6: Add commit-failure, ordering, exception, and upgrade-matrix tests.
+- [x] Task 2.7: Resolve Phase 2 review findings across cold-start readiness, reload recovery, admission capability, cleanup, Activity/Settings races, and deterministic boundary tests.
+- [x] Task 2.8: Apply the final Phase 2 review fixes: publish configuration state and diagnostics through one immutable status snapshot, prove ERROR publication through failed writes/reloads, prove enqueue monitor serialization, cover failed safe-off retry and Settings listener cleanup, and test bounded/interrupted initialization waits.
+- [x] Task 2.9: Replace API-33 `String.isBlank()` diagnostic validation with an API-32-safe Unicode code-point helper and regression-test empty, ASCII/Unicode whitespace, and NBSP semantics.
+- [x] Checkpoint 2: No failed write can enable a run; tests/lint pass; reviews approved; commit created by this change.
 
 ## Phase 3: Operation Coordinator, Foreground Service, and Activity Detachment
 

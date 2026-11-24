@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Modified 2026-11-24 (DFRoot GZIF): document manual-only soft reboot and configuration status. See NOTICE. -->
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <Preference
+        android:key="configuration_status"
+        android:title="Configuration"
+        android:selectable="false" />
+
+    <Preference
+        android:key="configuration_retry"
+        android:title="Retry configuration load" />
 
     <SwitchPreference
         android:key="boot_start"
@@ -9,7 +19,7 @@
     <SwitchPreference
         android:key="soft_reboot"
         android:title="Auto Soft Reboot"
-        android:summary="EXPERIMENTAL — on S9180/GZIF this has caused a full hard reboot. Keep OFF unless you accept that risk. Applies to both Manual Start and Start at Boot."
+        android:summary="EXPERIMENTAL — manual runs only. Unattended Start at Boot remains disabled while this is enabled, pending hardware validation."
         android:defaultValue="false" />
 
     <SwitchPreference

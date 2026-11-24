@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): adapt read-only Android observations and fail closed on unreadable properties. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): build environments only from confirmed RunConfig snapshots. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -28,11 +29,13 @@ final class AndroidRunEnvironment implements RunPreflight.Environment {
         String get(String key, String defaultValue);
     }
 
-    static AndroidRunEnvironment fromPreferences(Context context) {
-        String selectedPackage = context.getSharedPreferences(
-                ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE)
-                .getString(ExploitRunner.PREF_SU_MANAGER, null);
-        return new AndroidRunEnvironment(context, selectedPackage);
+    static AndroidRunEnvironment fromConfirmedConfiguration(Context context) {
+        return forConfig(context, ConfigurationRepository.get(context).getConfirmedSnapshot());
+    }
+
+    static AndroidRunEnvironment forConfig(Context context, RunConfig config) {
+        return new AndroidRunEnvironment(context,
+                config == null ? null : config.getManagerPackage());
     }
 
     static AndroidRunEnvironment forSelection(Context context, String selectedPackage) {

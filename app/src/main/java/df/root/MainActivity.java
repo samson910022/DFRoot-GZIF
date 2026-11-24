@@ -1,10 +1,9 @@
-// Modified 2026-11-24 (DFRoot GZIF): selection-specific fail-closed preflight and pure typed result messages. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): observe confirmed configuration, gate controls, and preserve off-thread preflight. See NOTICE.
 package df.root;
 
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Drawable;
@@ -30,6 +29,7 @@ import android.widget.Toast;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -43,9 +43,20 @@ public class MainActivity extends Activity implements IReporter {
     private Spinner spinnerSuManager;
     private Context mDeCtx;
     private final Handler mMain = new Handler(Looper.getMainLooper());
-    private final ExecutorService mExec = Executors.newSingleThreadExecutor();
+    private Executor mExec = Executors.newSingleThreadExecutor(
+            runnable -> new Thread(runnable, "dfroot-ui"));
+    private PreflightChecker mPreflightChecker;
+    private RunLauncher mRunLauncher;
+    private ConfigurationRepository mConfiguration;
+    private final ConfigurationRepository.Listener mConfigurationListener =
+            this::renderConfirmedConfiguration;
+    private ConfigurationRepository.State mReportedConfigurationState;
+    private boolean mApplyingConfiguration;
+    private long mClearedManagerGeneration = -1;
     private String mPrecheckReason = "";
     private int mPrecheckRequestId;
+    private boolean mPreflightReady;
+    private long mPreflightGeneration = -1;
     // Set on the main thread in onDestroy(); read from the background executor
     // and from posted UI runnables. Guards against a still-running exploit
     // updating the destroyed Activity's views or showing stray Toasts after a
@@ -72,6 +83,8 @@ public class MainActivity extends Activity implements IReporter {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mPreflightChecker = this::preflightForSnapshot;
+        mRunLauncher = ExploitRunner::runDetailed;
         mDeCtx = createDeviceProtectedStorageContext();
         setContentView(R.layout.activity_main);
 
@@ -101,43 +114,36 @@ public class MainActivity extends Activity implements IReporter {
         entries.add(0, new SuManagerEntry(null, "Select a SU Manager", null));
 
         spinnerSuManager.setAdapter(new SuManagerAdapter(this, entries));
-
-        SharedPreferences prefs = mDeCtx.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
-        String saved = prefs.getString(ExploitRunner.PREF_SU_MANAGER, null);
-        boolean savedFound = false;
-        for (int i = 1; i < entries.size(); i++) {
-            if (entries.get(i).packageName.equals(saved)) {
-                spinnerSuManager.setSelection(i);
-                savedFound = true;
-                break;
-            }
-        }
-        if (!savedFound && saved != null) { // Saved manager unavailable: uninstalled or no longer in the supported list
-            // Java/native contract: bootstrap.c reads DE shared_prefs/dfroot.xml
-            // directly during the exploit, so use commit() (synchronous disk write)
-            // rather than apply() for every write of this key.
-            prefs.edit().remove(ExploitRunner.PREF_SU_MANAGER).commit();
-        }
+        mConfiguration = ConfigurationRepository.get(mDeCtx);
 
         spinnerSuManager.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                if (mApplyingConfiguration) return;
                 SuManagerEntry e = entries.get(pos);
                 if (e.packageName == null) return;
-                // commit(), not apply(): the selected manager is read by native
-                // bootstrap.c straight from the DE prefs XML during a run, and
-                // apply()'s asynchronous disk flush can expose a stale value.
-                prefs.edit().putString(ExploitRunner.PREF_SU_MANAGER, e.packageName).commit();
-                updateRunButton();
+                RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
+                if (confirmed != null && java.util.Objects.equals(
+                        confirmed.getManagerPackage(), e.packageName)) {
+                    return;
+                }
+                if (!isConfigurationWritable()) {
+                    renderConfirmedConfiguration();
+                    return;
+                }
+                mConfiguration.setManagerPackage(e.packageName);
             }
             @Override
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        updateRunButton();
+        mConfiguration.addListener(mConfigurationListener);
+        renderConfirmedConfiguration();
 
         btnRun.setOnClickListener(v -> {
-            if (mDestroyed) return;
+            if (mDestroyed || !isRunEligible() || !mPreflightReady) return;
+            RunConfig snapshot = mConfiguration.getConfirmedSnapshot();
+            if (snapshot == null || snapshot.getGeneration() != mPreflightGeneration) return;
             btnRun.setEnabled(false);
             outputView.setText("");
             mExec.execute(this::runExploit);
@@ -146,10 +152,15 @@ public class MainActivity extends Activity implements IReporter {
 
     @Override
     protected void onDestroy() {
+        if (mConfiguration != null) {
+            mConfiguration.removeListener(mConfigurationListener);
+        }
         // Mark dead before shutting the executor down so any already-queued
         // report()/Toast/UI posts are dropped rather than touching stale views.
         mDestroyed = true;
-        mExec.shutdownNow();
+        if (mExec instanceof ExecutorService) {
+            ((ExecutorService) mExec).shutdownNow();
+        }
         super.onDestroy();
     }
 
@@ -168,11 +179,77 @@ public class MainActivity extends Activity implements IReporter {
         return super.onOptionsItemSelected(item);
     }
 
+    private boolean isConfigurationWritable() {
+        return mConfiguration != null
+                && mConfiguration.getState() == ConfigurationRepository.State.VERIFIED
+                && !mConfiguration.isWritePending()
+                && !mConfiguration.isFrozen();
+    }
+
+    private boolean isRunEligible() {
+        return !mDestroyed && isConfigurationWritable();
+    }
+
+    private void renderConfirmedConfiguration() {
+        if (mDestroyed || mConfiguration == null) return;
+        ConfigurationRepository.State state = mConfiguration.getState();
+        spinnerSuManager.setEnabled(isConfigurationWritable());
+
+        RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
+        if (confirmed != null) {
+            int position = managerPosition(confirmed.getManagerPackage());
+            mApplyingConfiguration = true;
+            try {
+                spinnerSuManager.setSelection(position);
+            } finally {
+                mApplyingConfiguration = false;
+            }
+            if (position == 0 && confirmed.getManagerPackage() != null
+                    && confirmed.getGeneration() != mClearedManagerGeneration
+                    && isConfigurationWritable()) {
+                mClearedManagerGeneration = confirmed.getGeneration();
+                mConfiguration.clearManager();
+            }
+        }
+
+        if (state == ConfigurationRepository.State.ERROR
+                && state != mReportedConfigurationState) {
+            report("Configuration error: " + mConfiguration.getErrorMessage() + "\n");
+        } else if (state == ConfigurationRepository.State.SAVING
+                && mReportedConfigurationState == ConfigurationRepository.State.VERIFIED) {
+            report("Saving configuration...\n");
+        }
+        mReportedConfigurationState = state;
+        updateRunButton();
+    }
+
+    private int managerPosition(String packageName) {
+        if (packageName != null) {
+            for (int i = 1; i < spinnerSuManager.getAdapter().getCount(); i++) {
+                SuManagerEntry entry = (SuManagerEntry) spinnerSuManager.getAdapter().getItem(i);
+                if (entry.packageName.equals(packageName)) {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
     private void updateRunButton() {
         // Hashing the selected loader is file I/O, so keep it off the main thread.
         btnRun.setEnabled(false);
+        mPreflightReady = false;
         final int requestId = ++mPrecheckRequestId;
-        final String selectedPackage = selectedManagerPackage();
+        if (!isRunEligible()) {
+            mPrecheckReason = mConfiguration == null
+                    ? "configuration is not verified" : mConfiguration.getRunAdmissionBlockReason();
+            return;
+        }
+        final RunConfig snapshot = mConfiguration.getConfirmedSnapshot();
+        if (snapshot == null) {
+            mPrecheckReason = "configuration is not verified";
+            return;
+        }
         mExec.execute(() -> {
             boolean alreadyHooked;
             try {
@@ -187,16 +264,29 @@ public class MainActivity extends Activity implements IReporter {
                 return;
             }
 
-            final RunPreflight.Result preflight = preflightForSelection(selectedPackage);
+            final RunPreflight.Result preflight;
+            try {
+                preflight = mPreflightChecker.check(snapshot);
+            } catch (Exception e) {
+                Log.w(TAG, "Run precheck unavailable", e);
+                postRunUnavailable(requestId, "precheck could not be completed");
+                return;
+            }
             boolean ready = preflight != null && preflight.isReady();
             String reason = ready ? "" : preflight == null
                     ? "precheck could not be completed" : preflight.getReason();
             mMain.post(() -> {
                 if (mDestroyed || requestId != mPrecheckRequestId) return;
-                btnRun.setEnabled(ready);
-                mPrecheckReason = reason;
-                if (!reason.isEmpty()) {
-                    report("Run unavailable: " + reason + "\n");
+                RunConfig current = mConfiguration.getConfirmedSnapshot();
+                boolean stillEligible = isRunEligible()
+                        && current != null && current.getGeneration() == snapshot.getGeneration();
+                mPreflightReady = stillEligible && ready;
+                mPreflightGeneration = stillEligible ? snapshot.getGeneration() : -1;
+                btnRun.setEnabled(mPreflightReady);
+                mPrecheckReason = stillEligible ? reason
+                        : mConfiguration.getRunAdmissionBlockReason();
+                if (!mPrecheckReason.isEmpty()) {
+                    report("Run unavailable: " + mPrecheckReason + "\n");
                 }
             });
         });
@@ -205,6 +295,8 @@ public class MainActivity extends Activity implements IReporter {
     private void postRunUnavailable(int requestId, String reason) {
         mMain.post(() -> {
             if (mDestroyed || requestId != mPrecheckRequestId) return;
+            mPreflightReady = false;
+            mPreflightGeneration = -1;
             btnRun.setEnabled(false);
             if (!reason.equals(mPrecheckReason)) {
                 mPrecheckReason = reason;
@@ -213,20 +305,34 @@ public class MainActivity extends Activity implements IReporter {
         });
     }
 
-    private RunPreflight.Result preflightForSelection(String selectedPackage) {
+    interface PreflightChecker {
+        RunPreflight.Result check(RunConfig snapshot) throws Exception;
+    }
+
+    interface RunLauncher {
+        RunResult launch(Context context, IReporter reporter);
+    }
+
+    /** Narrow deterministic seam; production uses the real worker, preflight, and runner. */
+    static void installExecutionSeamsForTesting(MainActivity activity, Executor executor,
+                                                PreflightChecker preflightChecker,
+                                                RunLauncher runLauncher) {
+        if (activity.mExec instanceof ExecutorService) {
+            ((ExecutorService) activity.mExec).shutdownNow();
+        }
+        activity.mExec = java.util.Objects.requireNonNull(executor, "executor");
+        activity.mPreflightChecker = java.util.Objects.requireNonNull(
+                preflightChecker, "preflightChecker");
+        activity.mRunLauncher = java.util.Objects.requireNonNull(runLauncher, "runLauncher");
+    }
+
+    private RunPreflight.Result preflightForSnapshot(RunConfig snapshot) {
         try {
-            return RunPreflight.check(AndroidRunEnvironment.forSelection(
-                    mDeCtx, selectedPackage));
+            return RunPreflight.check(AndroidRunEnvironment.forConfig(mDeCtx, snapshot));
         } catch (Exception e) {
             Log.w(TAG, "Run precheck unavailable", e);
             return null;
         }
-    }
-
-    private String selectedManagerPackage() {
-        Object selected = spinnerSuManager.getSelectedItem();
-        return selected instanceof SuManagerEntry
-                ? ((SuManagerEntry) selected).packageName : null;
     }
 
     private void runExploit() {
@@ -247,7 +353,7 @@ public class MainActivity extends Activity implements IReporter {
                 wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:manual");
                 wl.acquire(ExploitRunner.WAKELOCK_TIMEOUT_MS);
             }
-            result = ExploitRunner.runDetailed(mDeCtx, this);
+            result = mRunLauncher.launch(mDeCtx, this);
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");

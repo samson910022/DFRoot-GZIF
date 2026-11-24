@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): wire Process/package observations and fail-closed property reads on API 37. See NOTICE.
+// Modified 2026-11-24 (DFRoot GZIF): verify environment selection comes only from confirmed snapshots. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -8,7 +9,6 @@ import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.os.Process;
@@ -42,6 +42,7 @@ public class AndroidRunEnvironmentTest {
 
     @After
     public void restoreKernelVersion() {
+        ConfigurationRepository.resetForTesting();
         ShadowProcess.reset();
         if (previousKernelVersion == null) {
             System.clearProperty("os.version");
@@ -52,33 +53,45 @@ public class AndroidRunEnvironmentTest {
     }
 
     @Test
-    public void preferencesBackedSelectionTracksTheStoredPackage() {
-        SharedPreferences preferences = context.getSharedPreferences(
-                ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
-        preferences.edit().remove(ExploitRunner.PREF_SU_MANAGER).commit();
-        assertNull(AndroidRunEnvironment.fromPreferences(context).getSelectedManagerPackage());
+    public void confirmedRepositorySelectionTracksTheConfirmedPackage() {
+        installConfiguration(RunConfig.defaults());
+        assertNull(AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
 
-        preferences.edit().putString(ExploitRunner.PREF_SU_MANAGER,
-                SuManager.CLASSIC.getPackageName()).commit();
+        installConfiguration(new RunConfig(SuManager.CLASSIC.getPackageName(),
+                false, false, 0, 1));
         assertEquals(SuManager.CLASSIC.getPackageName(),
-                AndroidRunEnvironment.fromPreferences(context).getSelectedManagerPackage());
+                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
 
-        preferences.edit().remove(ExploitRunner.PREF_SU_MANAGER).commit();
-        assertNull(AndroidRunEnvironment.fromPreferences(context).getSelectedManagerPackage());
+        installConfiguration(RunConfig.defaults());
+        assertNull(AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
     }
 
     @Test
-    public void explicitSelectionDoesNotDependOnPreferences() {
-        context.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE)
-                .edit().putString(ExploitRunner.PREF_SU_MANAGER,
-                        SuManager.CLASSIC.getPackageName()).commit();
+    public void explicitSelectionAndConfigFactoriesDoNotDependOnPreferences() {
+        installConfiguration(new RunConfig(SuManager.CLASSIC.getPackageName(),
+                false, false, 0, 1));
+        RunConfig next = new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 2);
 
         AndroidRunEnvironment environment = AndroidRunEnvironment.forSelection(
                 context, SuManager.NEXT.getPackageName());
+        AndroidRunEnvironment configured = AndroidRunEnvironment.forConfig(context, next);
 
         assertEquals(SuManager.NEXT.getPackageName(), environment.getSelectedManagerPackage());
+        assertEquals(SuManager.NEXT.getPackageName(), configured.getSelectedManagerPackage());
         assertEquals(SuManager.CLASSIC.getPackageName(),
-                AndroidRunEnvironment.fromPreferences(context).getSelectedManagerPackage());
+                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
+    }
+
+    @Test
+    public void credentialProtectedPreferencesCannotOverrideConfirmedDeviceProtectedConfig() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(),
+                false, false, 0, 3));
+        context.getSharedPreferences(ConfigurationKeys.PREFS_NAME, Context.MODE_PRIVATE)
+                .edit().putString(ConfigurationKeys.PREF_SU_MANAGER,
+                        SuManager.CLASSIC.getPackageName()).commit();
+
+        assertEquals(SuManager.NEXT.getPackageName(),
+                AndroidRunEnvironment.fromConfirmedConfiguration(context).getSelectedManagerPackage());
     }
 
     @Test
@@ -187,6 +200,28 @@ public class AndroidRunEnvironmentTest {
         PackageInfo packageInfo = new PackageInfo();
         packageInfo.packageName = packageName;
         Shadows.shadowOf(context.getPackageManager()).installPackage(packageInfo);
+    }
+
+    private void installConfiguration(RunConfig config) {
+        ConfigurationRepository repository = new ConfigurationRepository(
+                new ConfigurationStore() {
+                    private RunConfig cached = config;
+                    private RunConfig durable = config;
+
+                    @Override
+                    public RunConfig load() {
+                        return cached;
+                    }
+
+                    @Override
+                    public boolean write(RunConfig updated) {
+                        cached = updated;
+                        durable = updated;
+                        return true;
+                    }
+                }, Runnable::run, Runnable::run);
+        repository.start();
+        ConfigurationRepository.setInstanceForTesting(repository);
     }
 
     @Test

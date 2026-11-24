@@ -1,18 +1,28 @@
+// Modified 2026-11-24 (DFRoot GZIF): wire settings to confirmed configuration and require durable modal consent. See NOTICE.
 package df.root;
 
+import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.preference.Preference;
 import android.preference.PreferenceFragment;
+import android.preference.PreferenceScreen;
 import android.preference.SwitchPreference;
-import android.widget.Toast;
 
 public class SettingsFragment extends PreferenceFragment {
+    private ConfigurationRepository mConfiguration;
+    private SwitchPreference mSoftRebootPreference;
+    private SwitchPreference mDisableModulesPreference;
+    private Preference mStatusPreference;
+    private PreferenceScreen mPreferenceScreen;
+    private Preference mRetryPreference;
+    private AlertDialog mConfirmationDialog;
+    private long mPendingSoftRebootGeneration = -1;
 
-    /** The hard-reboot warning is shown at most once per visit to Settings. */
-    private boolean mSoftRebootWarningShown;
+    private final ConfigurationRepository.Listener mConfigurationListener =
+            this::renderConfirmedConfiguration;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -20,8 +30,7 @@ public class SettingsFragment extends PreferenceFragment {
         addPreferencesFromResource(R.xml.preferences);
 
         Context ctx = getActivity();
-        SharedPreferences dePrefs = ctx.createDeviceProtectedStorageContext()
-                .getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
+        mConfiguration = ConfigurationRepository.get(ctx);
 
         ComponentName bootReceiver = new ComponentName(ctx, BootReceiver.class);
         SwitchPreference bootPref = (SwitchPreference) findPreference("boot_start");
@@ -36,33 +45,135 @@ public class SettingsFragment extends PreferenceFragment {
             return true;
         });
 
-        SwitchPreference softRebootPref = (SwitchPreference) findPreference(ExploitRunner.PREF_SOFT_REBOOT);
-        softRebootPref.setPersistent(false);
-        softRebootPref.setChecked(dePrefs.getBoolean(ExploitRunner.PREF_SOFT_REBOOT, false));
-        softRebootPref.setOnPreferenceChangeListener((pref, value) -> {
-            boolean enabled = (Boolean) value;
-            if (enabled && !mSoftRebootWarningShown) {
-                mSoftRebootWarningShown = true;
-                Toast.makeText(ctx, "Warning: may trigger a full reboot on this firmware",
-                        Toast.LENGTH_LONG).show();
+        mStatusPreference = findPreference("configuration_status");
+        mPreferenceScreen = getPreferenceScreen();
+        mRetryPreference = findPreference("configuration_retry");
+        mPreferenceScreen.removePreference(mRetryPreference);
+        mRetryPreference.setOnPreferenceClickListener(preference -> {
+            if (!mConfiguration.reload()) {
+                renderConfirmedConfiguration();
             }
-            // Java/native contract: bootstrap.c reads the DE shared_prefs/dfroot.xml
-            // file directly with open()/read() during the exploit. SharedPreferences
-            // apply() only writes to memory first and flushes to disk asynchronously,
-            // so native could read the previous value. commit() makes the on-disk
-            // file authoritative before the user can start a run.
-            dePrefs.edit().putBoolean(ExploitRunner.PREF_SOFT_REBOOT, enabled).commit();
-            return true; // never block the toggle: the user explicitly accepts the risk
-        });
-
-        SwitchPreference disableModulesPref = (SwitchPreference) findPreference("disable_modules");
-        disableModulesPref.setPersistent(false);
-        disableModulesPref.setChecked(dePrefs.getBoolean("disable_modules", false));
-        disableModulesPref.setOnPreferenceChangeListener((pref, value) -> {
-            // Same Java/native commit() contract as soft_reboot above: native
-            // bootstrap.c reads this flag straight from the DE prefs XML.
-            dePrefs.edit().putBoolean("disable_modules", (Boolean) value).commit();
             return true;
         });
+        mSoftRebootPreference = (SwitchPreference) findPreference(
+                ConfigurationKeys.PREF_SOFT_REBOOT);
+        mSoftRebootPreference.setPersistent(false);
+        mSoftRebootPreference.setOnPreferenceChangeListener((pref, value) -> {
+            if (!isConfigurationWritable()) return false;
+            if ((Boolean) value) {
+                showSoftRebootAcknowledgement();
+            } else {
+                mConfiguration.setSoftReboot(false);
+            }
+            // The repository observer, not the click, reflects durable state.
+            return false;
+        });
+
+        mDisableModulesPreference = (SwitchPreference) findPreference(
+                ConfigurationKeys.PREF_DISABLE_MODULES);
+        mDisableModulesPreference.setPersistent(false);
+        mDisableModulesPreference.setOnPreferenceChangeListener((pref, value) -> {
+            if (!isConfigurationWritable()) return false;
+            mConfiguration.setDisableModules((Boolean) value);
+            return false;
+        });
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        mConfiguration.addListener(mConfigurationListener);
+        renderConfirmedConfiguration();
+    }
+
+    @Override
+    public void onPause() {
+        mConfiguration.removeListener(mConfigurationListener);
+        dismissConfirmation();
+        mPendingSoftRebootGeneration = -1;
+        super.onPause();
+    }
+
+    private boolean isConfigurationWritable() {
+        return mConfiguration != null
+                && mConfiguration.getState() == ConfigurationRepository.State.VERIFIED
+                && !mConfiguration.isWritePending()
+                && !mConfiguration.isFrozen();
+    }
+
+    private void renderConfirmedConfiguration() {
+        if (!isAdded() || mConfiguration == null) return;
+        boolean writable = isConfigurationWritable();
+        mSoftRebootPreference.setEnabled(writable);
+        mDisableModulesPreference.setEnabled(writable);
+
+        RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
+        if (confirmed != null) {
+            mSoftRebootPreference.setChecked(confirmed.isSoftReboot());
+            mDisableModulesPreference.setChecked(confirmed.isDisableModules());
+        }
+
+        switch (mConfiguration.getState()) {
+            case SAVING:
+                mStatusPreference.setSummary("Saving configuration...");
+                break;
+            case ERROR:
+                mStatusPreference.setSummary("Configuration error: "
+                        + mConfiguration.getErrorMessage());
+                break;
+            case VERIFIED:
+                mStatusPreference.setSummary("Configuration verified");
+                break;
+            default:
+                throw new IllegalStateException("unknown configuration state");
+        }
+        boolean error = mConfiguration.getState() == ConfigurationRepository.State.ERROR;
+        if (error && mPreferenceScreen.findPreference("configuration_retry") == null) {
+            mPreferenceScreen.addPreference(mRetryPreference);
+        } else if (!error && mPreferenceScreen.findPreference("configuration_retry") != null) {
+            mPreferenceScreen.removePreference(mRetryPreference);
+        }
+        mRetryPreference.setEnabled(error);
+    }
+
+    private void showSoftRebootAcknowledgement() {
+        dismissConfirmation();
+        Context ctx = getActivity();
+        RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
+        if (ctx == null || confirmed == null || !isConfigurationWritable()) {
+            renderConfirmedConfiguration();
+            return;
+        }
+        mPendingSoftRebootGeneration = confirmed.getGeneration();
+        mConfirmationDialog = new AlertDialog.Builder(ctx)
+                .setTitle("Enable Auto Soft Reboot?")
+                .setMessage("EXPERIMENTAL: on this firmware a soft reboot has caused a full hard reboot. "
+                        + "This setting applies to manual runs only. Start at Boot will not run "
+                        + "while it is enabled, pending separate hardware validation.")
+                .setCancelable(false)
+                .setNegativeButton("Cancel", (dialog, which) -> {
+                    mPendingSoftRebootGeneration = -1;
+                    dialog.dismiss();
+                })
+                .setPositiveButton("Enable anyway", (dialog, which) -> {
+                    dialog.dismiss();
+                    long expectedGeneration = mPendingSoftRebootGeneration;
+                    mPendingSoftRebootGeneration = -1;
+                    RunConfig current = mConfiguration.getConfirmedSnapshot();
+                    if (isConfigurationWritable() && current != null
+                            && current.getGeneration() == expectedGeneration) {
+                        mConfiguration.setSoftReboot(true);
+                    } else {
+                        renderConfirmedConfiguration();
+                    }
+                })
+                .show();
+    }
+
+    private void dismissConfirmation() {
+        if (mConfirmationDialog != null) {
+            mConfirmationDialog.dismiss();
+            mConfirmationDialog = null;
+        }
     }
 }
