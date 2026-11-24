@@ -1,6 +1,8 @@
 /* Modified 2026-11-17 (DFRoot GZIF): .incbin reduced to dfroot-android13-5.15.ko; KO_TARGET_CANDIDATES reduced to /vendor/lib64/AIAwbModel_v2.2.tflite. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): require a strict run-config artifact before any patch work. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): update native marker wording from preferences to run-config. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): poll run-scoped terminal markers; /dev/dfm6 is progress only. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): iterate the shared progress table and bound the reader with the composed deadline. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,10 +18,12 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
 #include "run_config_codec.h"
+#include "run_status.h"
 
 #define eos(s) (s + strlen(s))
 
@@ -469,6 +473,12 @@ static void usage(const char *argv0) {
             "--aes-key HEX64 --run-config PATH\n", argv0);
 }
 
+static int64_t monotonic_ms(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
 static const char *mode_name(run_config_mode_t mode) {
     return mode == RUN_CONFIG_MODE_UNATTENDED_BOOT ? "unattended_boot" : "manual";
 }
@@ -493,6 +503,12 @@ static int setup(int argc, char **argv) {
     g_generation = config.generation;
     memcpy(g_manager, config.manager, sizeof(g_manager));
     g_mode = config.mode;
+
+    /* Bind the terminal classifier to the admitted run before patch work. */
+    if (run_status_configure(RUN_STATUS_ROOT_DEFAULT, g_operation_id) != 0) {
+        fprintf(stderr, "terminal classifier rejected: %s\n", run_status_last_error());
+        return 2;
+    }
 
     g_encap_port  = args.encap_port;
     g_sender_port = args.sender_port;
@@ -539,38 +555,49 @@ static int exploit(void) {
     printf("\n=== init  ===\n");
     createOrphanProcess();
 
-    static const struct {
-        const char *path;
-        const char *msg;
-        int         rc;
-    } markers[] = {
-        { "/dev/df",    "libc++: loading custom module",                    -1 },
-        { "/dev/dfm0",  "kernel module: launching bootstrap",               -1 },
-        { "/dev/dfm1",  "bootstrap: loading run-config artifact",            -1 },
-        { "/dev/dfme0", "bootstrap: ERROR - reading run-config failed",       1 },
-        { "/dev/dfm2",  "bootstrap: cloning zygote env",                    -1 },
-        { "/dev/dfmw0", "bootstrap: WARNING - clone zygote env failed",     -1 },
-        { "/dev/dfm3",  "bootstrap: setting partitions ro",                 -1 },
-        { "/dev/dfmw1", "bootstrap: WARNING - set partitions ro failed",    -1 },
-        { "/dev/dfm4",  "bootstrap: disabling ksu modules",                 -1 },
-        { "/dev/dfme1", "bootstrap: ERROR - disable modules failed",         1 },
-        { "/dev/dfm5",  "bootstrap: starting SU daemon",                    -1 },
-        { "/dev/dfm6",  "ksud start: SUCCESS",                               0 },
-        { "/dev/dfme2", "ksud start: ERROR - ksud nonzero exit",             1 },
-    };
-    int seen[sizeof(markers)/sizeof(markers[0])] = {0};
+    /* Legacy global /dev markers remain owner-visible progress diagnostics.
+     * In particular /dev/dfm6 still prints "SUCCESS", but no global marker
+     * terminates the run: only run-scoped terminal markers decide the exit.
+     * The table lives in run_status.c so it cannot diverge from the shared
+     * progress_outcome policy. */
+    int seen[RUN_STATUS_PROGRESS_MARKER_COUNT] = {0};
 
-    for (int elapsed = 0; elapsed < 10000; elapsed += 10) {
+    /* The reader budget strictly exceeds the writer's late-load wait plus its
+     * soft-reboot command wait, so a well-behaved writer always publishes a
+     * terminal marker before this loop gives up. */
+    int64_t start = monotonic_ms();
+    for (;;) {
         usleep(10000);
-        for (size_t j = 0; j < sizeof(markers)/sizeof(markers[0]); j++) {
-            if (!seen[j] && access(markers[j].path, F_OK) == 0) {
+        for (size_t j = 0; j < run_status_progress_marker_count; j++) {
+            if (!seen[j] && access(run_status_progress_markers[j].path, F_OK) == 0) {
                 seen[j] = 1;
-                printf("%s\n", markers[j].msg);
-                if (markers[j].rc >= 0) { rc = markers[j].rc; goto done; }
+                printf("%s\n", run_status_progress_markers[j].message);
+                int progress_code = run_status_progress_outcome(
+                    run_status_progress_markers[j].path);
+                if (progress_code >= 0) { rc = progress_code; goto done; }
             }
         }
+
+        struct run_status_result result;
+        if (run_status_classify(&result) != 0) {
+            printf("terminal classifier error: %s\n", result.diagnostic);
+            rc = RUN_STATUS_TERMINAL_ERROR;
+            goto done;
+        }
+        if (result.verdict != RUN_STATUS_VERDICT_NONE) {
+            printf("%s\n", result.diagnostic);
+            rc = run_status_exit_code(&result);
+            goto done;
+        }
+
+        int64_t now = monotonic_ms();
+        if (now < 0 || !run_status_wait_continues(
+                           now - start, RUN_STATUS_TERMINAL_READ_WAIT_MS)) {
+            printf("timeout: ERROR - check logcat & dmesg\n");
+            rc = 2;
+            goto done;
+        }
     }
-    printf("timeout: ERROR - check logcat & dmesg\n");
 done:
     if (rc == 3) printf("patch: ERROR - failed to patch files\n");
     return rc;

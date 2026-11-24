@@ -1,5 +1,6 @@
 # Modified 2026-11-17 (DFRoot GZIF): KO_FILES reduced to android13-5.15 only. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): share the strict run-config codec with both native binaries. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): compile the run-scoped terminal marker protocol into both native binaries. See NOTICE.
 cmake_minimum_required(VERSION 3.22)
 project(dfroot)
 enable_language(ASM)
@@ -31,7 +32,7 @@ set(KO_FILES
 # AGP only packages lib*.so, so the executable is named libdfroot.so and lands
 # in the APK's native lib dir. The app execs it from nativeLibraryDir, which is
 # executable (app data dir is not).
-add_executable(dfroot exp.c libcxx.S elf_parser.c run_config_codec.c)
+add_executable(dfroot exp.c libcxx.S elf_parser.c run_config_codec.c run_status.c)
 add_dependencies(dfroot splicehelper_bin)
 set_target_properties(dfroot PROPERTIES
     PREFIX "lib"
@@ -44,7 +45,7 @@ set_source_files_properties(exp.c PROPERTIES
 target_link_libraries(dfroot log)
 target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 
-add_executable(bootstrap bootstrap.c run_config_codec.c)
+add_executable(bootstrap bootstrap.c run_config_codec.c run_status.c)
 set_target_properties(bootstrap PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"

@@ -1,6 +1,8 @@
 # Modified 2026-11-24 (DFRoot GZIF): add a nonprivileged host-only run-config codec test project. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover strict native argv parsing and mode-honoring fixture roots. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): re-probe relocated roots, bound every test, and clean mktemp fixtures. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): add nonprivileged terminal marker write/classifier tests. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): cover shared progress markers, composed deadlines, exact fault branches, and malformed markers. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -8,16 +10,21 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
-add_library(run_config_codec STATIC ../run_config_codec.c)
+add_library(run_config_codec STATIC ../run_config_codec.c ../run_status.c)
 target_include_directories(run_config_codec PUBLIC ..)
-# RUN_CONFIG_TEST_HOOKS is compiled only into the host test codec; production
-# binaries use run_config_codec.c without it and contain no mutation seam.
-target_compile_definitions(run_config_codec PUBLIC _POSIX_C_SOURCE=200809L RUN_CONFIG_TEST_HOOKS)
+# The test seams are compiled only into this host library; production binaries
+# use the same sources without them and contain no mutation/fault-injection seam.
+target_compile_definitions(run_config_codec PUBLIC _POSIX_C_SOURCE=200809L
+                           RUN_CONFIG_TEST_HOOKS RUN_STATUS_TEST_HOOKS)
 target_compile_options(run_config_codec PRIVATE -Wall -Wextra -Werror -pedantic)
 
 add_executable(run_config_codec_test run_config_codec_test.c)
 target_link_libraries(run_config_codec_test PRIVATE run_config_codec)
 target_compile_options(run_config_codec_test PRIVATE -Wall -Wextra -Werror -pedantic)
+
+add_executable(run_status_test run_status_test.c)
+target_link_libraries(run_status_test PRIVATE run_config_codec)
+target_compile_options(run_status_test PRIVATE -Wall -Wextra -Werror -pedantic)
 
 enable_testing()
 
@@ -161,3 +168,38 @@ if(RUN_CONFIG_TEST_RELOCATED)
     set_tests_properties(run_config.cleanup_fixtures PROPERTIES
                          TIMEOUT 30 FIXTURES_CLEANUP run_config_fixtures)
 endif()
+
+# Terminal marker tests use only per-case directories under the build tree;
+# no privileges and no /dev writes are involved.
+set(RUN_STATUS_TEST_ROOT "${CMAKE_CURRENT_BINARY_DIR}/status-work")
+file(MAKE_DIRECTORY "${RUN_STATUS_TEST_ROOT}")
+foreach(status_case IN ITEMS
+        rc0
+        rc1
+        rc4
+        rc6
+        missing
+        conflict
+        foreign_id
+        malformed_payload
+        empty_marker
+        torn_marker
+        stale_foreign_marker
+        unsafe_id
+        write_failure
+        no_follow
+        fault_write
+        fault_fsync
+        fault_close
+        fault_write_close
+        fault_fsync_close
+        bounded_wait
+        deadline_composition
+        shared_budget_wiring
+        protocol_helpers
+        unconfigured)
+    add_test(NAME run_status.${status_case}
+             COMMAND run_status_test ${status_case} "${RUN_STATUS_TEST_ROOT}/${status_case}"
+                     "${CMAKE_CURRENT_SOURCE_DIR}/..")
+    set_tests_properties(run_status.${status_case} PROPERTIES TIMEOUT 30)
+endforeach()

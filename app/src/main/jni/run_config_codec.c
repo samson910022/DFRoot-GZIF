@@ -1,6 +1,7 @@
 /* Modified 2026-11-24 (DFRoot GZIF): parse the private run-config artifact without following links. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): add strict native argv parsing and always emit a diagnostic. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): add a host-only mid-read mutation seam for the TOCTOU recheck. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): export the shared operation-ID validator for the terminal marker protocol. See NOTICE. */
 #include "run_config_codec.h"
 
 #include <errno.h>
@@ -119,7 +120,7 @@ static int parse_boolean(const char *value, size_t length, int *out)
     return fail("boolean fields must be exactly 0 or 1");
 }
 
-static int valid_operation_id(const char *value, size_t length)
+int run_config_valid_operation_id(const char *value, size_t length)
 {
     if (length == 0 || length > RUN_CONFIG_OPERATION_ID_MAX) {
         return 0;
@@ -212,7 +213,7 @@ static int parse_buffer(const char *buffer, size_t length, struct run_config *ou
         uint64_t number = 0;
         switch (index) {
             case FIELD_OPERATION_ID:
-                if (!valid_operation_id(value, value_length)) {
+                if (!run_config_valid_operation_id(value, value_length)) {
                     return fail("operation ID has an unsafe charset or length");
                 }
                 if (copy_value(out->operation_id, sizeof(out->operation_id), value,

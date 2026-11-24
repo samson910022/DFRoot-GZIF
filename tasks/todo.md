@@ -1,6 +1,8 @@
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record Slice 4B1 in-progress terminal-marker protocol, bounded wait, and verification evidence; Checkpoint 4 remains unchecked. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4B1 review-fix round: shared progress/deadline sources, real fault branches, exact diagnostics, and 15/15 mutation kills; Checkpoint 4 remains unchecked. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -97,9 +99,112 @@
   Verification: `git diff --check` clean; 65/65 host tests passed (0 failures);
   368 JVM tests (0 failures/errors/skips); lint 0 errors (20 pre-existing warnings).
 
-- [ ] Task 4.2: Make `dfm6` non-terminal and add terminal completion/error protocol.
-- [ ] Task 4.3: Bound late-load wait and check waitpid/marker errors.
-- [ ] Task 4.4: Emit rc=4 only after successful soft-reboot command; add distinct failure code.
+- [x] Task 4.2: Make `dfm6` non-terminal and add terminal completion/error protocol.
+
+  **Slice 4B1 progress (uncommitted, 2026-11-25).** Added host-compilable
+  `run_status.c/.h`: an injectable marker root plus the admitted operation ID,
+  four run-scoped terminal marker codes (rc=0 success, rc=1 generic/bootstrap
+  error, rc=4 soft-reboot success, rc=6 soft-reboot failure), checked exclusive
+  writes (`O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW`, regular-file/no-follow
+  verification, checked write/fsync/close, operation ID in the payload), and a
+  classifier that ignores foreign IDs/malformed payloads and reports conflicts
+  with a stable diagnostic via the shared codec operation-ID validator.
+  `exp.c` still prints the owner-visible `ksud start: SUCCESS` diagnostic at
+  `/dev/dfm6` but treats every global marker as progress-only and decides the
+  exit solely from the run-scoped classifier (conflict -> rc=1, timeout -> rc=2).
+  Host coverage: 17 new CTest cases at that point; 24 run-status CTest cases
+  after the review-fix round, with all 89 host tests passing (count corrected
+  below). Checkpoint 4 stays unchecked pending independent review.
+
+- [x] Task 4.3: Bound late-load wait and check waitpid/marker errors.
+
+  **Slice 4B1 progress (uncommitted, 2026-11-25).** `bootstrap.c` now uses an
+  EINTR-safe `waitpid` loop, a 60 s monotonic bounded late-load wait with a
+  pure, host-tested `run_status_wait_continues()` predicate, and terminal rc=1
+  on timeout. All terminal outcomes use checked marker writes; earlier
+  config/module/staging/late-load failures publish rc=1 and return 1. A
+  reserved safe pre-admission ID carries the rc=1 marker when the snapshot
+  itself cannot be parsed. Global progress markers (including `/dev/dfm6` and
+  their messages/paths) are intact.
+
+- [x] Task 4.4: Emit rc=4 only after successful soft-reboot command; add distinct failure code.
+
+  **Slice 4B1 progress (uncommitted, 2026-11-25).** `bootstrap.c` maps the
+  soft-reboot command result through the host-tested
+  `run_status_soft_reboot_code()` helper (success -> rc=4, any failure -> rc=6)
+  and returns the matching code. Java already maps rc=4/rc=6; no SUCCESS
+  semantics, root probe, or staging changes were made. The earlier "six
+  mutations" claim is corrected by the review-fix round below: 15 concrete
+  mutations were applied, each observed to fail its named test, then restored
+  byte-for-byte.
+
+  **Slice 4B1 review-fix round (uncommitted, 2026-11-25).** No SUCCESS
+  semantics, root-probe policy, staging (4B2), dependency, or APK changes.
+  Production: the full legacy progress table (all 13 paths and exact messages,
+  including `/dev/dfm6` -> `ksud start: SUCCESS`) now lives once in
+  `run_status.c` as an exported const table/count; `run_status_progress_outcome()`
+  resolves through it; `exp.c` iterates it with no local copy. Shared exported
+  deadlines are 60000 ms late-load, 30000 ms soft-reboot command, and 100000 ms
+  terminal reader (strictly greater than 60000+30000); `bootstrap.c` uses the
+  first two with an EINTR-safe non-blocking `waitpid` loop (soft-reboot timeout
+  -> rc=6, no forced kill), and `exp.c` uses the reader deadline with monotonic
+  elapsed and `run_status_wait_continues`. Host fault injection now feeds
+  simulated EIO into the same write/fsync error branches used in production;
+  the close fault stays on `close_result`, and a close failure no longer
+  overwrites an earlier write/fsync diagnostic. Host diagnostics are matched
+  to exact branch-specific prefixes (open/write/fsync/close). New host cases:
+  empty marker, two torn payload shapes, stale foreign-ID marker with our
+  filename, write+close/fsync+close diagnostic precedence, deadline
+  composition, and normalized cross-file source wiring. The conflict case now
+  also asserts `result.code == RUN_STATUS_TERMINAL_ERROR`.
+
+  Mutation evidence (each exact source mutation below was applied, the named
+  test run and observed to fail, and the source restored; "killed" = targeted
+  test failed while the mutation was present). All seven review-listed
+  categories are covered; the previous count of six is corrected to 15/15:
+
+  - `run_status.c` `/dev/dfm6` entry changed from `RUN_STATUS_PROGRESS_ONLY` to
+    `RUN_STATUS_TERMINAL_SUCCESS` — killed by `run_status.protocol_helpers`,
+    which iterates every exported marker and asserts `progress_outcome < 0`.
+  - `run_status.c` `run_status_soft_reboot_code()` forced to rc=4 for every
+    command result — killed by `run_status.protocol_helpers`.
+  - `run_status.c` conflict classifier changed from
+    `out->code = RUN_STATUS_TERMINAL_ERROR` to `out->code = code_order[0]`
+    (first-wins) — killed by `run_status.conflict` (`result.code == 1` and
+    `run_status_exit_code() == 1`).
+  - `run_status.c` classifier foreign-ID `strcmp` guard removed — killed by
+    `run_status.foreign_id` and `run_status.stale_foreign_marker`.
+  - `run_status.c` `run_status_wait_continues()` changed to
+    `return elapsed_ms >= 0 && limit_ms > 0;` (no deadline) — killed by
+    `run_status.bounded_wait`.
+  - `run_status.h` reader deadline reduced from 100000 to 90000 (equal to the
+    writer late+soft sum, no longer strictly greater) — killed by
+    `run_status.deadline_composition`.
+  - `run_status.c` write-error branch body removed — killed by
+    `run_status.fault_write` (exact "terminal marker write failed" prefix).
+  - `run_status.c` fsync-error branch removed (`(void)fsync_result;`) — killed
+    by `run_status.fault_fsync` (exact "terminal marker fsync failed" prefix).
+  - `run_status.c` close-error branch removed (`(void)close_result;`) — killed
+    by `run_status.fault_close` (exact "terminal marker close failed" prefix).
+  - `run_status.c` close condition widened to `if (close_result != 0)` so a
+    close error overwrites the first diagnostic — killed by
+    `run_status.fault_write_close`.
+  - `run_status.c` empty payload accepted by synthesizing our ID with rc=0 —
+    killed by `run_status.empty_marker`.
+  - `run_status.c` code parser accepting `"0"` without its newline — killed by
+    `run_status.torn_marker`.
+  - `bootstrap.c` late-load deadline call argument replaced by literal 600000
+    — killed by `run_status.shared_budget_wiring` (normalized source guard).
+  - `bootstrap.c` bounded soft-reboot call replaced by unbounded `run_ctx()` —
+    killed by `run_status.shared_budget_wiring`.
+  - `exp.c` local `/dev/dfm6` SUCCESS progress table reintroduced — killed by
+    `run_status.shared_budget_wiring`.
+
+  Verification: `git diff --check` clean; 89/89 host tests pass (0
+  failures/errors/skips; 65 run-config + 24 run-status); aarch64 NDK syntax
+  checks of `bootstrap.c` and `exp.c` clean; 368 JVM tests (0
+  failures/errors/skips); lint 0 errors (20 pre-existing warnings); 15/15
+  mutations killed. No device, payload, privileged container, or APK execution.
 - [ ] Task 4.5: Harden `.ksud-stage` with sticky-bit/exclusive-nofollow descriptor staging and mode restoration.
 - [ ] Task 4.6: Add host-native parser, marker ordering, and harmless staging-race tests.
 - [ ] Checkpoint 4: Native uses one snapshot and reports terminal state after bootstrap completion; reviews approved; commit created.

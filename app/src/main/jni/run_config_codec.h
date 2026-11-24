@@ -1,6 +1,7 @@
 /* Modified 2026-11-24 (DFRoot GZIF): define the strict shared Java/native run-config contract. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): add strict native argv parsing shared with exp.c host tests. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): size the manager field for its terminator and add a host-only TOCTOU hook. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): export the operation-ID policy for run-scoped markers. See NOTICE. */
 #ifndef DFROOT_RUN_CONFIG_CODEC_H
 #define DFROOT_RUN_CONFIG_CODEC_H
 
@@ -56,6 +57,10 @@ int run_config_parse_native_args(int argc, char **argv, struct run_config_native
 
 /* Diagnostic for the immediately preceding parse on the calling thread. */
 const char *run_config_last_error(void);
+
+/* Shared operation-ID policy, reused by the Phase 4B terminal marker protocol
+ * so an unsafe ID is rejected before it reaches a path or a payload. */
+int run_config_valid_operation_id(const char *value, size_t length);
 
 /*
  * Host-test-only seam. Compiled in exclusively for the nonprivileged host test

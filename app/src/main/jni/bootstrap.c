@@ -1,15 +1,21 @@
 /* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): read only the admitted run-config artifact, never SharedPreferences XML. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): publish checked run-scoped terminal markers and bound the late-load wait. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): use the shared composed deadlines and bound the soft-reboot command wait without killing. See NOTICE. */
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include "run_config_codec.h"
+#include "run_status.h"
 
 #define BLKROSET   0x125d
 #define KSUD_STAGE "/data/user_de/0/df.root/ksud"
@@ -112,6 +118,25 @@ static int late_load_running(void)
     return found;
 }
 
+static int64_t monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Publish the run-scoped terminal outcome and exit with exactly that code.
+ * A marker write failure is reported but never downgrades the outcome. */
+static int terminal(int code)
+{
+    if (run_status_write(code) != 0) {
+        fprintf(stderr, "bootstrap: terminal marker write failed: %s\n",
+                run_status_last_error());
+    }
+    return code;
+}
+
 static int run_ctx(const char *ctx, char *const argv[])
 {
     pid_t pid = fork();
@@ -125,14 +150,61 @@ static int run_ctx(const char *ctx, char *const argv[])
         execv(argv[0], argv);
         _exit(127);
     }
-    int status;
-    waitpid(pid, &status, 0);
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited != pid)
+        return -1;
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
+/* Bounded variant for the soft-reboot command. The waitpid poll is EINTR-safe
+ * and non-blocking; on timeout the child is left alone (no forced kill) and
+ * the caller maps the timeout to rc=6. */
+static int run_ctx_timed(const char *ctx, char *const argv[], int64_t limit_ms,
+                         int *timed_out)
+{
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        if (ctx) {
+            int fd = open("/proc/self/attr/exec", O_WRONLY);
+            if (fd >= 0) { write(fd, ctx, strlen(ctx)); close(fd); }
+        }
+        execv(argv[0], argv);
+        _exit(127);
+    }
+    if (timed_out != NULL)
+        *timed_out = 0;
+    int64_t start = monotonic_ms();
+    int status = 0;
+    for (;;) {
+        pid_t waited;
+        do {
+            waited = waitpid(pid, &status, WNOHANG);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == pid)
+            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        if (waited < 0)
+            return -1;
+        int64_t now = monotonic_ms();
+        if (now < 0 || !run_status_wait_continues(now - start, limit_ms)) {
+            if (timed_out != NULL)
+                *timed_out = 1;
+            return -1;
+        }
+        usleep(100000);
+    }
+}
+
+/* Global /dev markers are progress diagnostics only; terminal outcomes are
+ * published exclusively through the run-scoped marker protocol. */
 static void touch(const char *path)
 {
-    int fd = open(path, O_CREAT | O_WRONLY, 0666);
+    int fd = open(path, O_CREAT | O_WRONLY | O_CLOEXEC | O_NOFOLLOW, 0644);
     if (fd >= 0)
         close(fd);
 }
@@ -159,11 +231,24 @@ static int disable_modules(void)
 
 int main(void)
 {
+    /* Pre-admission terminal channel: if the snapshot cannot be parsed there
+     * is no admitted operation ID, so a reserved safe ID carries rc=1. */
+    if (run_status_configure(RUN_STATUS_ROOT_DEFAULT, RUN_STATUS_PRE_ADMISSION_ID) != 0) {
+        fprintf(stderr, "bootstrap: terminal protocol unavailable: %s\n",
+                run_status_last_error());
+        return RUN_STATUS_TERMINAL_ERROR;
+    }
+
     touch("/dev/dfm1");
     struct run_config config;
     if (run_config_parse_file(RUN_CONFIG_PATH, &config) != 0) {
         touch("/dev/dfme0");
-        return 1;
+        return terminal(RUN_STATUS_TERMINAL_ERROR);
+    }
+    if (run_status_configure(RUN_STATUS_ROOT_DEFAULT, config.operation_id) != 0) {
+        fprintf(stderr, "bootstrap: terminal protocol rejected: %s\n",
+                run_status_last_error());
+        return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
 
     touch("/dev/dfm2");
@@ -178,7 +263,7 @@ int main(void)
         touch("/dev/dfm4");
         if (disable_modules()) {
             touch("/dev/dfme1");
-            return 1;
+            return terminal(RUN_STATUS_TERMINAL_ERROR);
         }
     }
 
@@ -187,18 +272,44 @@ int main(void)
     // Stage bundled ksud to FZG1 staging path; the FZG1 ksud renames it to /data/adb/ksud.
     if (system("cp /data/user_de/0/df.root/ksud /data/local/tmp/.ksud-stage") != 0) {
         touch("/dev/dfme2");
-        return 1;
+        return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
     if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
-                                  "--package-name", config.manager, NULL }) == 0) {
-        touch("/dev/dfm6");
-        if (config.soft_reboot) {
-            while (late_load_running()) sleep(1);
-            run_ctx("u:r:ksu:s0", (char *[]){ KSUD, "soft-reboot", NULL });
-        }
-    } else {
+                                  "--package-name", config.manager, NULL }) != 0) {
         touch("/dev/dfme2");
+        return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
-        
-    return 0;
+
+    /* /dev/dfm6 remains the owner-visible late-load progress marker. The
+     * terminal outcome is the run-scoped marker written below. */
+    touch("/dev/dfm6");
+    if (!config.soft_reboot) {
+        return terminal(RUN_STATUS_TERMINAL_SUCCESS);
+    }
+
+    int64_t start = monotonic_ms();
+    for (;;) {
+        if (!late_load_running()) {
+            break;
+        }
+        int64_t now = monotonic_ms();
+        if (now < 0 || !run_status_wait_continues(now - start,
+                                                  RUN_STATUS_LATE_LOAD_WAIT_MS)) {
+            fprintf(stderr, "bootstrap: late-load wait exceeded %d ms\n",
+                    RUN_STATUS_LATE_LOAD_WAIT_MS);
+            return terminal(RUN_STATUS_TERMINAL_ERROR);
+        }
+        sleep(1);
+    }
+
+    int soft_timed_out = 0;
+    int soft_rc = run_ctx_timed("u:r:ksu:s0",
+                                (char *[]){ KSUD, "soft-reboot", NULL },
+                                RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out);
+    if (soft_timed_out) {
+        fprintf(stderr, "bootstrap: soft-reboot command wait exceeded %d ms\n",
+                RUN_STATUS_SOFT_REBOOT_WAIT_MS);
+        return terminal(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    }
+    return terminal(run_status_soft_reboot_code(soft_rc));
 }
