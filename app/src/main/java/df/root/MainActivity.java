@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): observe confirmed configuration, gate controls, and preserve off-thread preflight. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): request service-owned manual work and detach all execution/observation from the Activity lifecycle. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): add a read-only availability diagnostic from the authoritative preflight plan. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): compute the availability diagnostic off the UI thread with a stale-result guard. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -10,6 +11,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Looper;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -29,6 +31,9 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Request-and-observe UI only. The foreground service supplies process lifetime
@@ -37,7 +42,16 @@ import java.util.Objects;
 public class MainActivity extends Activity {
     private static final String TAG = "dfroot";
     private static final int MAX_UI_OUTPUT_CHARACTERS = 32 * 1024;
+    private static final String PENDING_DIAGNOSTIC_TEXT = "Checking availability...";
+    private static final String UNAVAILABLE_DIAGNOSTIC_TEXT =
+            "Run unavailable: availability could not be determined from read-only observations";
     private static String sLastResultToastOperationId;
+
+    // Read-only diagnostic scheduling only; the Activity never executes operations.
+    private static final Executor DEFAULT_DIAGNOSTIC_WORKER = newDiagnosticWorker();
+    private static final Executor DEFAULT_DIAGNOSTIC_MAIN = ConfigurationRepository.newMainExecutor();
+    private static volatile Executor sDiagnosticWorker = DEFAULT_DIAGNOSTIC_WORKER;
+    private static volatile Executor sDiagnosticMain = DEFAULT_DIAGNOSTIC_MAIN;
 
     private Button btnRun;
     private ScrollView outputScroll;
@@ -62,6 +76,8 @@ public class MainActivity extends Activity {
     private RunCoordinator.Snapshot mSuppressedSnapshot;
     private RunCoordinator.Snapshot mReportedRequestFailureSnapshot;
     private boolean mDestroyed;
+    private long mDiagnosticSequence;
+    private String mCachedDiagnostic = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -342,19 +358,77 @@ public class MainActivity extends Activity {
         if (mDestroyed || availabilityView == null) {
             return;
         }
-        String diagnostic;
+        // Freeze the observation source and the config generation at dispatch time.
+        // A later observation can only win if its sequence is the newest and its
+        // generation still matches what is currently confirmed.
+        final long sequence = ++mDiagnosticSequence;
+        RunConfig confirmed = mConfiguration == null
+                ? null : mConfiguration.getConfirmedSnapshot();
+        final long generation = confirmed == null ? -1L : confirmed.getGeneration();
+        final AvailabilityEnvironmentFactory factory = sAvailabilityEnvironmentFactory;
+        final Context observationContext = mDeCtx;
+        availabilityView.setText(PENDING_DIAGNOSTIC_TEXT);
+
+        Runnable observation = () -> {
+            String diagnostic;
+            try {
+                RunPreflight.Result result = RunPreflight.check(
+                        factory.create(observationContext, confirmed));
+                diagnostic = result.isReady() ? "" : "Run unavailable: " + result.getReason();
+            } catch (RuntimeException e) {
+                // Unreadable observations are not proof of availability; never guess.
+                diagnostic = UNAVAILABLE_DIAGNOSTIC_TEXT;
+            }
+            final String computed = diagnostic;
+            try {
+                sDiagnosticMain.execute(() -> applyDiagnostic(sequence, generation, computed));
+            } catch (RuntimeException e) {
+                // A broken main-thread seam must not strand the view at
+                // "Checking availability..."; publish the fail-closed snapshot.
+                Log.w(TAG, "availability diagnostic main dispatch failed", e);
+                Runnable publish = () -> applyDiagnostic(
+                        sequence, generation, UNAVAILABLE_DIAGNOSTIC_TEXT);
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    publish.run();
+                } else {
+                    // The injected seam is unusable; fall back to the platform main executor.
+                    ConfigurationRepository.newMainExecutor().execute(publish);
+                }
+            }
+        };
         try {
-            RunConfig confirmed = mConfiguration == null
-                    ? null : mConfiguration.getConfirmedSnapshot();
-            RunPreflight.Result result = RunPreflight.check(
-                    sAvailabilityEnvironmentFactory.create(this, confirmed));
-            diagnostic = result.isReady() ? "" : "Run unavailable: " + result.getReason();
+            sDiagnosticWorker.execute(observation);
         } catch (RuntimeException e) {
-            // Unreadable observations are not proof of availability; never guess.
-            diagnostic = "Run unavailable: availability could not be determined"
-                    + " from read-only observations";
+            // A dispatch failure is an unreadable observation: fail closed on the UI thread.
+            applyDiagnostic(sequence, generation, UNAVAILABLE_DIAGNOSTIC_TEXT);
         }
+    }
+
+    /** Applies only the newest observation; stale generations/sequences never overwrite. */
+    private void applyDiagnostic(long sequence, long generation, String diagnostic) {
+        if (mDestroyed || availabilityView == null) {
+            return;
+        }
+        if (sequence != mDiagnosticSequence || generation != currentConfirmedGeneration()) {
+            return;
+        }
+        mCachedDiagnostic = diagnostic;
         availabilityView.setText(diagnostic);
+    }
+
+    private long currentConfirmedGeneration() {
+        RunConfig confirmed = mConfiguration == null
+                ? null : mConfiguration.getConfirmedSnapshot();
+        return confirmed == null ? -1L : confirmed.getGeneration();
+    }
+
+    private static Executor newDiagnosticWorker() {
+        ExecutorService worker = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "dfroot-availability");
+            thread.setDaemon(true);
+            return thread;
+        });
+        return worker;
     }
 
     /** Read-only Android observations; identical to the runner's environment source. */
@@ -375,8 +449,23 @@ public class MainActivity extends Activity {
         sAvailabilityEnvironmentFactory = MainActivity::androidAvailabilityEnvironment;
     }
 
+    /** Deterministic read-only diagnostic scheduling; no operation execution seam. */
+    static void installDiagnosticExecutorsForTesting(Executor worker, Executor main) {
+        sDiagnosticWorker = Objects.requireNonNull(worker, "worker");
+        sDiagnosticMain = Objects.requireNonNull(main, "main");
+    }
+
+    static void resetDiagnosticExecutorsForTesting() {
+        sDiagnosticWorker = DEFAULT_DIAGNOSTIC_WORKER;
+        sDiagnosticMain = DEFAULT_DIAGNOSTIC_MAIN;
+    }
+
     static TextView availabilityViewForTesting(MainActivity activity) {
         return activity.availabilityView;
+    }
+
+    static String cachedDiagnosticForTesting(MainActivity activity) {
+        return activity.mCachedDiagnostic;
     }
 
     private int managerPosition(String packageName) {

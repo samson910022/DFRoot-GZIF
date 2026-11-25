@@ -85,6 +85,10 @@ public class MainActivityTest {
         RunCoordinator.resetForTesting();
         MainActivity.resetResultToastForTesting();
         MainActivity.resetAvailabilityEnvironmentForTesting();
+        // Deterministic seam: the diagnostic runs inline on the test caller so
+        // existing synchronous assertions are unchanged; async behavior is
+        // covered separately with controlled executors.
+        MainActivity.installDiagnosticExecutorsForTesting(Runnable::run, Runnable::run);
         ShadowToast.reset();
         installManager(SuManager.CLASSIC.getPackageName());
         installManager(SuManager.NEXT.getPackageName());
@@ -112,6 +116,7 @@ public class MainActivityTest {
             assertTrue(worker.awaitTermination(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         }
         MainActivity.resetAvailabilityEnvironmentForTesting();
+        MainActivity.resetDiagnosticExecutorsForTesting();
         RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
@@ -295,6 +300,8 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
+        // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         serviceController.startCommand(0, 75);
         assertEquals(RunCoordinator.State.STARTING, coordinator.getSnapshot().getState());
         coordinatorWorker.runNext();
@@ -324,6 +331,8 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create();
         serviceControllers.add(serviceController);
+        // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         Shadows.shadowOf(serviceController.get()).setThrowInStartForeground(
                 new IllegalStateException("FGS denied by platform"));
         serviceController.withIntent(request).startCommand(0, 73);
@@ -353,6 +362,8 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
+        // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         serviceController.get().setWakeLockSourceForTesting(ignored -> {
             throw new IllegalStateException("PowerManager unavailable");
         });
@@ -671,12 +682,25 @@ public class MainActivityTest {
         File source = TestFixtures.repositoryRoot().resolve("app/src/main/java/df/root/MainActivity.java")
                 .toFile();
         String text = new String(Files.readAllBytes(source.toPath()), StandardCharsets.UTF_8);
-        for (String forbidden : new String[] {"Executor", "PowerManager", "WakeLock",
-                "ExploitRunner", "PreflightChecker", "RunLauncher", "shutdownNow", "mExec",
-                "implements IReporter"}) {
+        // The Activity owns only a READ-ONLY diagnostic scheduler, never an
+        // operation executor. Strip the scheduler imports and its single bounded
+        // worker helper before checking operation paths; the two scheduler fields
+        // are intentionally allowed. Every start still goes to the service.
+        String operationSource = text
+                .replace("import java.util.concurrent.Executors;", "")
+                .replace("import java.util.concurrent.ExecutorService;", "")
+                .replaceFirst(
+                        "private static Executor newDiagnosticWorker\\(\\) \\{[\\s\\S]*?\\n    \\}",
+                        "");
+        for (String forbidden : new String[] {"PowerManager", "WakeLock",
+                "ExploitRunner", "PreflightChecker", "RunLauncher", "shutdownNow",
+                "implements IReporter", "coordinator.submit", "submit(",
+                "newSingleThreadExecutor", "Executors."}) {
             assertFalse("Activity must not own execution through " + forbidden,
-                    text.contains(forbidden));
+                    operationSource.contains(forbidden));
         }
+        assertTrue(text.contains("sDiagnosticWorker"));
+        assertTrue(text.contains("sDiagnosticMain"));
         assertTrue(text.contains("ExploitService.ACTION_MANUAL"));
         assertTrue(text.contains("RunCoordinator"));
     }
@@ -843,6 +867,88 @@ public class MainActivityTest {
         String diagnostic = MainActivity.availabilityViewForTesting(activity).getText().toString();
         assertTrue(diagnostic, diagnostic.contains("availability could not be determined"));
         assertFalse(diagnostic, diagnostic.contains("SUCCESS"));
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+    }
+
+    @Test
+    public void availabilityDiagnosticRunsOffUiThreadWithBoundedPendingStateAndFailsClosed() throws Exception {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        installIdleCoordinator();
+        BlockingDiagnosticExecutor worker = new BlockingDiagnosticExecutor();
+        MainActivity.installDiagnosticExecutorsForTesting(worker, Runnable::run);
+        BlockingFactory factory = new BlockingFactory();
+        MainActivity.installAvailabilityEnvironmentForTesting(factory);
+
+        MainActivity activity = launch();
+
+        assertTrue("observation must start on the diagnostic worker",
+                factory.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        assertNotNull(factory.thread);
+        assertFalse("diagnostic ran on the caller", Thread.currentThread().equals(factory.thread));
+        TextView diagnosticView = MainActivity.availabilityViewForTesting(activity);
+        assertEquals("Checking availability...", diagnosticView.getText().toString());
+        assertTrue("pending diagnostic changed button eligibility",
+                activity.findViewById(R.id.btnRun).isEnabled());
+        assertNull("diagnostic started an operation",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertTrue("diagnostic wrote configuration", store.writes.isEmpty());
+
+        factory.release.countDown();
+        assertTrue(worker.finished.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+
+        String diagnostic = diagnosticView.getText().toString();
+        assertTrue(diagnostic, diagnostic.contains("availability could not be determined"));
+        assertFalse(diagnostic, diagnostic.contains("SUCCESS"));
+        assertEquals(diagnostic, MainActivity.cachedDiagnosticForTesting(activity));
+    }
+
+    @Test
+    public void staleAvailabilityDiagnosticCannotOverwriteCurrentConfig() {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        installIdleCoordinator();
+        ManualDiagnosticExecutor worker = new ManualDiagnosticExecutor();
+        MainActivity.installDiagnosticExecutorsForTesting(worker, Runnable::run);
+        long clickedGeneration = repository.getConfirmedSnapshot().getGeneration();
+
+        File nativeDir = assetFolder.getRoot();
+        FakeAvailabilityEnvironment stale = new FakeAvailabilityEnvironment(
+                SuManager.NEXT.getPackageName(), nativeDir.getAbsolutePath());
+        stale.ownerUser = false;
+        MainActivity.installAvailabilityEnvironmentForTesting((context, confirmed) -> stale);
+        MainActivity activity = launch();
+        assertTrue(worker.size() >= 1);
+        int observationsBeforeChange = worker.size();
+
+        FakeAvailabilityEnvironment current = new FakeAvailabilityEnvironment(
+                SuManager.NEXT.getPackageName(), nativeDir.getAbsolutePath());
+        current.firmware = new FirmwareGate.Inputs("dm2q", "SM-S9180",
+                "CP2A.260605.016", 37, "2026-10-05",
+                "samsung/dm2qzhx/dm3q:17/CP2A.260605.016/S9180ZHU8GZIF:user/release-keys",
+                "5.15.197-android13-8-34343818-abS9180ZHU8GZIF");
+        MainActivity.installAvailabilityEnvironmentForTesting((context, confirmed) -> current);
+        assertTrue(repository.setDisableModules(true));
+        configExecutor.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(clickedGeneration + 1, repository.getConfirmedSnapshot().getGeneration());
+        assertTrue("config change must dispatch a fresh observation",
+                worker.size() > observationsBeforeChange);
+
+        // Apply the newest generation first, then the stale one: the stale
+        // observation must not overwrite what the current config published.
+        worker.runLast();
+        TextView diagnosticView = MainActivity.availabilityViewForTesting(activity);
+        String currentDiagnostic = diagnosticView.getText().toString();
+        assertTrue(currentDiagnostic, currentDiagnostic.contains("unsupported firmware"));
+        assertFalse(currentDiagnostic, currentDiagnostic.contains("owner Android user"));
+
+        worker.runNext();
+        assertEquals(currentDiagnostic, diagnosticView.getText().toString());
+        assertEquals(currentDiagnostic, MainActivity.cachedDiagnosticForTesting(activity));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
         assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
                 .getNextStartedService());
     }
@@ -1078,6 +1184,8 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
+        // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         serviceController.startCommand(0, startId);
         return serviceController;
     }
@@ -1250,6 +1358,65 @@ public class MainActivityTest {
 
         void runNext() {
             commands.remove().run();
+        }
+    }
+
+    /** Runs observation work on a controlled off-caller thread. */
+    private static final class BlockingDiagnosticExecutor implements Executor {
+        final CountDownLatch finished = new CountDownLatch(1);
+
+        @Override
+        public void execute(Runnable command) {
+            Thread thread = new Thread(() -> {
+                try {
+                    command.run();
+                } finally {
+                    finished.countDown();
+                }
+            }, "test-availability");
+            thread.setDaemon(true);
+            thread.start();
+        }
+    }
+
+    /** Observation source that blocks so pending state can be observed deterministically. */
+    private static final class BlockingFactory implements MainActivity.AvailabilityEnvironmentFactory {
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        volatile Thread thread;
+
+        @Override
+        public RunPreflight.Environment create(Context context, RunConfig confirmed) {
+            thread = Thread.currentThread();
+            entered.countDown();
+            try {
+                assertTrue(release.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            throw new IllegalStateException("observation denied");
+        }
+    }
+
+    /** Holds diagnostic observations so newest-first completion can be forced. */
+    private static final class ManualDiagnosticExecutor implements Executor {
+        private final java.util.Deque<Runnable> commands = new ArrayDeque<>();
+
+        @Override
+        public void execute(Runnable command) {
+            commands.add(command);
+        }
+
+        int size() {
+            return commands.size();
+        }
+
+        void runNext() {
+            commands.removeFirst().run();
+        }
+
+        void runLast() {
+            commands.removeLast().run();
         }
     }
 
