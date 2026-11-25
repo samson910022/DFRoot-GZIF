@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): every unverified outcome holds the barrier; only confirmed codes clear it. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin post-process-death-only persisted recovery and checked clears. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin honest unverified causes and no clear/admission from unconfirmed results. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): prove an OFF transition during a blocked publish yields a proven pre-effect precheck failure. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -485,6 +486,64 @@ public class RunCoordinatorAttemptTest {
         assertNull(store.load());
     }
 
+    /**
+     * The final gate passed before publish, then the owner turned Start at Boot
+     * OFF while the harmless durable commit was blocked. A delayed worker must
+     * never reach the engine: the pre-engine recheck turns this into a proven
+     * pre-effect rejection whose checked clear is allowed.
+     */
+    @Test
+    public void offDuringBlockedPublishNeverStartsEngineAndClearsBarrierAsPreEffect()
+            throws Exception {
+        BlockingPublishStore blockingStore = new BlockingPublishStore();
+        MutableAuthorization authorization = new MutableAuthorization(true);
+        QueueExecutor queuedWorker = new QueueExecutor();
+        RunCoordinator coordinator = new RunCoordinator(repository, queuedWorker, Runnable::run,
+                engine, 0L, blockingStore, reader, Runnable::run, authorization);
+        coordinator.initialize();
+        engine.results.add(NativeResultMapper.map(0));
+        FakeLease lease = new FakeLease();
+
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try {
+            Future<RunCoordinator.Submission> submitted = caller.submit(() -> coordinator.submit(
+                    context(), RunConfig.ExecutionMode.UNATTENDED_BOOT, lease));
+            assertTrue(blockingStore.publishEntered.await(5L, TimeUnit.SECONDS));
+            authorization.enabled = false;
+            blockingStore.releasePublish.countDown();
+            assertTrue(submitted.get(5L, TimeUnit.SECONDS).isAccepted());
+
+            // Delayed worker queue: the engine must not run at all.
+            queuedWorker.runAll();
+
+            RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+            assertEquals(RunCoordinator.State.TERMINAL, terminal.getState());
+            assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+            assertEquals(RunCoordinator.UNATTENDED_AUTH_CHANGED, terminal.getReason());
+            assertEquals(0, engine.calls.get());
+            assertEquals("proven pre-effect clear must run once", 1, blockingStore.clearCalls);
+            assertNull(blockingStore.load());
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(repository.isFrozen());
+            assertEquals("no automatic replay", 0, queuedWorker.size());
+
+            // Only a NEW explicit submission may start work after re-authorization.
+            authorization.enabled = true;
+            engine.results.add(NativeResultMapper.map(0));
+            FakeLease second = new FakeLease();
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    second).isAccepted());
+            queuedWorker.runAll();
+            assertEquals(1, second.closeCount.get());
+            assertEquals("explicit second submission is the only engine call",
+                    1, engine.calls.get());
+        } finally {
+            blockingStore.releasePublish.countDown();
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(5L, TimeUnit.SECONDS));
+        }
+    }
+
     @Test
     public void initializeDispatchRejectionFailsClosedWithoutEngineCall() throws Exception {
         RunCoordinator coordinator = new RunCoordinator(repository, Runnable::run, Runnable::run,
@@ -797,6 +856,50 @@ public class RunCoordinatorAttemptTest {
             while ((task = tasks.pollFirst()) != null) {
                 task.run();
             }
+        }
+    }
+
+    /** Mutable, harmless authorization seam for OFF-transition tests. */
+    static final class MutableAuthorization implements RunCoordinator.UnattendedAuthorization {
+        volatile boolean enabled;
+
+        MutableAuthorization(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        @Override
+        public boolean isUnattendedEnabled() {
+            return enabled;
+        }
+    }
+
+    /** Harmless in-memory store whose checked publish can be blocked with latches. */
+    private static final class BlockingPublishStore implements OperationAttemptStore {
+        private final OperationAttemptStore delegate = OperationAttemptStore.inMemory();
+        final CountDownLatch publishEntered = new CountDownLatch(1);
+        final CountDownLatch releasePublish = new CountDownLatch(1);
+        int clearCalls;
+
+        @Override
+        public OperationAttempt load() throws Failure {
+            return delegate.load();
+        }
+
+        @Override
+        public boolean publish(OperationAttempt attempt) throws Failure {
+            publishEntered.countDown();
+            try {
+                releasePublish.await(5L, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return delegate.publish(attempt);
+        }
+
+        @Override
+        public boolean clear(String operationId) throws Failure {
+            clearCalls++;
+            return delegate.clear(operationId);
         }
     }
 

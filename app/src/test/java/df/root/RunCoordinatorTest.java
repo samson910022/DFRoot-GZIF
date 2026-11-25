@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): prove an Error from lease close cannot strand cleanup or later submits. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove native rc7 keeps ownership until an explicit recovery. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin recovery to real engine completion and single-claim concurrency. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin the final unattended gate, fail-closed reads, production wiring, and no revocation after engine start. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -15,7 +16,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.os.Looper;
 
 import org.junit.After;
@@ -1123,6 +1126,134 @@ public class RunCoordinatorTest {
         RunCoordinator.resetForTesting();
     }
 
+    @Test
+    public void unattendedFinalGateRejectsWithoutPublishEngineOrLeaseAndPublishesFreshReason()
+            throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        RunCoordinator coordinator = gatedCoordinator(store, () -> false);
+        RunCoordinator.Snapshot idle = coordinator.getSnapshot();
+        FakeLease lease = new FakeLease();
+
+        RunCoordinator.Submission rejected = coordinator.submit(context(),
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, lease);
+
+        assertFalse(rejected.isAccepted());
+        assertNotNull(rejected.getReason());
+        assertTrue(rejected.getReason().contains("unattended admission suppressed"));
+        assertNull("final-gate rejection must not publish a durable attempt", store.load());
+        assertEquals(0, engine.callCount());
+        assertEquals("coordinator must not own (or close) the rejected lease",
+                0, lease.closeCount.get());
+        assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+        assertNotSame(idle, coordinator.getSnapshot());
+        assertEquals(rejected.getReason(), coordinator.getSnapshot().getRequestFailure());
+    }
+
+    @Test
+    public void unattendedFinalGateFailsClosedWhenAuthorizationIsUnreadable() throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        RunCoordinator.UnattendedAuthorization unreadable = () -> {
+            throw new IllegalStateException("component state unavailable");
+        };
+        RunCoordinator coordinator = gatedCoordinator(store, unreadable);
+        RunCoordinator.Snapshot idle = coordinator.getSnapshot();
+        FakeLease lease = new FakeLease();
+
+        RunCoordinator.Submission rejected = coordinator.submit(context(),
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, lease);
+
+        assertFalse(rejected.isAccepted());
+        assertTrue(rejected.getReason().contains("unattended admission suppressed"));
+        assertNull(store.load());
+        assertEquals(0, engine.callCount());
+        assertEquals(0, lease.closeCount.get());
+        assertNotSame(idle, coordinator.getSnapshot());
+        assertEquals(rejected.getReason(), coordinator.getSnapshot().getRequestFailure());
+    }
+
+    @Test
+    public void manualSubmissionIgnoresTheUnattendedGate() {
+        QueueExecutor queuedWorker = new QueueExecutor();
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), queuedWorker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, OperationAttemptStore.inMemory(),
+                () -> 7L, Runnable::run, () -> false);
+        coordinator.initialize();
+        engine.immediatePlan(NativeResultMapper.map(0));
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                lease).isAccepted());
+        assertEquals(1, queuedWorker.size());
+        queuedWorker.runAll();
+
+        assertEquals(RunCoordinator.State.TERMINAL, coordinator.getSnapshot().getState());
+        assertTrue(coordinator.getSnapshot().getResult().isSuccess());
+        assertEquals(1, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+    }
+
+    @Test
+    public void offAfterEngineStartDoesNotRevokeOwnershipOrCancelWork() throws Exception {
+        MutableAuthorization authorization = new MutableAuthorization(true);
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, OperationAttemptStore.inMemory(),
+                () -> 7L, Runnable::run, authorization);
+        coordinator.initialize();
+        FakeEngine.Plan plan = engine.blockingPlan();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                lease).isAccepted());
+        assertTrue(plan.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        authorization.enabled = false;
+
+        assertEquals(RunCoordinator.State.RUNNING, coordinator.getSnapshot().getState());
+        assertTrue(plan.call.admission.isActive());
+        assertEquals(0, lease.closeCount.get());
+        assertEquals("the one admitted engine call stays owned", 1, engine.callCount());
+
+        RunResult observed = NativeResultMapper.map(0);
+        plan.finish(observed);
+        awaitTerminal(coordinator);
+        assertSame(observed, coordinator.getSnapshot().getResult());
+        assertEquals(1, lease.closeCount.get());
+    }
+
+    @Test
+    public void productionGetWiresTheGateToTheRealComponentSetting() throws Exception {
+        Context context = context();
+        ComponentName component = new ComponentName(context, BootReceiver.class);
+        context.getPackageManager().setComponentEnabledSetting(component,
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);
+        try {
+            RunCoordinator production = RunCoordinator.get(context);
+            Field field = RunCoordinator.class.getDeclaredField("unattendedAuthorization");
+            field.setAccessible(true);
+            RunCoordinator.UnattendedAuthorization gate =
+                    (RunCoordinator.UnattendedAuthorization) field.get(production);
+
+            assertFalse("production gate must read the real Start at Boot component",
+                    gate.isUnattendedEnabled());
+            context.getPackageManager().setComponentEnabledSetting(component,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP);
+            assertTrue("production gate must observe an owner re-enabling the component",
+                    gate.isUnattendedEnabled());
+        } finally {
+            context.getPackageManager().setComponentEnabledSetting(component,
+                    PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP);
+            RunCoordinator.resetForTesting();
+        }
+    }
+
+    private RunCoordinator gatedCoordinator(OperationAttemptStore store,
+                                            RunCoordinator.UnattendedAuthorization authorization) {
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                authorization);
+        coordinator.initialize();
+        return coordinator;
+    }
+
     private RunCoordinator coordinator(ConfigurationRepository repository, Executor workerExecutor,
                                        Executor mainExecutor) {
         return new RunCoordinator(repository, workerExecutor, mainExecutor,
@@ -1192,6 +1323,20 @@ public class RunCoordinatorTest {
             terminal.countDown();
         }
         await(terminal);
+    }
+
+    /** Mutable, harmless authorization seam for OFF-transition tests. */
+    static final class MutableAuthorization implements RunCoordinator.UnattendedAuthorization {
+        volatile boolean enabled;
+
+        MutableAuthorization(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        @Override
+        public boolean isUnattendedEnabled() {
+            return enabled;
+        }
     }
 
     private static final class FakeEngine implements RunCoordinator.Engine {

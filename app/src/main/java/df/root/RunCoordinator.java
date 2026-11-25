@@ -10,6 +10,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): recovery needs proof the supervised engine call has actually finished. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): persisted-attempt recovery is a post-process-death, trusted-caller-only boundary. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): unverified diagnostics name only the observed cause; an unknown exit or exception never claims native rc=7. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): gate unattended admission immediately before the durable publish and re-check authorization before engine start. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -58,11 +59,28 @@ public final class RunCoordinator {
         void onRunChanged(Snapshot snapshot);
     }
 
+    /**
+     * Narrow, read-only authorization seam for unattended runs. Production reads
+     * the Start at Boot component setting; an unreadable/uncertain state must
+     * return {@code false} so unattended work fails closed. Manual consent never
+     * consults this gate.
+     */
+    interface UnattendedAuthorization {
+        boolean isUnattendedEnabled();
+    }
+
     static final int MAX_LOG_ENTRIES = 200;
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
     /** Short bounded wait so the first service request is not dropped during off-main init. */
     static final long INITIALIZATION_WAIT_MS = 500L;
+
+    /** Explicit, observable reason for a final-gate rejection (nothing was published). */
+    static final String UNATTENDED_AUTH_REJECT =
+            "unattended admission suppressed: Start at Boot authorization is OFF or unreadable";
+    /** Honest proven-pre-effect reason for a post-publish, pre-engine rejection. */
+    static final String UNATTENDED_AUTH_CHANGED =
+            "unattended authorization changed before engine start";
 
     /**
      * Honest, origin-aware diagnostic for an unconfirmed outcome. It names ONLY
@@ -116,6 +134,7 @@ public final class RunCoordinator {
     private final OperationAttemptStore attemptStore;
     private final BootCountReader bootCountReader;
     private final Executor initializationExecutor;
+    private final UnattendedAuthorization unattendedAuthorization;
     private final boolean ownsWorkerExecutor;
     private final boolean ownsInitializationExecutor;
     private final Object lock = new Object();
@@ -144,30 +163,44 @@ public final class RunCoordinator {
 
     /**
      * Safe test/default seam: no durable barrier exists and initialization is
-     * already complete. Production uses the explicit constructor below and a
-     * real {@link #initialize()} call before any admission.
+     * already complete. The authorization seam is permissive here only so
+     * existing pure-contract tests keep exercising explicit manual/boot paths;
+     * production wires the real component gate in {@link #get(Context)} and
+     * fails closed. Production never uses these constructors.
      */
     RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                    Executor mainExecutor, Engine engine, long initializationTimeoutMillis) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 OperationAttemptStore.inMemory(), () -> null, Runnable::run,
-                true, false, false);
+                () -> true, true, false, false);
     }
 
-    /** Explicit seam for deterministic initialization and process-restart tests. */
+    /** Explicit seam for deterministic initialization and process-restart tests; test-only permissive authorization. */
     RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                    Executor mainExecutor, Engine engine, long initializationTimeoutMillis,
                    OperationAttemptStore attemptStore, BootCountReader bootCountReader,
                    Executor initializationExecutor) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 attemptStore, bootCountReader, initializationExecutor,
-                false, false, false);
+                () -> true, false, false, false);
+    }
+
+    /** Authorization-aware seam for deterministic OFF-transition tests. */
+    RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
+                   Executor mainExecutor, Engine engine, long initializationTimeoutMillis,
+                   OperationAttemptStore attemptStore, BootCountReader bootCountReader,
+                   Executor initializationExecutor,
+                   UnattendedAuthorization unattendedAuthorization) {
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                attemptStore, bootCountReader, initializationExecutor,
+                unattendedAuthorization, false, false, false);
     }
 
     private RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                            Executor mainExecutor, Engine engine,
                            long initializationTimeoutMillis, OperationAttemptStore attemptStore,
                            BootCountReader bootCountReader, Executor initializationExecutor,
+                           UnattendedAuthorization unattendedAuthorization,
                            boolean preInitialized, boolean ownsWorkerExecutor,
                            boolean ownsInitializationExecutor) {
         if (initializationTimeoutMillis < 0) {
@@ -182,6 +215,8 @@ public final class RunCoordinator {
         this.bootCountReader = Objects.requireNonNull(bootCountReader, "bootCountReader");
         this.initializationExecutor = Objects.requireNonNull(initializationExecutor,
                 "initializationExecutor");
+        this.unattendedAuthorization = Objects.requireNonNull(unattendedAuthorization,
+                "unattendedAuthorization");
         this.ownsWorkerExecutor = ownsWorkerExecutor;
         this.ownsInitializationExecutor = ownsInitializationExecutor;
         this.initializationDone = preInitialized;
@@ -215,12 +250,23 @@ public final class RunCoordinator {
                 Context source = app != null ? app : context;
                 Context deContext = source.isDeviceProtectedStorage()
                         ? source : source.createDeviceProtectedStorageContext();
+                // The START component is enabled/disabled in the application
+                // context; the same read-only gate is used by the boot claim and
+                // service workers. Any failure is treated as OFF (fail closed).
+                UnattendedAuthorization authorization = () -> {
+                    try {
+                        return BootClaimCoordinator.BootComponentGate.PACKAGE_MANAGER.read(source)
+                                == BootClaimCoordinator.BootComponentGate.State.ENABLED;
+                    } catch (RuntimeException e) {
+                        return false;
+                    }
+                };
                 instance = new RunCoordinator(repository, worker,
                         ConfigurationRepository.newMainExecutor(), RunCoordinator::runProductionEngine,
                         INITIALIZATION_TIMEOUT_MS,
                         SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(deContext),
                         new BootCountReader.SettingsGlobal(source.getContentResolver()),
-                        attemptInitialization, false, true, true);
+                        attemptInitialization, authorization, false, true, true);
             }
             return instance;
         }
@@ -311,6 +357,31 @@ public final class RunCoordinator {
         return value != null && value > 0L ? value : 0L;
     }
 
+    /** Read-only authorization read; an unreadable gate is always OFF. */
+    private boolean unattendedAuthorized() {
+        try {
+            return unattendedAuthorization.isUnattendedEnabled();
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Authorization can be lost after the final submit check: during the attempt
+     * publish/configuration wait or while the worker is queued. This re-check is
+     * called under {@link #lock} so a proven pre-engine rejection cannot race
+     * {@code engineStarted}. Once the engine has started, ownership stays here —
+     * privileged work is never cancelled by an OFF toggle.
+     */
+    private boolean unattendedAuthorizationLostLocked(Operation operation) {
+        if (operation.mode != RunConfig.ExecutionMode.UNATTENDED_BOOT
+                || operation.engineStarted || operation.terminal
+                || !isCurrentLocked(operation)) {
+            return false;
+        }
+        return !unattendedAuthorized();
+    }
+
     private static String failureDetail(Exception failure) {
         String detail = failure.getMessage();
         Throwable cause = failure.getCause();
@@ -377,9 +448,11 @@ public final class RunCoordinator {
         }
 
         long bootCount = currentBootCount();
-        Operation operation;
+        Operation operation = null;
         OperationAttempt attempt;
-        Snapshot admitted;
+        Snapshot admitted = null;
+        Snapshot rejectedSnapshot = null;
+        String unauthorizedDetail = null;
         Context applicationContext = context.getApplicationContext();
         if (applicationContext == null) {
             applicationContext = context;
@@ -407,44 +480,67 @@ public final class RunCoordinator {
                         priorAttemptReason(persistedAttempt, bootCount));
             }
 
-            String id = UUID.randomUUID().toString();
-            attempt = new OperationAttempt(id, requestedMode, bootCount, true,
-                    "admitted " + requestedMode + " operation " + id);
-            boolean published;
-            try {
-                // Checked, durable barrier: it exists before the engine can
-                // publish run_config or start privileged work.
-                published = attemptStore.publish(attempt);
-            } catch (OperationAttemptStore.Failure e) {
-                return Submission.rejected(operationId, "attempt store publish failed: " + e);
+            // FINAL authorization gate: checked under the SAME lock that
+            // publishes the durable attempt, immediately before that publish.
+            // Manual consent is never gated. OFF or an unreadable/throwing gate
+            // means NO publish, NO engine, NO lease owned by the coordinator.
+            if (requestedMode == RunConfig.ExecutionMode.UNATTENDED_BOOT
+                    && !unattendedAuthorized()) {
+                unauthorizedDetail = UNATTENDED_AUTH_REJECT;
+                // Publish the fresh rejection snapshot under the SAME lock as
+                // the authorization decision; noteRequestRejected() below only
+                // notifies observers, so a new submit cannot interleave here.
+                requestFailure = unauthorizedDetail;
+                rejectedSnapshot = buildSnapshotLocked();
+                snapshot = rejectedSnapshot;
             }
-            if (!published) {
-                return Submission.rejected(operationId,
-                        "attempt store refused admission: another unconfirmed operation is pending");
-            }
+            if (unauthorizedDetail == null) {
+                String id = UUID.randomUUID().toString();
+                attempt = new OperationAttempt(id, requestedMode, bootCount, true,
+                        "admitted " + requestedMode + " operation " + id);
+                boolean published;
+                try {
+                    // Checked, durable barrier: it exists before the engine can
+                    // publish run_config or start privileged work.
+                    published = attemptStore.publish(attempt);
+                } catch (OperationAttemptStore.Failure e) {
+                    return Submission.rejected(operationId, "attempt store publish failed: " + e);
+                }
+                if (!published) {
+                    return Submission.rejected(operationId,
+                            "attempt store refused admission: another unconfirmed operation is pending");
+                }
 
-            operation = new Operation(id, requestedMode, lease, operationContext,
-                    expectedGeneration);
-            persistedAttempt = attempt;
-            attemptPublishedInThisProcess = true;
-            activeOperation = operation;
-            operationId = operation.id;
-            mode = requestedMode;
-            configGeneration = -1L;
-            result = null;
-            reason = null;
-            requestFailure = null;
-            state = State.STARTING;
-            log.clear();
-            logCharacters = 0L;
-            appendLogLocked("admitted " + mode + " operation " + operationId);
-            admitted = buildSnapshotLocked();
-            snapshot = admitted;
+                operation = new Operation(id, requestedMode, lease, operationContext,
+                        expectedGeneration);
+                persistedAttempt = attempt;
+                attemptPublishedInThisProcess = true;
+                activeOperation = operation;
+                operationId = operation.id;
+                mode = requestedMode;
+                configGeneration = -1L;
+                result = null;
+                reason = null;
+                requestFailure = null;
+                state = State.STARTING;
+                log.clear();
+                logCharacters = 0L;
+                appendLogLocked("admitted " + mode + " operation " + operationId);
+                admitted = buildSnapshotLocked();
+                snapshot = admitted;
+            }
+        }
+        if (unauthorizedDetail != null) {
+            // Fresh, observable rejection with an explicit reason. The caller
+            // keeps its own lease; no barrier and no worker were created.
+            notifyListeners(rejectedSnapshot);
+            return Submission.rejected(null, unauthorizedDetail);
         }
         notifyListeners(admitted);
 
+        final Operation acceptedOperation = operation;
         try {
-            workerExecutor.execute(() -> start(operation));
+            workerExecutor.execute(() -> start(acceptedOperation));
         } catch (RuntimeException e) {
             // Dispatch itself failed: the engine was never started, so this is
             // a proven PRE-EFFECT failure. It is represented as an exception-
@@ -453,9 +549,9 @@ public final class RunCoordinator {
             // fail-closed until trusted recovery. Engine results and engine
             // exceptions are routed by complete().
             RunResult failure = RunResult.exception(e);
-            finish(operation, failure, failure.getReason());
+            finish(acceptedOperation, failure, failure.getReason());
         }
-        return Submission.accepted(operation.id);
+        return Submission.accepted(acceptedOperation.id);
     }
 
     /** Latest immutable state; previously returned snapshots never change. */
@@ -494,6 +590,20 @@ public final class RunCoordinator {
 
     private void start(Operation operation) {
         try {
+            // Post-publish, pre-engine recheck. OFF can be set after submit()
+            // published the barrier: during the configuration wait or while this
+            // worker was queued. No privileged work has started yet, so this is
+            // a proven pre-effect rejection and the checked clear is allowed.
+            boolean authorizationLost;
+            synchronized (lock) {
+                authorizationLost = unattendedAuthorizationLostLocked(operation);
+            }
+            if (authorizationLost) {
+                finish(operation, RunResult.precheckFailed(UNATTENDED_AUTH_CHANGED),
+                        UNATTENDED_AUTH_CHANGED);
+                return;
+            }
+
             ConfigurationRepository.State initialized = repository.awaitInitialization(
                     initializationTimeoutMillis);
             if (initialized != ConfigurationRepository.State.VERIFIED) {
@@ -554,8 +664,22 @@ public final class RunCoordinator {
                 }
             };
             IReporter reporter = message -> appendOperationLog(operation, message);
+            boolean authLostBeforeEngine;
             synchronized (lock) {
-                operation.engineStarted = true;
+                // Second, atomic recheck: the gate read and engineStarted share
+                // the same lock, so an OFF toggle cannot slip between the read
+                // and engine.run(). An already-started engine keeps ownership.
+                authLostBeforeEngine = unattendedAuthorizationLostLocked(operation);
+                if (!authLostBeforeEngine) {
+                    operation.engineStarted = true;
+                }
+            }
+            if (authLostBeforeEngine) {
+                // engine.run() was never called; finish() clears the durable
+                // attempt as a proven pre-effect rejection.
+                finish(operation, RunResult.precheckFailed(UNATTENDED_AUTH_CHANGED),
+                        UNATTENDED_AUTH_CHANGED);
+                return;
             }
             RunResult completed;
             try {
