@@ -340,6 +340,21 @@ jobs:
             echo "Checksum filename does not match the release APK" >&2
             exit 1
           fi
+          mapfile -t checksum_lines < "dist/$checksum"
+          if [[ ${#checksum_lines[@]} -ne 1 ]]; then
+            echo "Expected exactly one checksum line for the release APK" >&2
+            exit 1
+          fi
+          line=${checksum_lines[0]}
+          if [[ ! $line =~ ^([0-9a-f]{64})('  '|' *')(.+)$ ]]; then
+            echo "Malformed checksum line for the release APK" >&2
+            exit 1
+          fi
+          manifest_name=${BASH_REMATCH[3]}
+          if [[ $manifest_name != "$apk" ]]; then
+            echo "Checksum manifest filename does not match the release APK" >&2
+            exit 1
+          fi
           (
             cd dist
             sha256sum --check "$checksum"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -125,6 +126,46 @@ PACKAGE_SIGNED_SCRIPT = (
 )
 CLEANUP_SCRIPT = (
     "rm -f -- signing.properties keystore.jks .keystore.jks-*.tmp .signing.properties-*.tmp"
+)
+# Exact, full run-script contract for the publisher's checksum verification.
+# Equality (not a substring check) locks the manifest binding: the single line
+# must be well formed, carry a lowercase digest with either the text `  ` or
+# binary ` *` separator, and name exactly the selected release APK.  Digits are
+# still checked against the APK bytes by `sha256sum --check` at the end.
+VERIFY_CHECKSUM_SCRIPT = (
+    "set -euo pipefail\n"
+    "shopt -s nullglob\n"
+    "checksums=(dist/DFRoot_*.apk.sha256)\n"
+    "apks=(dist/DFRoot_*.apk)\n"
+    "if [[ ${#checksums[@]} -ne 1 || ${#apks[@]} -ne 1 ]]; then\n"
+    '  echo "Expected exactly one release APK and checksum" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    "checksum=${checksums[0]##*/}\n"
+    "apk=${apks[0]##*/}\n"
+    'if [[ $checksum != "$apk.sha256" ]]; then\n'
+    '  echo "Checksum filename does not match the release APK" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    'mapfile -t checksum_lines < "dist/$checksum"\n'
+    "if [[ ${#checksum_lines[@]} -ne 1 ]]; then\n"
+    '  echo "Expected exactly one checksum line for the release APK" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    "line=${checksum_lines[0]}\n"
+    "if [[ ! $line =~ ^([0-9a-f]{64})('  '|' *')(.+)$ ]]; then\n"
+    '  echo "Malformed checksum line for the release APK" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    "manifest_name=${BASH_REMATCH[3]}\n"
+    'if [[ $manifest_name != "$apk" ]]; then\n'
+    '  echo "Checksum manifest filename does not match the release APK" >&2\n'
+    "  exit 1\n"
+    "fi\n"
+    "(\n"
+    "  cd dist\n"
+    '  sha256sum --check "$checksum"\n'
+    ")"
 )
 RELEASE_RUN_SCRIPTS: dict[str, str] = {
     ANCESTRY_STEP: ANCESTRY_SCRIPT,
@@ -649,7 +690,13 @@ def assert_exact_command_lines(text: str) -> None:
     package = active_script_lines(run_script(named_step(jobs["build-release"], "Package signed release APK")))
     if 'sha256sum -- "$apk" > "$apk.sha256"' not in package:
         raise AssertionError("missing exact active package sha256sum command line")
-    publisher = active_script_lines(run_script(named_step(jobs["publish"], "Verify release checksum")))
+    publisher_script = run_script(named_step(jobs["publish"], "Verify release checksum"))
+    if publisher_script != VERIFY_CHECKSUM_SCRIPT:
+        raise AssertionError(
+            f"publisher run script must be exactly {VERIFY_CHECKSUM_SCRIPT!r}, "
+            f"got {publisher_script!r}"
+        )
+    publisher = active_script_lines(publisher_script)
     if 'sha256sum --check "$checksum"' not in publisher:
         raise AssertionError("missing exact active publisher sha256sum command line")
     counter = active_script_lines(run_script(named_step(jobs["build-dfroot"], APK_COUNTER_COMMAND)))
@@ -1138,6 +1185,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(inputs.get("overwrite_files"), "true")
         self.assertEqual(inputs.get("files"), PUBLISH_FILES)
 
+    def test_publisher_checksum_script_is_exact(self) -> None:
+        """The full publisher script is equality-locked, binding line included."""
+        assert_exact_command_lines(self.raw)
+        publisher = run_script(named_step(self.jobs["publish"], "Verify release checksum"))
+        self.assertEqual(publisher, VERIFY_CHECKSUM_SCRIPT)
+        self.assertIn('sha256sum --check "$checksum"', active_script_lines(publisher))
+        for line in (
+            'mapfile -t checksum_lines < "dist/$checksum"',
+            'if [[ $manifest_name != "$apk" ]]; then',
+            "manifest_name=${BASH_REMATCH[3]}",
+        ):
+            with self.subTest(line=line):
+                self.assertIn(line, active_script_lines(publisher))
+
     def test_every_upload_fails_closed_and_overwrites(self) -> None:
         uploads = [step for job in self.jobs.values() for step in action_steps(job, "actions/upload-artifact")]
         self.assertEqual(len(uploads), 3)
@@ -1324,6 +1385,35 @@ class MutationDetectionTests(unittest.TestCase):
             assert_exact_command_lines(package)
         with self.assertRaises(AssertionError):
             assert_exact_command_lines(publisher)
+
+    def test_publisher_manifest_binding_mutations_are_detected(self) -> None:
+        """Every new R7 validation line is locked, not just the final digest check."""
+        cases = {
+            "manifest name check weakened": (
+                '          if [[ $manifest_name != "$apk" ]]; then\n',
+                '          if [[ -z $manifest_name ]]; then\n',
+            ),
+            "mapfile block removed": (
+                '          mapfile -t checksum_lines < "dist/$checksum"\n',
+                "",
+            ),
+            "line count check weakened": (
+                "          if [[ ${#checksum_lines[@]} -ne 1 ]]; then\n",
+                "          if [[ ${#checksum_lines[@]} -lt 1 ]]; then\n",
+            ),
+            "digest regex relaxed": (
+                "          if [[ ! $line =~ ^([0-9a-f]{64})('  '|' *')(.+)$ ]]; then\n",
+                "          if [[ ! $line =~ ^(.+)$ ]]; then\n",
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                self.assertNotEqual(mutated, self.raw)
+                with self.assertRaisesRegex(AssertionError, "publisher run script must be exactly"):
+                    assert_exact_command_lines(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
 
     def test_injected_diagnostic_dump_step_is_rejected(self) -> None:
         mutated = self.mutate(
@@ -1726,6 +1816,82 @@ class BehavioralScriptTests(unittest.TestCase):
             result = run_in_dir(self.publisher_script, root)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("FAILED", result.stdout + result.stderr)
+
+    def test_publisher_checksum_script_rejects_unrelated_file_entry(self) -> None:
+        """R7: a valid digest for an unrelated file must not verify the APK."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = write_dist(root, ["DFRoot_ok.apk"])
+            notice = dist / "NOTICE"
+            notice.write_bytes(b"unrelated notice payload\n")
+            notice_digest = hashlib.sha256(notice.read_bytes()).hexdigest()
+            (dist / "DFRoot_ok.apk.sha256").write_text(
+                f"{notice_digest}  NOTICE\n", encoding="utf-8"
+            )
+
+            result = run_in_dir(self.publisher_script, root)
+
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Checksum manifest filename does not match the release APK",
+                result.stderr,
+            )
+
+    def test_publisher_checksum_script_rejects_extra_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = write_dist(root, ["DFRoot_ok.apk"])
+            digest = hashlib.sha256((dist / "DFRoot_ok.apk").read_bytes()).hexdigest()
+            valid = f"{digest}  DFRoot_ok.apk\n"
+            cases = {
+                "second valid line": valid + f"{'b' * 64}  UNRELATED.txt\n",
+                "trailing blank line": valid + "\n",
+            }
+            for label, content in cases.items():
+                with self.subTest(fixture=label):
+                    (dist / "DFRoot_ok.apk.sha256").write_text(content, encoding="utf-8")
+                    result = run_in_dir(self.publisher_script, root)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("Expected exactly one checksum line", result.stderr)
+
+    def test_publisher_checksum_script_rejects_malformed_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dist = write_dist(root, ["DFRoot_ok.apk"])
+            digest = hashlib.sha256((dist / "DFRoot_ok.apk").read_bytes()).hexdigest()
+            malformed = "Malformed checksum line for the release APK"
+            mismatched = "Checksum manifest filename does not match the release APK"
+            cases = {
+                "non-hex digest": ("g" * 64 + "  DFRoot_ok.apk\n", malformed),
+                "uppercase digest": ("A" * 64 + "  DFRoot_ok.apk\n", malformed),
+                "missing separator": (digest + "DFRoot_ok.apk\n", malformed),
+                "path-prefixed name": (digest + "  dist/DFRoot_ok.apk\n", mismatched),
+                "trailing-space name": (digest + "  DFRoot_ok.apk \n", mismatched),
+            }
+            for label, (content, message) in cases.items():
+                with self.subTest(fixture=label):
+                    (dist / "DFRoot_ok.apk.sha256").write_text(content, encoding="utf-8")
+                    result = run_in_dir(self.publisher_script, root)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn(message, result.stderr)
+
+    def test_package_and_publisher_scripts_round_trip(self) -> None:
+        """The package script's text-mode manifest is accepted by the publisher."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_release_apks(root, ["DFRoot_roundtrip.apk"])
+            write_license_assets(root)
+
+            packaged = run_in_dir(self.package_script, root)
+            self.assertEqual(packaged.returncode, 0, packaged.stdout + packaged.stderr)
+
+            dist = root / "dist"
+            dist.mkdir()
+            for asset in (root / "release").iterdir():
+                shutil.copy2(asset, dist / asset.name)
+
+            result = run_in_dir(self.publisher_script, root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_verify_script_invokes_real_apksigner_and_propagates_failure(self) -> None:
         for label, exit_code, expected_rc in (("success", 0, 0), ("failure", 1, 1)):
