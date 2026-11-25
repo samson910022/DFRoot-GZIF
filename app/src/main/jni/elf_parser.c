@@ -284,9 +284,19 @@ static enum elf_parse_rc load_shdrs(int fd, const Elf64_Ehdr *h,
             printf("elf: unexpected SHT_NULL at shdr[%u]\n", i);
             return ELF_PARSE_INVALID;
         }
-        if (s->sh_addralign != 0 && (!is_pow2(s->sh_addralign) ||
-                                     (s->sh_offset % s->sh_addralign) != 0)) {
+        /* sh_addralign constrains sh_addr, not sh_offset: ELF only requires
+         * the virtual address to be congruent to 0 modulo the alignment.
+         * Real Android libc++.so has allocated sections whose file offset is
+         * not a multiple of their alignment, so never reject on sh_offset.
+         * Keep the power-of-two rule for every section, and check address
+         * alignment only where an address is defined (allocated sections). */
+        if (s->sh_addralign != 0 && !is_pow2(s->sh_addralign)) {
             printf("elf: shdr[%u] violates sh_addralign\n", i);
+            return ELF_PARSE_INVALID;
+        }
+        if (s->sh_addralign > 1 && s->sh_addr != 0 &&
+            (s->sh_addr % s->sh_addralign) != 0) {
+            printf("elf: shdr[%u] violates sh_addr alignment\n", i);
             return ELF_PARSE_INVALID;
         }
         if (s->sh_type == SHT_NOBITS) {

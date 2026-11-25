@@ -23,6 +23,8 @@ static const struct test_case cases[] = {
     { "valid-basic.elf",           16, ELF_PARSE_OK,          0x320, 0x340, 0 },
     /* A legit Android OS-specific section type must not be rejected. */
     { "valid-android-relr.elf",    16, ELF_PARSE_OK,          0x320, 0x340, 0 },
+    /* sh_offset need not be a multiple of sh_addralign; sh_addr must be. */
+    { "valid-misaligned-file-offset.elf", 16, ELF_PARSE_OK,   0x320, 0x340, 0 },
     { "valid-tail-unclaimed.elf",  16, ELF_PARSE_OK,          0x320, 0x340, 0 },
     /* Section headers are on another page: no global-EOF tail placement. */
     { "shdrs-other-page.elf",      16, ELF_PARSE_OK,          0x320, 0x340, 0x1000 },

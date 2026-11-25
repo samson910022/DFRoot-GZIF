@@ -264,6 +264,28 @@ def with_android_relr(base):
     return bytes(img)
 
 
+def with_misaligned_file_offset(base):
+    """Give shdr[6] (.data) a file offset that is not a multiple of its
+    sh_addralign while keeping its sh_addr aligned.
+
+    Device evidence: libc++.so on a clean S23 has sections such as shdr[28]
+    whose sh_offset is not a multiple of sh_addralign, which the old parser
+    rejected even though ELF only requires sh_addr alignment. Only sh_offset
+    and sh_size change: 0x444 % 8 == 4 (misaligned), while
+    sh_addr 0x200440 % 8 == 0 (aligned). The size is reduced from 0x10 to
+    0xC so the extent 0x444..0x450 stays inside the file and does not
+    overlap .shstrtab at 0x450. Every other field - including sh_addr,
+    sh_type, flags, link, info, entsize, name and the hook/payload bytes -
+    stays byte-identical to valid-basic.
+    """
+    img = bytearray(base)
+    shoff = struct.unpack_from("<Q", img, 40)[0]
+
+    struct.pack_into("<Q", img, shoff + 6 * SHDR_SIZE + 24, 0x444)  # sh_offset
+    struct.pack_into("<Q", img, shoff + 6 * SHDR_SIZE + 32, 0xC)    # sh_size
+    return bytes(img)
+
+
 def main():
     os.makedirs(HERE, exist_ok=True)
     base, _shnum, _shstrndx, _shoff, _size = build_base()
@@ -274,6 +296,9 @@ def main():
         # Same layout as valid-basic, but with an SHT_ANDROID_RELR section
         # (0x6fffff00 / decimal 1879047936) like the target device's libc++.so.
         "valid-android-relr.elf": with_android_relr(base),
+        # shdr[6] has a file offset that is not a multiple of sh_addralign,
+        # while its sh_addr remains aligned: must still parse as valid.
+        "valid-misaligned-file-offset.elf": with_misaligned_file_offset(base),
         # The exec segment end is unclaimed and on the exec page: exercises
         # the exec-segment-derived tail branch.
         "valid-exec-tail.elf": bytes(build_base(tail_free=True)[0]),
