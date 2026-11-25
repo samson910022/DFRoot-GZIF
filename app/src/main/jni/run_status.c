@@ -4,6 +4,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): publish rc7 before retraction, retry temp unlink, and chmod only fully written payloads. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map reader expiry to rc7 and expose the shared-budget remainder. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): scan the reserved pre-admission diagnostic and decide through a pure helper. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -259,7 +260,10 @@ static int parse_payload(char *payload, size_t length, char *operation_id_out, i
 
 static int read_marker(const char *path, char *operation_id_out, int *code_out)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* O_NONBLOCK keeps a malicious FIFO at a marker path from stalling the
+     * reader: the fstat() regular-file check below rejects it immediately.
+     * It has no effect on the regular marker files themselves. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         return -1;
     }
@@ -392,6 +396,83 @@ int run_status_classify(struct run_status_result *out)
         used += (size_t)written;
     }
     return 0;
+}
+
+/* Reserved-identity diagnostic scan. It deliberately does NOT reuse the
+ * general classification loop: only the exact final path for the reserved
+ * identity and rc=1 is read, and read_marker() already enforces a regular,
+ * O_NOFOLLOW final file plus a well-formed payload. Both the filename and the
+ * payload must name the reserved operation and carry rc=1, so a stale marker
+ * that merely borrows the identity, a marker for another code, a temp file,
+ * and any malformed or foreign payload are all ignored. */
+int run_status_pre_admission_failure(void)
+{
+    if (!status_configured) {
+        return 0;
+    }
+    char path[RUN_STATUS_PATH_MAX];
+    if (marker_path(path, sizeof(path), status_root, RUN_STATUS_PRE_ADMISSION_ID,
+                    RUN_STATUS_TERMINAL_ERROR) != 0) {
+        return 0;
+    }
+    char marker_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
+    int code = -1;
+    if (read_marker(path, marker_operation_id, &code) != 0
+        || strcmp(marker_operation_id, RUN_STATUS_PRE_ADMISSION_ID) != 0
+        || code != RUN_STATUS_TERMINAL_ERROR) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Pure decision step. No filesystem access, no configuration state, no
+ * mutation of the inputs; repeated calls with equal inputs give equal output.
+ * The admitted classifier result is the sole authority for terminal outcomes,
+ * so rc0 success and every other admitted terminal code survive a stale
+ * pre-admission diagnostic unchanged. Only the absence of ANY admitted
+ * terminal marker lets the diagnostic become an explicit indeterminate. */
+void run_status_decide(const struct run_status_result *admitted,
+                       int pre_admission_failure,
+                       struct run_status_decision *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->code = -1;
+
+    if (admitted == NULL) {
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "no admitted classification to decide");
+        return;
+    }
+
+    int admitted_code = run_status_exit_code(admitted);
+    if (admitted_code >= 0) {
+        /* TERMINAL or CONFLICT: both are terminal results for the admitted
+         * operation (CONFLICT maps to rc=1). Preserve its diagnostic. */
+        out->outcome = RUN_STATUS_OUTCOME_TERMINAL;
+        out->code = admitted_code;
+        snprintf(out->diagnostic, sizeof(out->diagnostic), "%s",
+                 admitted->diagnostic[0] != '\0'
+                 ? admitted->diagnostic
+                 : "terminal marker for admitted operation");
+        return;
+    }
+
+    if (pre_admission_failure) {
+        out->outcome = RUN_STATUS_OUTCOME_UNCONFIRMED;
+        out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "pre-admission failure; completion unverified");
+        return;
+    }
+
+    out->outcome = RUN_STATUS_OUTCOME_NONE;
+    snprintf(out->diagnostic, sizeof(out->diagnostic), "%s",
+             admitted->diagnostic[0] != '\0'
+             ? admitted->diagnostic
+             : "no terminal marker for admitted operation");
 }
 
 /* Fill the unpredictable part of a temp-file name from /dev/urandom. If the

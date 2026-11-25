@@ -9,6 +9,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): add the post-link rc7-before-retraction gated reader case. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a live fake child. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover reader rc7 timeout, shared late-load budget, and fork-failure mapping. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -229,6 +230,10 @@ foreach(status_case IN ITEMS
         deadline_composition
         shared_budget_wiring
         protocol_helpers
+        pre_admission_unconfirmed
+        pre_admission_terminal_wins
+        pre_admission_ignored_markers
+        pre_admission_decide_pure
         unconfigured)
     add_test(NAME run_status.${status_case}
              COMMAND run_status_test ${status_case} "${RUN_STATUS_TEST_ROOT}/${status_case}"

@@ -4,6 +4,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): distinguish writer exit rc7 from the reader rc7 channel and document the pre-link timeout path. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): reader expiry is rc7 and the late-load command/poll share one budget. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
@@ -66,6 +67,22 @@ struct run_status_result {
     char diagnostic[RUN_STATUS_DIAGNOSTIC_MAX];
 };
 
+/* Reader decision: the admitted operation's classification is authoritative.
+ * A reserved pre-admission diagnostic can only raise UNCONFIRMED when no
+ * terminal marker exists for the admitted operation; it is never a terminal
+ * result (and never a success) for that operation. */
+enum run_status_outcome {
+    RUN_STATUS_OUTCOME_NONE = 0,         /* no decision yet: keep polling */
+    RUN_STATUS_OUTCOME_TERMINAL = 1,     /* admitted marker (or conflict) won */
+    RUN_STATUS_OUTCOME_UNCONFIRMED = 2   /* pre-admission failure, no admitted marker */
+};
+
+struct run_status_decision {
+    enum run_status_outcome outcome;
+    int code;                       /* -1 for NONE; admitted code; rc7 if UNCONFIRMED */
+    char diagnostic[RUN_STATUS_DIAGNOSTIC_MAX];
+};
+
 /*
  * Bind the protocol to one admitted run. The operation ID is validated with
  * the shared run-config codec policy, so an unsafe ID can never reach a path
@@ -106,6 +123,29 @@ int run_status_publication_exit_code(int write_result, int intended_code);
  * even before the intended marker is retracted. Returns 0 when *out is filled,
  * -1 on internal error. */
 int run_status_classify(struct run_status_result *out);
+
+/* Narrowly scoped I/O scan of the RESERVED identity only. Returns 1 solely for
+ * a valid, final-path, regular-file, O_NOFOLLOW marker whose payload is a
+ * terminal rc=1 for RUN_STATUS_PRE_ADMISSION_ID itself. Foreign/stale/malformed
+ * markers and temp files return 0; this is a diagnostic channel, never a
+ * terminal result for the admitted operation. Requires configuration. */
+int run_status_pre_admission_failure(void);
+
+/* PURE decision helper: no I/O, no globals, no side effects. Takes the
+ * admitted operation's classifier result as the only authoritative terminal
+ * source and the pre-admission scan flag as a separate diagnostic input.
+ *
+ *   TERMINAL / CONFLICT admitted result -> TERMINAL with the admitted code
+ *       (rc0 success included) and its diagnostic; a stale pre-admission
+ *       marker MUST NOT downgrade it.
+ *   NONE admitted result + pre-admission failure -> UNCONFIRMED, rc7, with an
+ *       explicit "pre-admission failure; completion unverified" diagnostic.
+ *   NONE admitted result without it -> NONE, code -1 (keep polling).
+ *
+ * The reserved rc=1 marker is never mapped to a terminal rc=1 here. */
+void run_status_decide(const struct run_status_result *admitted,
+                       int pre_admission_failure,
+                       struct run_status_decision *out);
 
 /* ---- Pure protocol helpers shared by bootstrap and exp (host-tested) ---- */
 

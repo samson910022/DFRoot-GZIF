@@ -4,6 +4,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): poll run-scoped terminal markers; /dev/dfm6 is progress only. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): iterate the shared progress table and bound the reader with the composed deadline. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map reader deadline expiry to rc7, never a definitive failure while children are alive. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -588,9 +589,17 @@ static int exploit(void) {
             rc = RUN_STATUS_TERMINAL_ERROR;
             goto done;
         }
-        if (result.verdict != RUN_STATUS_VERDICT_NONE) {
-            printf("%s\n", result.diagnostic);
-            rc = run_status_exit_code(&result);
+        /* A reserved pre-admission rc=1 marker is a diagnostic, not a terminal
+         * result for the admitted operation. Only look for it when the admitted
+         * classifier has found no terminal marker, then let the pure helper
+         * decide: an admitted terminal marker (rc0 success included) wins. */
+        int pre_admission_failure = result.verdict == RUN_STATUS_VERDICT_NONE
+                                    && run_status_pre_admission_failure();
+        struct run_status_decision decision;
+        run_status_decide(&result, pre_admission_failure, &decision);
+        if (decision.outcome != RUN_STATUS_OUTCOME_NONE) {
+            printf("%s\n", decision.diagnostic);
+            rc = decision.code;
             goto done;
         }
 

@@ -3,6 +3,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): assert atomic publication, no final path on failure, the rc=7 channel, and a gated concurrent reader. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link rc7-before-retraction window and verify a transient temp-unlink retry. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a harmless live fake child. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -149,6 +150,8 @@ static void expect_no_temp_files(void)
     closedir(directory);
 }
 
+static void expect_write_ok(int code);
+
 static struct run_status_result classify(void)
 {
     struct run_status_result result;
@@ -158,6 +161,43 @@ static struct run_status_result classify(void)
         exit(1);
     }
     return result;
+}
+
+/* Build a well-formed marker payload for an arbitrary identity and code. */
+static void make_test_payload(char *out, size_t capacity, const char *id, int code)
+{
+    if (snprintf(out, capacity,
+                 "DFROOT_TERMINAL 1\noperation_id=%s\ncode=%d\n", id, code) < 0
+        || strlen(out) >= capacity) {
+        die("test payload is too long");
+    }
+}
+
+static void write_named_marker(const char *name, const char *payload)
+{
+    make_path(marker_path, sizeof(marker_path), name);
+    write_text(marker_path, payload);
+}
+
+/* The bootstrap side of the protocol: no admitted snapshot, so only the
+ * reserved identity publishes the rc=1 diagnostic. */
+static void publish_pre_admission_failure(void)
+{
+    configure(RUN_STATUS_PRE_ADMISSION_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_ERROR);
+}
+
+/* Mirror the native reader loop: classify the admitted operation first, scan
+ * the reserved diagnostic only when no admitted marker exists, then decide. */
+static struct run_status_decision decide_from_reader(
+    const struct run_status_result *admitted)
+{
+    struct run_status_decision decision;
+    memset(&decision, 0xa5, sizeof(decision));
+    int pre = admitted->verdict == RUN_STATUS_VERDICT_NONE
+              && run_status_pre_admission_failure();
+    run_status_decide(admitted, pre, &decision);
+    return decision;
 }
 
 static void expect_terminal(int expected_code)
@@ -1144,6 +1184,296 @@ static void test_launch_failure_mapping(void)
     free(b);
 }
 
+/* End-to-end protocol case: bootstrap publishes its reserved rc=1 diagnostic
+ * before an admitted snapshot exists; a reader for a DIFFERENT operation ID
+ * must report explicit uncertainty (rc7), never rc1 or rc0. */
+static void test_pre_admission_unconfirmed(void)
+{
+    publish_pre_admission_failure();
+    if (!run_status_pre_admission_failure()) {
+        die("valid reserved pre-admission marker was not detected");
+    }
+    struct run_status_result reserved = classify();
+    if (reserved.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || reserved.code != RUN_STATUS_TERMINAL_ERROR) {
+        die("reserved diagnostic was not a valid marker for the reserved identity");
+    }
+
+    /* A different operation is now admitted: the reserved marker is foreign. */
+    configure(OUR_ID);
+    struct run_status_result admitted = classify();
+    if (admitted.verdict != RUN_STATUS_VERDICT_NONE
+        || run_status_exit_code(&admitted) != -1) {
+        die("reserved marker was accepted as a terminal result for the admitted operation");
+    }
+    struct run_status_decision decision = decide_from_reader(&admitted);
+    if (decision.outcome != RUN_STATUS_OUTCOME_UNCONFIRMED
+        || decision.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || strcmp(decision.diagnostic,
+                  "pre-admission failure; completion unverified") != 0) {
+        fprintf(stderr,
+                "pre-admission diagnostic did not yield explicit indeterminate: "
+                "outcome=%d code=%d diagnostic='%s'\n",
+                (int)decision.outcome, decision.code, decision.diagnostic);
+        exit(1);
+    }
+    if (decision.code == RUN_STATUS_TERMINAL_SUCCESS
+        || decision.code == RUN_STATUS_TERMINAL_ERROR) {
+        die("reserved rc=1 was mapped to a terminal current-operation code");
+    }
+
+    /* The pure helper alone, given the same flag, must produce the same result. */
+    struct run_status_decision direct;
+    run_status_decide(&admitted, 1, &direct);
+    if (direct.outcome != decision.outcome || direct.code != decision.code
+        || strcmp(direct.diagnostic, decision.diagnostic) != 0) {
+        die("pure decision differed from the reader path");
+    }
+
+    /* Cross-file wiring: exp must run the narrow scan, use the pure helper,
+     * and print its explicit diagnostic; the deadline path must stay rc7. */
+    if (source_dir == NULL) die("native source directory is required");
+    char *exp = read_native_source("exp.c");
+    char *e = normalize_whitespace(exp);
+    expect_contains(e, "run_status_pre_admission_failure()");
+    expect_contains(e, "run_status_decide(&result, pre_admission_failure, &decision)");
+    expect_contains(e, "printf(\"%s\\n\", decision.diagnostic)");
+    expect_contains(e, "rc = decision.code;");
+    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
+    free(exp);
+    free(e);
+}
+
+/* Any valid terminal marker for the admitted operation wins over the stale
+ * reserved diagnostic, including rc0 success and CONFLICT (rc1). */
+static void test_pre_admission_terminal_wins(void)
+{
+    /* Save the case root before any reset: reset_root() rewrites the global. */
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("case root path is too long");
+    }
+    const int codes[] = {
+        RUN_STATUS_TERMINAL_SUCCESS,
+        RUN_STATUS_TERMINAL_ERROR,
+        RUN_STATUS_TERMINAL_SOFT_REBOOT_OK,
+        RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL,
+        RUN_STATUS_TERMINAL_INDETERMINATE
+    };
+    for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+        reset_root(case_root);
+        publish_pre_admission_failure();
+        configure(OUR_ID);
+        expect_write_ok(codes[i]);
+
+        struct run_status_result admitted = classify();
+        if (admitted.verdict != RUN_STATUS_VERDICT_TERMINAL
+            || admitted.code != codes[i]) {
+            fprintf(stderr, "admitted rc=%d was not authoritative\n", codes[i]);
+            exit(1);
+        }
+        if (!run_status_pre_admission_failure()) {
+            die("the stale reserved diagnostic disappeared");
+        }
+        struct run_status_decision decision = decide_from_reader(&admitted);
+        if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
+            || decision.code != codes[i]
+            || strcmp(decision.diagnostic, admitted.diagnostic) != 0) {
+            fprintf(stderr,
+                    "stale pre-admission rc=1 downgraded admitted rc=%d: "
+                    "outcome=%d code=%d diagnostic='%s'\n",
+                    codes[i], (int)decision.outcome, decision.code,
+                    decision.diagnostic);
+            exit(1);
+        }
+    }
+
+    /* A conflict for the admitted operation is terminal rc=1 from the
+     * conflict itself, and must keep its conflict diagnostic. */
+    reset_root(case_root);
+    publish_pre_admission_failure();
+    configure(OUR_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
+    expect_write_ok(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    struct run_status_result admitted = classify();
+    if (admitted.verdict != RUN_STATUS_VERDICT_CONFLICT) {
+        die("admitted conflict fixture was not classified as a conflict");
+    }
+    struct run_status_decision decision = decide_from_reader(&admitted);
+    if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
+        || decision.code != RUN_STATUS_TERMINAL_ERROR
+        || strstr(decision.diagnostic, "conflicting") == NULL) {
+        die("stale pre-admission marker replaced an admitted conflict result");
+    }
+}
+
+/* Whatever the reserved identity's marker looks like, unless it is a valid
+ * final-path regular-file rc=1 payload for the reserved identity itself, it
+ * is ignored: no pre-admission flag, no non-NONE decision. */
+static void expect_pre_admission_ignored(void)
+{
+    configure(OUR_ID);
+    struct run_status_result admitted = classify();
+    if (admitted.verdict != RUN_STATUS_VERDICT_NONE) {
+        die("ignored fixture became a terminal marker for the admitted operation");
+    }
+    if (run_status_pre_admission_failure()) {
+        die("invalid reserved marker was accepted as a pre-admission failure");
+    }
+    struct run_status_decision decision = decide_from_reader(&admitted);
+    if (decision.outcome != RUN_STATUS_OUTCOME_NONE || decision.code != -1) {
+        fprintf(stderr, "ignored fixture produced a decision: outcome=%d code=%d\n",
+                (int)decision.outcome, decision.code);
+        exit(1);
+    }
+}
+
+static void test_pre_admission_ignored_markers(void)
+{
+    /* reset_root() rewrites the global root buffer, so keep a stable copy. */
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("case root path is too long");
+    }
+    const char *final_name = "dfroot_terminal_bootstrap-pre-admission_rc1";
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    char path[PATH_MAX];
+
+    /* Well-formed payload for the reserved identity, reused below. */
+    make_test_payload(payload, sizeof(payload), RUN_STATUS_PRE_ADMISSION_ID,
+                      RUN_STATUS_TERMINAL_ERROR);
+
+    reset_root(case_root);
+    write_named_marker(final_name, "not a terminal marker\n");
+    expect_pre_admission_ignored();
+
+    reset_root(case_root);
+    write_named_marker(final_name, "");
+    expect_pre_admission_ignored();
+
+    reset_root(case_root);
+    write_named_marker(final_name,
+                       "DFROOT_TERMINAL 1\noperation_id=bootstrap-pre-admission\ncode=0\n");
+    expect_pre_admission_ignored();
+
+    reset_root(case_root);
+    make_test_payload(payload, sizeof(payload), FOREIGN_ID,
+                      RUN_STATUS_TERMINAL_ERROR);
+    write_named_marker(final_name, payload);
+    expect_pre_admission_ignored();
+
+    reset_root(case_root);
+    make_test_payload(payload, sizeof(payload), RUN_STATUS_PRE_ADMISSION_ID,
+                      RUN_STATUS_TERMINAL_ERROR);
+    write_named_marker("dfroot_tmp_bootstrap-pre-admission_rc1_deadbeef", payload);
+    expect_pre_admission_ignored();
+
+    reset_root(case_root);
+    write_named_marker("dfroot_terminal_bootstrap-pre-admission-old_rc1", payload);
+    expect_pre_admission_ignored();
+
+    /* symlink at the exact final path: O_NOFOLLOW must reject it */
+    reset_root(case_root);
+    make_path(path, sizeof(path), "target");
+    write_text(path, payload);
+    make_path(path, sizeof(path), final_name);
+    if (symlink("target", path) != 0) die("pre-admission symlink fixture failed");
+    expect_pre_admission_ignored();
+
+    /* FIFO at the exact final path: non-regular, and must not block the reader */
+    reset_root(case_root);
+    make_path(path, sizeof(path), final_name);
+    if (mkfifo(path, 0600) != 0) die("pre-admission FIFO fixture failed");
+    expect_pre_admission_ignored();
+}
+
+/* Pure helper branch coverage: no fixtures, no filesystem state, no sleeps. */
+static void test_pre_admission_decide_pure(void)
+{
+    struct run_status_result admitted;
+    struct run_status_decision decision;
+    memset(&admitted, 0, sizeof(admitted));
+    admitted.verdict = RUN_STATUS_VERDICT_NONE;
+    admitted.code = -1;
+    snprintf(admitted.diagnostic, sizeof(admitted.diagnostic),
+             "no terminal marker for operation %s", OUR_ID);
+
+    run_status_decide(&admitted, 0, &decision);
+    if (decision.outcome != RUN_STATUS_OUTCOME_NONE || decision.code != -1
+        || decision.diagnostic[0] == '\0') {
+        die("NONE without a pre-admission diagnostic was not NONE");
+    }
+    struct run_status_decision repeat;
+    run_status_decide(&admitted, 0, &repeat);
+    if (repeat.outcome != decision.outcome || repeat.code != decision.code
+        || strcmp(repeat.diagnostic, decision.diagnostic) != 0) {
+        die("pure decision was not repeatable");
+    }
+
+    run_status_decide(&admitted, 1, &decision);
+    if (decision.outcome != RUN_STATUS_OUTCOME_UNCONFIRMED
+        || decision.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || strcmp(decision.diagnostic,
+                  "pre-admission failure; completion unverified") != 0) {
+        die("NONE with a pre-admission diagnostic was not explicit indeterminate");
+    }
+
+    /* Purity: changing the configured global identity cannot change a result
+     * computed from the same explicit inputs. */
+    configure(FOREIGN_ID);
+    struct run_status_decision unrelated;
+    run_status_decide(&admitted, 1, &unrelated);
+    if (unrelated.outcome != decision.outcome || unrelated.code != decision.code
+        || strcmp(unrelated.diagnostic, decision.diagnostic) != 0) {
+        die("pure decision depended on the configured identity");
+    }
+
+    const int codes[] = {
+        RUN_STATUS_TERMINAL_SUCCESS,
+        RUN_STATUS_TERMINAL_ERROR,
+        RUN_STATUS_TERMINAL_SOFT_REBOOT_OK,
+        RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL,
+        RUN_STATUS_TERMINAL_INDETERMINATE
+    };
+    for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+        admitted.verdict = RUN_STATUS_VERDICT_TERMINAL;
+        admitted.code = codes[i];
+        snprintf(admitted.diagnostic, sizeof(admitted.diagnostic),
+                 "terminal rc=%d for operation %s", codes[i], OUR_ID);
+        run_status_decide(&admitted, 1, &decision);
+        if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
+            || decision.code != codes[i]
+            || strcmp(decision.diagnostic, admitted.diagnostic) != 0) {
+            die("admitted terminal code lost to the pre-admission diagnostic");
+        }
+        run_status_decide(&admitted, 0, &repeat);
+        if (repeat.outcome != decision.outcome || repeat.code != decision.code
+            || strcmp(repeat.diagnostic, decision.diagnostic) != 0) {
+            die("pre-admission flag changed an admitted terminal decision");
+        }
+    }
+
+    admitted.verdict = RUN_STATUS_VERDICT_CONFLICT;
+    admitted.code = RUN_STATUS_TERMINAL_ERROR;
+    snprintf(admitted.diagnostic, sizeof(admitted.diagnostic),
+             "conflicting terminal markers for operation %s: rc=0 rc=6", OUR_ID);
+    run_status_decide(&admitted, 1, &decision);
+    if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
+        || decision.code != RUN_STATUS_TERMINAL_ERROR
+        || strcmp(decision.diagnostic, admitted.diagnostic) != 0) {
+        die("admitted conflict was not mapped to terminal rc=1");
+    }
+
+    run_status_decide(NULL, 1, &decision);
+    if (decision.outcome != RUN_STATUS_OUTCOME_NONE || decision.code != -1
+        || decision.diagnostic[0] == '\0') {
+        die("missing admitted classification was not handled safely");
+    }
+    run_status_decide(&admitted, 1, NULL);  /* NULL output must not crash */
+}
+
 static void run_case(const char *name)
 {
     if (!strcmp(name, "rc0")) {
@@ -1240,6 +1570,14 @@ static void run_case(const char *name)
         test_shared_late_load_budget();
     } else if (!strcmp(name, "launch_failure_mapping")) {
         test_launch_failure_mapping();
+    } else if (!strcmp(name, "pre_admission_unconfirmed")) {
+        test_pre_admission_unconfirmed();
+    } else if (!strcmp(name, "pre_admission_terminal_wins")) {
+        test_pre_admission_terminal_wins();
+    } else if (!strcmp(name, "pre_admission_ignored_markers")) {
+        test_pre_admission_ignored_markers();
+    } else if (!strcmp(name, "pre_admission_decide_pure")) {
+        test_pre_admission_decide_pure();
     } else if (!strcmp(name, "bounded_wait")) {
         test_bounded_wait();
     } else if (!strcmp(name, "deadline_composition")) {
