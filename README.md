@@ -284,6 +284,19 @@ uncertainty, never proof of admission. No operation is replayed, retried,
 cancelled or transferred, and the single-snapshot slot and identity guard are
 unchanged.
 
+### R5.2 note (2026-11-26) — synchronous start failure stays off the durable lock
+
+Short contract note (R5.9 consolidates): the Activity's synchronous
+`startForegroundService` exception catch calls only
+`noteRequestOutcomeAsync`, which writes the correlated `REJECTED` record under
+`outcomeLock` and posts snapshot publication to the outcome executor; it never
+takes the checked-storage `lock` on the UI caller. Host tests pin this with a
+harmless store that blocks `publish()` while a separate boot admission holds
+that monitor: the click returns with its honest reason already in the ledger,
+and publication happens off-caller after the store releases. Checked persistence,
+fail-closed admission, the durable barrier, single-flight and ownership are
+unchanged. No device, ADB, payload or APK work was performed.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`

@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): cover request-correlated acknowledgement, overlapping rejections and cancelled service-local work. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): drive the outcome-report executor explicitly in failure/cancellation tests. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): cover stopped-Activity outcome reconciliation from the bounded ledger without replay. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.2): pin the synchronous start-failure path to the lock-free ledger write with blocked checked storage and a throwing starter. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -17,6 +18,7 @@ import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
+import android.os.Looper;
 import android.view.View;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -49,6 +51,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +64,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 37)
@@ -533,6 +537,162 @@ public class MainActivityTest {
                 coordinator.getSnapshot().getRequestOutcome());
         assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
         assertTrue(output(activity).contains("Unable to start operation service"));
+    }
+
+    /**
+     * R2-18 / R5.2: the synchronous start-failure handler must write the bounded
+     * ledger under outcomeLock only and post observation work off the caller. A
+     * separate boot admission holds the checked-storage coordinator monitor for
+     * the whole click; no privileged payload or device state is involved.
+     */
+    @Test
+    public void synchronousStartFailureNeverTakesCheckedStorageMonitorOnUiCaller() throws Exception {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        BlockingPublishStore store = new BlockingPublishStore();
+        QueueExecutor outcomeQueue = new QueueExecutor();
+        installBlockingAttemptCoordinator(store, outcomeQueue);
+        // Observer callbacks arrive only via the posted publication, never from
+        // the click's synchronous ledger write.
+        List<String> observedThreads = Collections.synchronizedList(new ArrayList<>());
+        coordinator.addListener(snapshot -> observedThreads.add(
+                Thread.currentThread().getName() + "|" + snapshot.getRequestId()));
+        MainActivity activity = launch();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        CapturingFailingStarter starter =
+                new CapturingFailingStarter("service start denied while storage blocked");
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        Thread bootSubmitter = new Thread(() -> coordinator.submit(
+                RuntimeEnvironment.getApplication(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                new FakeLease(), "boot-holder"));
+        bootSubmitter.setDaemon(true);
+        bootSubmitter.start();
+        assertTrue("boot publish must hold the coordinator monitor",
+                store.publishEntered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+
+        CountDownLatch clickReturned = new CountDownLatch(1);
+        AtomicReference<Throwable> clickFailure = new AtomicReference<>();
+        Thread caller = new Thread(() -> {
+            try {
+                // The click needs a Looper for Robolectric's view animation;
+                // it is still a separate caller thread from the test/main one.
+                Looper.prepare();
+                activity.findViewById(R.id.btnRun).performClick();
+            } catch (Throwable t) {
+                clickFailure.set(t);
+            } finally {
+                if (Looper.myLooper() != null) {
+                    Looper.myLooper().quit();
+                }
+                clickReturned.countDown();
+            }
+        }, "r5-2-click-caller");
+        caller.setDaemon(true);
+        caller.start();
+        // Any direct noteRequestOutcome / submit / finish call on this caller
+        // would take the monitor held by bootSubmitter and miss this latch.
+        assertTrue("click handler blocked behind checked storage",
+                clickReturned.await(2L, TimeUnit.SECONDS));
+        assertNull(clickFailure.get());
+        caller.join(TEST_TIMEOUT_MS);
+        assertFalse("the click caller finished while storage was blocked", caller.isAlive());
+        assertEquals(1L, store.releasePublish.getCount()); // storage still blocked
+        assertEquals(1, starter.calls);
+        assertNotNull(starter.requestId);
+        assertNull("the failing starter started no service and admitted no operation",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+
+        RunCoordinator.RequestOutcomeRecord recorded =
+                coordinator.getRequestOutcome(starter.requestId);
+        assertNotNull("the correlated record existed before the click returned", recorded);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, recorded.getOutcome());
+        assertEquals("Unable to start operation service: "
+                + "service start denied while storage blocked", recorded.getReason());
+
+        store.releasePublish.countDown();
+        bootSubmitter.join(TEST_TIMEOUT_MS);
+        assertFalse("boot admission finished after the checked publish released",
+                bootSubmitter.isAlive());
+        OperationAttempt published = store.load();
+        assertNotNull(published);
+        assertEquals(RunConfig.ExecutionMode.UNATTENDED_BOOT, published.getMode());
+        assertTrue(published.isUnconfirmed());
+        assertEquals("the checked boot result is still authoritative",
+                RunCoordinator.RequestOutcome.ACCEPTED,
+                coordinator.getRequestOutcome("boot-holder").getOutcome());
+
+        // Let the harmless boot engine finish: the checked barrier is still
+        // cleared only on this real result, never by the failed UI click.
+        coordinatorWorker.runAll();
+        assertNull("the checked clear still follows the completed boot operation",
+                store.load());
+
+        outcomeQueue.runAll(); // noteRequestOutcome runs here, off the click caller
+        coordinatorObservers.runAll(); // ordinary observer delivery to the Activity
+        assertFalse("no correlated outcome was observed on the click caller",
+                observedThreads.contains("r5-2-click-caller|" + starter.requestId));
+        assertTrue("the posted publication was observed on the draining caller: "
+                        + observedThreads,
+                observedThreads.contains(Thread.currentThread().getName() + "|"
+                        + starter.requestId));
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("service start denied while storage blocked"));
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+    }
+
+    /** Two synchronous failures keep two distinct ledger records and both honest reasons. */
+    @Test
+    public void twoRapidSynchronousStartFailuresKeepDistinctCorrelatedLedgerRecords() {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        installIdleCoordinator();
+        MainActivity first = launch();
+        MainActivity second = launch();
+        assertTrue(first.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(second.findViewById(R.id.btnRun).isEnabled());
+        CapturingFailingStarter firstStarter =
+                new CapturingFailingStarter("first service start failure");
+        CapturingFailingStarter secondStarter =
+                new CapturingFailingStarter("second service start failure");
+        MainActivity.installServiceStarterForTesting(first, firstStarter);
+        MainActivity.installServiceStarterForTesting(second, secondStarter);
+
+        first.findViewById(R.id.btnRun).performClick();
+        second.findViewById(R.id.btnRun).performClick();
+
+        assertEquals(1, firstStarter.calls);
+        assertEquals(1, secondStarter.calls);
+        assertNotNull(firstStarter.requestId);
+        assertNotNull(secondStarter.requestId);
+        assertFalse("each click got its own request ID",
+                firstStarter.requestId.equals(secondStarter.requestId));
+        RunCoordinator.RequestOutcomeRecord firstRecord =
+                coordinator.getRequestOutcome(firstStarter.requestId);
+        RunCoordinator.RequestOutcomeRecord secondRecord =
+                coordinator.getRequestOutcome(secondStarter.requestId);
+        assertNotNull(firstRecord);
+        assertNotNull(secondRecord);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, firstRecord.getOutcome());
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, secondRecord.getOutcome());
+        assertEquals("Unable to start operation service: first service start failure",
+                firstRecord.getReason());
+        assertEquals("Unable to start operation service: second service start failure",
+                secondRecord.getReason());
+        assertTrue("distinct records have distinct sequence numbers",
+                firstRecord.getSequence() != secondRecord.getSequence());
+
+        coordinatorObservers.runAll();
+        assertTrue(output(first).contains("first service start failure"));
+        assertTrue(output(second).contains("second service start failure"));
+        assertFalse(output(first).contains("second service start failure"));
+        assertFalse(output(second).contains("first service start failure"));
+        assertFalse(ReflectionHelpers.getField(first, "mManualStartPending"));
+        assertFalse(ReflectionHelpers.getField(second, "mManualStartPending"));
+        assertTrue(first.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(second.findViewById(R.id.btnRun).isEnabled());
     }
 
     @Test
@@ -1444,6 +1604,19 @@ public class MainActivityTest {
         RunCoordinator.setInstanceForTesting(coordinator);
     }
 
+    /** Initializes a coordinator whose checked publish can be held deterministically. */
+    private void installBlockingAttemptCoordinator(OperationAttemptStore attemptStore,
+                                                   Executor outcomeExecutor) {
+        coordinatorWorker = new QueueExecutor();
+        coordinatorObservers = new QueueExecutor();
+        immediateEngine = new ImmediateEngine();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
+                immediateEngine, 0L, attemptStore, () -> 44L, Runnable::run, () -> true,
+                outcomeExecutor);
+        RunCoordinator.setInstanceForTesting(coordinator);
+        coordinator.initialize();
+    }
+
     private ServiceController<ExploitService> deliverServiceRequest(int startId) {
         Intent request = nextServiceRequest();
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
@@ -1541,6 +1714,54 @@ public class MainActivityTest {
         public void startManual(long expectedGeneration, String requestId) {
             calls++;
             throw new IllegalStateException("service start denied");
+        }
+    }
+
+    /** Captures the click-time correlation ID before throwing, harmlessly. */
+    private static final class CapturingFailingStarter implements MainActivity.ServiceStarter {
+        private final String message;
+        int calls;
+        String requestId;
+
+        CapturingFailingStarter(String message) {
+            this.message = message;
+        }
+
+        @Override
+        public void startManual(long expectedGeneration, String requestId) {
+            calls++;
+            this.requestId = requestId;
+            throw new IllegalStateException(message);
+        }
+    }
+
+    /** Blocks inside publish while the coordinator holds the durable lock. */
+    private static final class BlockingPublishStore implements OperationAttemptStore {
+        private final OperationAttemptStore delegate = OperationAttemptStore.inMemory();
+        final CountDownLatch publishEntered = new CountDownLatch(1);
+        final CountDownLatch releasePublish = new CountDownLatch(1);
+
+        @Override
+        public OperationAttempt load() throws Failure {
+            return delegate.load();
+        }
+
+        @Override
+        public boolean publish(OperationAttempt attempt) throws Failure {
+            publishEntered.countDown();
+            try {
+                assertTrue("blocked-store release latch timed out",
+                        releasePublish.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            return delegate.publish(attempt);
+        }
+
+        @Override
+        public boolean clear(String operationId) throws Failure {
+            return delegate.clear(operationId);
         }
     }
 

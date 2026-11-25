@@ -7,6 +7,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): prove request-correlated outcomes are fresh and never alter active operation ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the foreground owner-token denial at submit and before engine start, and no revocation after start. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): pin bounded outcome-ledger replay, lock isolation and best-effort async delivery. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.2): pin that the async ledger write is lock-free while the posted publication takes the durable lock off-caller. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -1537,6 +1538,74 @@ public class RunCoordinatorTest {
             probe.shutdownNow();
             submitter.join(TEST_TIMEOUT_MS);
         }
+    }
+
+    /**
+     * The inline part of noteRequestOutcomeAsync touches only outcomeLock; the
+     * posted noteRequestOutcome takes lock -> outcomeLock and therefore cannot
+     * publish until the checked store releases its monitor.
+     */
+    @Test
+    public void asyncOutcomeRecordIsLockFreeAndPublishesOffCallerAfterCheckedStorageReleases()
+            throws Exception {
+        BlockingPublishStore store = new BlockingPublishStore();
+        QueueExecutor outcomeExecutor = new QueueExecutor();
+        QueueExecutor observers = new QueueExecutor();
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), new QueueExecutor(),
+                observers, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                () -> true, outcomeExecutor);
+        coordinator.initialize();
+
+        Thread submitter = new Thread(() -> coordinator.submit(context(),
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, new FakeLease(), "boot-holder"));
+        submitter.setDaemon(true);
+        submitter.start();
+        assertTrue("boot publish must hold the durable lock",
+                store.publishEntered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+
+        // Inline: the ledger record exists and the snapshot is untouched even
+        // though the checked-store monitor is held by the boot submitter.
+        coordinator.noteRequestOutcomeAsync("ui-failure", RunCoordinator.RequestOutcome.REJECTED,
+                "Unable to start operation service: fake denial");
+        RunCoordinator.RequestOutcomeRecord recorded =
+                coordinator.getRequestOutcome("ui-failure");
+        assertNotNull(recorded);
+        assertEquals("Unable to start operation service: fake denial", recorded.getReason());
+        assertEquals(1, outcomeExecutor.size());
+        assertNull("no admission snapshot while the checked publish is blocked",
+                coordinator.getSnapshot().getRequestId());
+
+        // Posted: publication runs on another thread and blocks on the lock.
+        CountDownLatch publicationDone = new CountDownLatch(1);
+        Thread publisher = new Thread(() -> {
+            try {
+                outcomeExecutor.runAll();
+            } finally {
+                publicationDone.countDown();
+            }
+        }, "r5-2-outcome-publisher");
+        publisher.setDaemon(true);
+        publisher.start();
+        assertFalse("posted publication must wait for the checked-store monitor",
+                publicationDone.await(150L, TimeUnit.MILLISECONDS));
+        assertNull("no snapshot publication while storage is blocked",
+                coordinator.getSnapshot().getRequestId());
+
+        store.releasePublish.countDown();
+        assertTrue("publication completes once the checked publish returns",
+                publicationDone.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        publisher.join(TEST_TIMEOUT_MS);
+        submitter.join(TEST_TIMEOUT_MS);
+        assertEquals("ui-failure", coordinator.getSnapshot().getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED,
+                coordinator.getSnapshot().getRequestOutcome());
+        assertEquals("Unable to start operation service: fake denial",
+                coordinator.getSnapshot().getRequestFailure());
+        assertEquals("checked boot admission is still authoritative",
+                RunCoordinator.RequestOutcome.ACCEPTED,
+                coordinator.getRequestOutcome("boot-holder").getOutcome());
+        assertNotNull(store.load());
+        assertTrue(store.load().isUnconfirmed());
     }
 
     /** A rejected observer post leaves the record readable; duplicates do not add records. */

@@ -1,5 +1,19 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.2: synchronous start-failure stays off the storage lock (R2-18) — PR #2
+
+Short contract note (R5.9 consolidates): no production change was needed —
+`MainActivity`'s synchronous service-start catch already uses
+`noteRequestOutcomeAsync`, whose inline part writes the correlated `REJECTED`
+record under `outcomeLock` only and posts `noteRequestOutcome` (`lock ->
+outcomeLock`) to the outcome executor. Added deterministic host tests with a
+harmless blocked `OperationAttemptStore` and a throwing starter: the click
+returns while a separate boot admission holds the durable monitor, the ledger
+already carries the honest reason, no coordinator locking method ran on the
+click caller, checked boot persistence is respected after release, and two rapid
+failures keep two distinct correlated records. No device, ADB, payload or APK
+work was performed.
+
 ## 2026-11-26 — R5.1: replayable request-outcome ledger (R2-17) — PR #2
 
 Short contract note (R5.9 consolidates): a bounded 32-entry LRU
