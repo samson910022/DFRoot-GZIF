@@ -1,8 +1,75 @@
 # Changelog — DFRoot GZIF
 
-## Round-6 repair (2026-11-25) — authoritative for the current head (`d72838d`)
+## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; gate still OPEN
 
 This section is authoritative for the current head of
+`fix/native-exploit-robustness` (`2b59684`). Every earlier section, including
+round 6, is **historical** and describes earlier heads only. All evidence in
+this section is **host-only**; there was no device run, no tag and no release.
+
+### Root-owned staging contract and rebuilt loaders
+
+P1-08 was the `/data/local/tmp/.ksud-stage` trust gap: a `shell`-uid process
+could replace the staged daemon between the producer's `close()` and the
+loader's `rename()`. It is addressed at the **loader/source** layer, not by
+documentation or Java-side gating:
+
+- The Samsung-patched loaders were rebuilt from source on payloads branch
+  `fix/p1-08-root-owned-staging` (commit `891e897`) to consume a stage in the
+  root-owned `/data/adb` directory: `/data/adb/.ksud-stage`. The daemon validates
+  that stage **by fd** (owner, mode, non-empty content) before promoting it to
+  `/data/adb/ksud`. The old `/data/local/tmp/.ksud-stage` string is no longer
+  present in either rebuilt binary; both contain `/data/adb/.ksud-stage`.
+- DFRoot's producer side was changed accordingly at `2b59684` (bootstrap stages
+  into `/data/adb/.ksud-stage`, 0700, then execs it). That producer change by
+  itself is **not** proof the gate is closed: both halves must be re-reviewed
+  together and the full chain must be validated on a device.
+- Source-build evidence (host builds of the patched loaders): CI run
+  **45674540939** (classic pair, `android13-5.15`) and CI run **45674545588**
+  (Next generic, four KMIs). These runs attest the loader rebuilds only; they
+  are not device validation and not certification of this head.
+
+Rebuilt artifacts now bundled under `app/src/main/jniLibs/arm64-v8a/`:
+
+| Artifact | sha256 | size |
+|---|---|---|
+| `libksud.so` (classic pair daemon, v3.3.0 / code 32601, `android13-5.15`) | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` | 5,127,584 B |
+| `libksudnext.so` (Next generic daemon, four KMIs) | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` | 4,728,320 B |
+
+### Build-time loader gate
+
+A new fail-closed `verify_loader_hashes.cmake` pins **both** sha256 values and
+both exact sizes and is wired as an `ALL` CMake target, so every build checks
+the committed loader bytes. It rejects missing files, non-regular/symlinked
+paths, wrong sizes and wrong hashes with distinct fatal reasons, removes any
+prior verified manifest at entry, and writes a manifest only after both
+loaders pass. There is no skip option. The KO pins and KO gates are untouched.
+Host fixture suite `tests/cmake/loader_hash_test.cmake` covers 5 cases
+(reviewed pins pass, wrong hash, wrong size, missing file, reused output path).
+CMake host suites are now **23 / 25 / 3 / 3 / 6 / 5** cases (KO policy /
+packaged-KO / APK packaging / APK content / target graph / loader hash); the
+host-gates marker set stays **7/7** unchanged.
+
+### Disposition
+
+- **P1-08 remains OPEN — RELEASE GATE.** The root-owned staging contract is
+  implemented in both halves and built from reviewed source, but it is
+  **pending re-review and fresh on-device full-chain validation**. No device
+  run was performed for these binaries: do not consume or distribute unverified
+  privileged content and do not claim the gate is closed from host evidence.
+- run6 (classic, 2026-11-17) and run8 (Next, 2026-11-17) — and every earlier
+  CI run — are **historical**: they validated the previous loaders and earlier
+  implementations, never these rebuilt binaries or this head.
+- **Auto Soft Reboot and Start on Boot remain disabled by default and
+  unvalidated.** No tag was created and no release was published; this head is
+  not device-verified, not independently merge-ready and not release-ready.
+
+## Round-6 repair (2026-11-25) — historical (round-6 head `d72838d`)
+
+> **Historical section.** The round-8/P1-08 section above is authoritative for
+> the current head; this section describes the round-6 head only.
+
+This section was authoritative for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). **Every section below is
 historical**; its counts and dispositions describe earlier heads, not this
 one. All evidence here is **host-only**: no hardware run validates this head,

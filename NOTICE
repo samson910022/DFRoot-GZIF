@@ -23,8 +23,13 @@ Aggregated third-party components
 ----------------------------------
 
 This fork ships two prebuilt executables under
-`app/src/main/jniLibs/arm64-v8a/` (both byte-identical to artifacts committed
-in `samson910022/Root-My-Galaxy-Payloads-Next`):
+`app/src/main/jniLibs/arm64-v8a/`. They are **not** verbatim copies of the old
+payloads-repository artifacts: both were rebuilt from the P1-08-patched source
+on payloads branch `fix/p1-08-root-owned-staging` (commit `891e897`) to consume
+a root-owned stage at `/data/adb/.ksud-stage` (see CHANGELOG.md round 8). The
+rebuilds are host-build-attested (CI runs 45674540939 and 45674545588) but are
+**not** device-validated. Build-time sha256 + size pins are enforced by
+`app/src/main/jni/verify_loader_hashes.cmake`:
 
 1. `libksud.so` — KernelSU userspace loader ("ksud"), Samsung-patched build
    - Upstream:        https://github.com/tiann/KernelSU — tag v3.3.0
@@ -34,7 +39,8 @@ in `samson910022/Root-My-Galaxy-Payloads-Next`):
                        no `.text` writes)
    - Build recipe:    `kernelsu/README.md`, `kernelsu/REBUILD-dm3q-v3.3.0.md`
                       in that repository
-   - sha256:          aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940
+   - sha256:          731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4
+   - size:            5,127,584 bytes
    - Embedded module: `android13-5.15_kernelsu.ko` (KMI `android13-5.15`)
    - Log tag:         `KernelSU`
 
@@ -43,7 +49,8 @@ in `samson910022/Root-My-Galaxy-Payloads-Next`):
    - Patch:           `samson910022/Root-My-Galaxy-Payloads-Next` →
                       `kernelsu/patches/KernelSU-Next-v3.4.2-samsung-kdp-rkp-defex.patch`
    - Build recipe:    `kernelsu/README.md` in that repository
-   - sha256:          679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d
+   - sha256:          7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414
+   - size:            4,728,320 bytes
    - Embedded modules: `android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`,
                       `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`
                       (on GZIF, `android13-5.15` is used)
@@ -95,18 +102,21 @@ is available in
 (`kernelsu/`, `kernelsu/patches/`) together with the pinned upstream
 repositories listed above (tiann/KernelSU v3.3.0; KernelSU-Next/KernelSU-Next
 v3.4.2). The Samsung KDP/RKP/DEFEX/NO_PATCH_TEXT patches applied to those
-trees are the ones shipped in the payloads repository. The built loader
-binaries are unmodified from the artifacts committed there (sha256 above).
-DFRoot's own modifications vs upstream are listed in CHANGELOG.md and shown
-as per-file notices in the modified sources.
+trees are the ones shipped in the payloads repository. The bundled loader
+binaries are **rebuilt from those patched sources** on branch
+`fix/p1-08-root-owned-staging` (commit `891e897`), not verbatim copies of the
+older artifacts committed there; the exact bundled bytes are pinned by sha256
+and size above and by `verify_loader_hashes.cmake` at build time. DFRoot's own
+modifications vs upstream are listed in CHANGELOG.md and shown as per-file
+notices in the modified sources.
 
 Build-host paths
 ----------------
 
-`libksud.so` embeds a build-user cargo-registry path (`…/.cargo/registry/…`)
-from the machine that built it. The binary is otherwise unmodified from the
-repository artifact. Rebuild with `RUSTFLAGS="--remap-path-prefix=$HOME=/build"`
-to strip such paths in future refreshes.
+The rebuilt `libksud.so` may embed build-host cargo-registry paths from the
+machine that rebuilt it; it is no longer byte-identical to the old repository
+artifact. Rebuild with `RUSTFLAGS="--remap-path-prefix=$HOME=/build"` to strip
+such paths in future refreshes.
 
 LKM (`dfroot.ko`)
 -----------------
@@ -251,14 +261,17 @@ historical implementations or pre-rebase heads, not this head.
   UNVALIDATED; none of this is a substitute for on-device validation.
 - **Auto Soft Reboot / Start on Boot remain disabled by default and
   unvalidated** on S9180ZHU8GZIF.
-- **P1-08 release gate — still OPEN.** The bundled loaders hardcode
-  `/data/local/tmp/.ksud-stage`; race-at-creation is fixed, but a `shell`-uid
-  process could still swap the staged file before the loader renames it. This
-  cannot be closed without rebuilding the loaders and is a release gate.
-  Documenting the gate (or any Java-side gating) is not a fix; do not consume or
-  distribute unverified privileged content. Device timing and quiescence around
-  the privileged payload stay UNVALIDATED. See `CHANGELOG.md` round-6 for the
-  current disposition.
+- **P1-08 release gate — still OPEN.** Both bundled loaders were rebuilt from
+  the patched source to consume a root-owned stage at `/data/adb/.ksud-stage`
+  (validated by fd before promotion to `/data/adb/ksud`), and the DFRoot
+  producer at `2b59684` stages to that exact path. It is a **loader-side fix**,
+  not something DFRoot-side changes alone could close; documenting the gate or
+  adding Java-side gating is not a fix. The rebuilt binaries are pinned by
+  sha256 and size at build time, but P1-08 remains OPEN pending re-review and
+  fresh on-device full-chain validation. Do not consume or distribute
+  unverified privileged content; device timing and quiescence around the
+  privileged payload stay UNVALIDATED. run6/run8 and all earlier runs are
+  historical. See `CHANGELOG.md` round 8 for the current disposition.
 
 References
 ----------

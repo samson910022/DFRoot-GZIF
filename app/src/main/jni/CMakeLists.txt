@@ -191,6 +191,57 @@ add_custom_command(
 )
 add_custom_target(ko_sha256_check DEPENDS "${KO_VERIFY_STAMP}")
 
+# Bundled userspace loader gate (P1-08 rebuild integration). The two binaries
+# under jniLibs/arm64-v8a are staged and executed as root, so their exact bytes
+# are pinned by BOTH sha256 and size. These pins are independent of the KO pins
+# above; no KO pin or gate is changed here. There is deliberately no skip
+# option: verify_loader_hashes.cmake removes any previous verified manifest at
+# entry and writes one only after BOTH loaders pass, so a stale success can
+# never survive a failed re-check. The force target makes this run on EVERY
+# build (including when the binaries are unchanged).
+set(LOADER_KSUD_FILE "${JNI_DIR}/../jniLibs/arm64-v8a/libksud.so")
+set(LOADER_KSUDNEXT_FILE "${JNI_DIR}/../jniLibs/arm64-v8a/libksudnext.so")
+# Reviewed P1-08 rebuilds, from payloads branch fix/p1-08-root-owned-staging
+# (commit 891e897). CI evidence: classic pair run 45674540939, Next generic
+# run 45674545588. Adding/changing a pin requires a reviewed source rebuild and
+# documentation update -- never an automatic re-pin or a relaxed check.
+set(LOADER_KSUD_SHA256 "731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4")
+set(LOADER_KSUD_SIZE 5127584)
+set(LOADER_KSUDNEXT_SHA256 "7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414")
+set(LOADER_KSUDNEXT_SIZE 4728320)
+set(LOADER_VERIFY_SCRIPT "${JNI_DIR}/verify_loader_hashes.cmake")
+set(LOADER_VERIFY_STAMP "${CMAKE_CURRENT_BINARY_DIR}/loader-hashes.verified")
+set(LOADER_VERIFY_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/loader-hashes.manifest")
+set(LOADER_FORCE_FILE "${CMAKE_CURRENT_BINARY_DIR}/loader-hashes.verify.force")
+add_custom_target(loader_hashes_force
+    COMMAND "${CMAKE_COMMAND}" -E touch "${LOADER_FORCE_FILE}"
+    BYPRODUCTS "${LOADER_FORCE_FILE}"
+    COMMENT "Scheduling bundled loader SHA-256/size re-check"
+)
+add_custom_command(
+    OUTPUT "${LOADER_VERIFY_STAMP}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DLOADER_KSUD_FILE=${LOADER_KSUD_FILE}"
+            "-DLOADER_KSUDNEXT_FILE=${LOADER_KSUDNEXT_FILE}"
+            "-DLOADER_KSUD_SHA256=${LOADER_KSUD_SHA256}"
+            "-DLOADER_KSUD_SIZE=${LOADER_KSUD_SIZE}"
+            "-DLOADER_KSUDNEXT_SHA256=${LOADER_KSUDNEXT_SHA256}"
+            "-DLOADER_KSUDNEXT_SIZE=${LOADER_KSUDNEXT_SIZE}"
+            "-DLOADER_VERIFY_STAMP=${LOADER_VERIFY_STAMP}"
+            "-DLOADER_VERIFY_MANIFEST=${LOADER_VERIFY_MANIFEST}"
+            -P "${LOADER_VERIFY_SCRIPT}"
+    DEPENDS "${LOADER_VERIFY_SCRIPT}"
+            "${CMAKE_CURRENT_LIST_FILE}"   # re-verify if a pin is edited
+            "${LOADER_KSUD_FILE}"
+            "${LOADER_KSUDNEXT_FILE}"
+            "${LOADER_FORCE_FILE}"
+            loader_hashes_force           # target-level ordering: force runs first
+    BYPRODUCTS "${LOADER_VERIFY_MANIFEST}"
+    COMMENT "Verifying pinned bundled loader SHA-256 and sizes"
+    VERBATIM
+)
+add_custom_target(loader_hash_check ALL DEPENDS "${LOADER_VERIFY_STAMP}")
+
 # Informational build provenance. It records hashes of splicehelper (binary and
 # source), toolchain identity, git HEAD, build type and the KO gate outcome.
 # It is evidence, not an independent reproducible-build proof.
@@ -317,3 +368,7 @@ target_link_options(bootstrap PRIVATE -Wl,-z,max-page-size=16384)
 # the runtime-required bootstrap library. No cycle: bootstrap has no dependency
 # on the dfroot link or verification chain.
 add_dependencies(dfroot_packaged bootstrap)
+# Also traverse the loader gate when AGP builds the named packaging targets
+# instead of the default ALL target: no distributable libdfroot.so without a
+# successful loader hash/size verification.
+add_dependencies(dfroot_packaged loader_hash_check)

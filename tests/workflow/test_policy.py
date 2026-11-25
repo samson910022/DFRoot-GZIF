@@ -747,6 +747,9 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
         '# Harmless host content gate: libbootstrap.so must be staged at the\n'
         '# exact ABI path. Same step and same single marker (7/7 stays intact).\n'
         'cmake -P tests/cmake/apk_content_gate_test.cmake\n'
+        '# Harmless host gate for the bundled loader SHA-256/size pins. Same\n'
+        '# step and same single marker (7/7 stays intact); no loader is run.\n'
+        'cmake -P tests/cmake/loader_hash_test.cmake\n'
         'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'
     ),
     'Extract reviewed KO pins and sizes': (
@@ -898,7 +901,7 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '{\n'
         '  echo "## CI evidence artifact scope"\n'
         '  echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."\n'
-        '  echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
+        '  echo "Host suites (61 status, 23/25/3/3/6/5 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }
@@ -1650,8 +1653,8 @@ def assert_job_graph(text: str) -> None:
             raise AssertionError(f"{job_name} must keep its tag-only guard")
 
 
-def assert_five_cmake_suites(text: str) -> None:
-    """All five host CMake suites must run in host-gates, none in build-dfroot."""
+def assert_six_cmake_suites(text: str) -> None:
+    """All six host CMake suites must run in host-gates, none in build-dfroot."""
     jobs = job_blocks(strip_yaml_comments(text))
     host_scripts = "\n".join(run_script(step) for step in steps(jobs[HOST_GATES_JOB]))
     suites = set(re.findall(r"tests/cmake/[A-Za-z0-9_]+\.cmake", host_scripts))
@@ -1661,10 +1664,11 @@ def assert_five_cmake_suites(text: str) -> None:
         "tests/cmake/packaging_target_graph_test.cmake",
         "tests/cmake/apk_packaging_gate_test.cmake",
         "tests/cmake/apk_content_gate_test.cmake",
+        "tests/cmake/loader_hash_test.cmake",
     }
     if suites != expected:
         raise AssertionError(
-            f"host-gates must run exactly the five CMake suites {sorted(expected)!r}, "
+            f"host-gates must run exactly the six CMake suites {sorted(expected)!r}, "
             f"got {sorted(suites)!r}"
         )
     ci_scripts = "\n".join(run_script(step) for step in steps(jobs["build-dfroot"]))
@@ -1758,6 +1762,7 @@ def assert_pr3_gates(text: str) -> None:
     apk_host = run_script(named_step(host, APK_FIXTURE_TEST_STEP))
     for fragment in ("tests/cmake/apk_packaging_gate_test.cmake",
                      "tests/cmake/apk_content_gate_test.cmake",
+                     "tests/cmake/loader_hash_test.cmake",
                      'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'):
         if fragment not in apk_host:
             raise AssertionError(f"APK host step is missing {fragment!r}")
@@ -2006,7 +2011,7 @@ def validate_workflow(text: str) -> None:
     assert_exact_release_run_scripts(text)
     assert_exact_dfroot_run_scripts(text)
     assert_exact_host_gates_run_scripts(text)
-    assert_five_cmake_suites(text)
+    assert_six_cmake_suites(text)
     assert_pr3_gates(text)
     assert_required_steps_unskippable(text)
     assert_exact_command_lines(text)
@@ -2216,7 +2221,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_host_gates_carry_all_host_suites_and_the_checkout_sha_assertion(self) -> None:
         assert_exact_host_gates_run_scripts(self.raw)
-        assert_five_cmake_suites(self.raw)
+        assert_six_cmake_suites(self.raw)
         host = self.jobs[HOST_GATES_JOB]
         script = run_script(named_step(host, CHECKOUT_SHA_STEP))
         self.assertEqual(script, CHECKOUT_SHA_SCRIPT)

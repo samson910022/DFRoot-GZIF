@@ -190,6 +190,9 @@ jobs:
           # Harmless host content gate: libbootstrap.so must be staged at the
           # exact ABI path. Same step and same single marker (7/7 stays intact).
           cmake -P tests/cmake/apk_content_gate_test.cmake
+          # Harmless host gate for the bundled loader SHA-256/size pins. Same
+          # step and same single marker (7/7 stays intact); no loader is run.
+          cmake -P tests/cmake/loader_hash_test.cmake
           echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"
 
       # Pins/sizes are read from CMakeLists.txt so the standalone checks and
@@ -397,7 +400,7 @@ jobs:
           {
             echo "## CI evidence artifact scope"
             echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
-            echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
+            echo "Host suites (61 status, 23/25/3/3/6/5 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload DFRoot-CI evidence

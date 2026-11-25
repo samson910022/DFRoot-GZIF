@@ -17,7 +17,7 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`). It was
 hardware-validated on 2026-11-17 against the **historical** implementation only;
 the current head is host-tested and UNVALIDATED on device (boundary below).
 
-- **Validated 2026-11-17** (volatile, late-load root only):
+- **Validated 2026-11-17 (historical loaders only)** (volatile, late-load root only):
   - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
   - KernelSU-Next **3.4.2** Samsung-patched generic loader → full chain; `su -v` → `3.4.2:KernelSU` (run8, 17:53)
 - **Vanilla (unpatched) KernelSU / KernelSU-Next modules panic inside `init_module()` on this build** — do not substitute them. This fork bundles Samsung-patched loaders under `app/src/main/jniLibs/` (provenance + sha256: `NOTICE`).
@@ -47,8 +47,8 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
 > Host suites: **61** status + 13 proc-scan + 26 ELF + 16/14/10 device-version
-> cases, CMake **23/25/3/3/6** cases (KO policy / packaged-KO / APK packaging /
-> APK content / target graph), JVM **39 tests** (4/10/12/13 in LaunchGate /
+> cases, CMake **23/25/3/3/6/5** cases (KO policy / packaged-KO / APK packaging
+> / APK content / target graph / loader hash), JVM **39 tests** (4/10/12/13 in LaunchGate /
 > ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
 > **39/0/0/0** XML assertion, **7/7** host suite markers on every event and
 > **3/3** release markers (plus the nonempty gate index and single upload choke
@@ -77,11 +77,17 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > never used to accept `OFF`, and nothing auto-enables. Real UI lifecycle and
 > PackageManager behavior are UNVALIDATED. All host-proven only. Auto Soft
 > Reboot and Start on Boot remain disabled by default and unvalidated.
-> **P1-08 remains OPEN:** `/data/local/tmp/.ksud-stage` can be swapped by a
-> `shell`-uid process and needs a loader rebuild; documentation is not a fix
-> and unverified privileged content must not be consumed or distributed. See
-> `CHANGELOG.md` round-6 (2026-11-25) and `PORTING-GZIF.md` §19 for the
-> test/lifecycle/failure-path detail.
+> **P1-08 remains OPEN:** the previously bundled loaders consumed a
+> `shell`-writable `/data/local/tmp/.ksud-stage`. Both loaders have now been
+> rebuilt from the P1-08-patched source to consume a root-owned
+> `/data/adb/.ksud-stage` (fd-validated before promotion), and the producer at
+> `2b59684` stages to that exact path; the rebuilt bytes are pinned by sha256
+> and size at build time. This was a loader-side fix — DFRoot-side changes
+> alone could not close it. It remains **OPEN pending re-review and fresh
+> on-device full-chain validation**: documentation is not a fix and unverified
+> privileged content must not be consumed or distributed. run6/run8 are
+> historical and validate only the old loaders. See `CHANGELOG.md` round 8
+> (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into

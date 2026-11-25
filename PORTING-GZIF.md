@@ -15,8 +15,8 @@
 
 > [!WARNING]
 > **Current head is UNVALIDATED on device.** The current head of
-> `fix/native-exploit-robustness` (`d72838d`, round-6 repair, 2026-11-25,
-> rebased onto the merged PR #1 head) — single nonce-bound `/dev/dffinal`
+> `fix/native-exploit-robustness` (`2b59684`, round-8 P1-08 integration,
+> 2026-11-26, rebased onto the merged PR #1 head) — single nonce-bound `/dev/dffinal`
 > outcome, app-owned bootfail/recovery channels, write-ahead preference
 > transaction, lifecycle-safe listeners, persistent `UNKNOWN` boot-state UI,
 > KO hash policy, build provenance and packaging gates — is **host-tested
@@ -44,21 +44,48 @@
 > against the same pins (no skip option); a failed re-check removes the stale
 > verified copy. CI asserts 7/7 host suite markers on every event and a strict
 > JUnit XML assertion of **39 tests**, 0 failures/errors/skips, over 61 status
-> cases, CMake 23/25/3/3/6 cases and JVM 39 tests (4/10/12/13). `dfrecover` is
+> cases, CMake 23/25/3/3/6/5 cases (the sixth suite is the bundled-loader hash
+> gate) and JVM 39 tests (4/10/12/13). `dfrecover` is
 > bound to the current run nonce (a stale or foreign `ok` is rejected);
 > bootfail token syntax is not invocation proof, and absence of evidence is not
 > proof that system activity stopped. Deadline checks are host-proven ordering
 > only; device quiescence and verified restoration are UNVALIDATED. Auto Soft
-> Reboot and Start on Boot remain disabled by default and unvalidated; the
-> `/data/local/tmp/.ksud-stage` trust issue (P1-08) remains **OPEN** and
-> requires a loader rebuild. A successful build does not certify safe
-> privileged execution. See §19 for the round-6
+> Reboot and Start on Boot remain disabled by default and unvalidated. P1-08
+> remains **OPEN**: both loaders were rebuilt from the patched source to consume
+> a root-owned `/data/adb/.ksud-stage` and the DFRoot producer at `2b59684`
+> stages to that exact path, but this is pending re-review and fresh on-device
+> full-chain validation (see round 8 in `CHANGELOG.md`). Staging descriptions
+> below that mention `/data/local/tmp/.ksud-stage` describe the **historical**
+> run4/run6/run8 loaders, not the rebuilt binaries now bundled. A successful
+> build does not certify safe privileged execution. See §19 for the
 > test/lifecycle/failure-path shape.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
 > the base and PR #3 was rebased onto it; run6/run8 and all prior CI runs remain
 > historical and do not validate the rebased head.
+
+> [!NOTE]
+> **Round 8 / P1-08 integration (2026-11-26).** The bundled loaders are no
+> longer the verbatim payloads-repository artifacts. Both were rebuilt from the
+> patched source on payloads branch `fix/p1-08-root-owned-staging` (commit
+> `891e897`) to consume a root-owned stage at `/data/adb/.ksud-stage` (fd
+> validated for owner/mode/non-empty content before promotion to
+> `/data/adb/ksud`); DFRoot's producer at `2b59684` stages to that exact path.
+> Host source-build evidence: CI run **45674540939** (classic pair,
+> `android13-5.15`) and **45674545588** (Next generic, four KMIs). Current
+> bundled bytes, enforced by `verify_loader_hashes.cmake` (sha256 **and**
+> size, with no skip option):
+>
+> | Artifact | sha256 | size |
+> |---|---|---|
+> | `libksud.so` | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` (`731c3fa1…`) | 5,127,584 B |
+> | `libksudnext.so` | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` (`7f28f1fb…`) | 4,728,320 B |
+>
+> **P1-08 remains OPEN pending re-review and fresh on-device full-chain
+> validation** — these rebuilds are host-attested only, not device-verified.
+> run6/run8 and all older runs are historical and validate only the old
+> loaders. Auto Soft Reboot and Start on Boot stay disabled and unvalidated.
 
 ---
 
@@ -145,7 +172,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **`adopt_zygote_env()`** — clones zygote64's `environ` (SELinux/label propagation for later children);
 - **`set_partitions_ro()`** — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` pref set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
-- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud` into `/data/local/tmp/.ksud-stage`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). The path must stay `/data/local/tmp/.ksud-stage` because the bundled loaders have it baked into their self-staging constant. Then execs **`/data/local/tmp/.ksud-stage late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
+- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). **Historical (run4/run6/run8) loaders:** the stage was `/data/local/tmp/.ksud-stage`, baked into those binaries' self-staging constant. **Current head (`2b59684`):** the rebuilt loaders consume `/data/adb/.ksud-stage` inside root-owned `/data/adb` (0700) and validate it by fd before promotion; bootstrap stages to that exact path. Then execs the staged daemon's **`late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
 - `exp.c` first writes a fresh 128-bit run nonce to
   `/data/user_de/0/df.root/files/dfinv` (atomic 0644 replace + fsync); bootstrap
   strictly reads it at startup. A missing/malformed nonce is a bootstrap
@@ -189,7 +216,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 
 **(7) Samsung-patched ksud late-load.** The bundled loader (classic FZG1 v3.3.0 — log tag **`KernelSU`**; or Next generic 3.4.2 — log tag **`KernelSU Next`**):
 - logs `ksud::cli: command: LateLoad {… package_name: "…"}` (`ksud::late_load: late-load command triggered!` … `Detected KMI: android13-5.15` — **2-part KMI always**, verified);
-- **stages itself before the module load** — `utils::stage_daemon_from("/data/local/tmp/.ksud-stage")`: `ensure_dir_exists(/data/adb)` + `fs::rename("/data/local/tmp/.ksud-stage", "/data/adb/ksud")` + `chown root:root` + `chmod 0755` (**this is why `/data/adb` and `.ksud-stage` must exist — patch 2 feeds exactly this contract**);
+- **stages itself before the module load** — historical loaders (run4/run6/run8) called `utils::stage_daemon_from("/data/local/tmp/.ksud-stage")`: `ensure_dir_exists(/data/adb)` + `fs::rename(...)` + `chown root:root` + `chmod 0755`. **Rebuilt loaders (current head)** stage from the root-owned `/data/adb/.ksud-stage`, fd-validating owner/mode/non-empty content before promoting to `/data/adb/ksud`; the DFRoot producer feeds exactly this contract, but it is not device-validated;
 - `ksuinit::has_kernelsu()` → false on fresh boot; `ksuinit::load_module()` binds undefined symbols from `/proc/kallsyms` (transient `kptr_restrict=1` write), reads `/dev/kmsg` to the end (`ksuinit: Reading kernel log from /dev/kmsg`), **`Replaced module vermagic with kernel-required value`** (vermagic mismatch rewrite → retry → `init_module(&buffer, params)`);
 - **The module is the Samsung-patched, no-patch-text, kretprobe-fallback KSU build** (`CONFIG_KSU_SAMSUNG_KDP/RKP/DEFEX=y`, `CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y`): it **never writes the syscall table** (dispatcher slot detected protected → kprobe/IP-redirection hooks on `execve`/`execveat`/`newfstatat`/`faccessat`, plus a **kretprobe on `setresuid`**), `ksu_patch_text()` returns `-EOPNOTSUPP` (fail-closed — log line `"live patching disabled on Samsung EL2"`), SELinux-hide goes through kprobes, **KDP** creds are installed via a workqueue → `prepare_ro_creds(SAMSUNG_KDP_COPY_CREDS=0)` + `kdp_assign_pgd` (kdp usecounts via `kdp_usecount_dec_and_test`), **DEFEX** cred shadow is re-synced after every escape, and `task_defex_enforce` is kprobe-zeroed for KSU-domain root tasks. Lineage: `kernelsu/patches/KernelSU-Next-v3.4.2-samsung-kdp-rkp-defex.patch` / `KernelSU-v3.3.0-samsung-kdp-rkp-defex.patch` in the payloads repo (identical strategy to diabl0w's `samsung-v2.2` compat tree — `kernel/compat/{kdp,rkp,defex}.c`). See `samsung-lateload-forensics.md` and `next-loader-codepath.md` for the reverse-engineering;
 - loads `android13-5.15_kernelsu.ko` (embedded asset — see §7) → **`kernelsu.ko loaded successfully!`**, context now `u:r:ksu:s0`; creates/uses the KSU driver fd via the `reboot(2)` supercall doorbell (arm64 syscall **142**, `x0=0xDEADBEEF x1=0xCAFEBABE`); applies SELinux/sulog/kernel_umount feature configs from `/data/adb` (sepolicy rules for pre-installed KSU modules get loaded here too);
@@ -372,13 +399,13 @@ return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot));
  * /dev/dffinal so the app uid can read the token. */
 ```
 
-This matches the documented FZG1 loader contract (`kernelsu/README.md:154-156` in the payloads repo; `next-failure-analysis.md` §3.2/§6; both bundled binaries contain the strings `/data/local/tmp/.ksud-stage`, `Failed to stage ksud`, `/data/adb/ksud`). `.ksud-stage` and `/data/adb/ksud` are on the same `/data` filesystem so the loader's `rename(2)` never crosses devices (`EXDEV` avoided). A secure-staging failure or a nonzero `late-load` exit now both publish the single `error` token in `/dev/dffinal` (rc=1); distinguishing the sub-step requires logcat with **both** KSU tags.
+This matches the documented FZG1 loader contract of the **historical (run4/run6/run8) binaries** (`kernelsu/README.md:154-156` in the payloads repo; `next-failure-analysis.md` §3.2/§6; those binaries contained the strings `/data/local/tmp/.ksud-stage`, `Failed to stage ksud`, `/data/adb/ksud`). The rebuilt loaders now bundled here contain `/data/adb/.ksud-stage` instead. `.ksud-stage` and `/data/adb/ksud` are on the same `/data` filesystem so the loader's `rename(2)` never crosses devices (`EXDEV` avoided). A secure-staging failure or a nonzero `late-load` exit now both publish the single `error` token in `/dev/dffinal` (rc=1); distinguishing the sub-step requires logcat with **both** KSU tags.
 
 > [!NOTE]
 > The single `error` token in `/dev/dffinal` covers both "secure staging failed" and "ksud exited nonzero"; distinguishing them requires either reading the app log (the app prints `progress: bootstrap starting SU daemon` then awaits the final status) or capturing logcat with **both** tags (`KernelSU` **and** `KernelSU Next`) — the 17:00 evidence was blind to the latter and had to be diagnosed from the binary (see §9.2).
 
 > [!WARNING]
-> **Residual staging risk (P1-08, release gate):** `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory. `stage_file()` prevents symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but because the bundled loaders hardcode `/data/local/tmp/.ksud-stage` and rename it themselves, a process running as `shell` could still replace the file after `close()` and before the loader's `rename()`. Regular apps cannot write `/data/local/tmp`; **this issue cannot be closed without rebuilding the bundled loaders to accept a root-owned path/fd, so it is a release gate.** Do not treat this PR as a complete fix for that threat model.
+> **Residual staging risk (P1-08, release gate).** Historically (run4/run6/run8 loaders), `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory; `stage_file()` prevented symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but a `shell`-uid process could still replace the file after `close()` and before the loader's `rename()`. **That risk could not be closed by DFRoot-side changes alone**: it required rebuilding the loaders. Those rebuilds are now integrated — the bundled loaders consume a root-owned `/data/adb/.ksud-stage` validated by fd before promotion — but **P1-08 stays OPEN pending re-review and fresh on-device full-chain validation**. Do not treat this PR as a complete fix for that threat model.
 
 ### Other local port deltas vs upstream (for completeness — these are *not* one of the two named patches)
 
@@ -404,8 +431,8 @@ In `DFRoot-fzg1/` (all paths relative to its root):
 | Path | Size / fingerprint | Role |
 |---|---|---|
 | `app/src/main/jni/ko/dfroot-android13-5.15.ko` | **CI/release artifact: 13,384 B · sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`**; **local `make` build: 13,504 B · sha256 `94f8be98…`** (retains `.note.gnu.build-id`) | The android13-5.15 LKM. **Not committed** (gitignored; rebuilt by the single-KMI `make` or CI). Built against the digest-pinned DDK GKI image `ghcr.io/ylarod/ddk-min:android13-5.15-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd` (top-level `make` resolves this exact reference through `scripts/ddk-image.sh`). CI runs `llvm-objcopy --strip-unneeded -R .note.gnu.build-id …`, so its KO (13,384 B) differs from the local build's (13,504 B, `94f8be98…`); both compile the same source and load on GZIF. Modversions satisfied via KMI CRC; intentionally `module_init → return -ENODEV` (unload-immediately; avoids MTK mrdump callbacks). `lkm/dfroot.ko` was removed from the tree during public release hygiene (it was a duplicate of this file). |
-| `app/src/main/jniLibs/arm64-v8a/libksud.so` | 5,101,488 B · sha256 **`aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`** · md5 `3d8e7d5a3bf315832867bf6074f71ecc` | **Samsung-patched classic KernelSU 3.3.0** loader (v3.3.0, uapi 2, code 32601), `ksud-dm3q-S9180ZHS8FZG1-kdp` copied verbatim from the payloads repo (pre-strip; APK ships the stripped variant). FZG1-validated on 5.15.189; loads 5.15.197-GZIF (vermagic rewrite via ksuinit). Embedded asset: **`android13-5.15_kernelsu.ko`** (2-part/family name — correct for this firmware). Log tag `KernelSU`. **Device-validated on GZIF (run6).** |
-| `app/src/main/jniLibs/arm64-v8a/libksudnext.so` | 4,717,248 B · sha256 **`679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`** | **Samsung-patched KernelSU-Next 3.4.2** loader (uapi 5, code 33355), `ksud-next-generic-kdp` verbatim from `support/kernelsu-generic.json` (`sha256 679504dd…`, "version 3.4.2", four KMIs). Embedded assets: **`android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`, `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`** (all 2-part/family names). Log tag `KernelSU Next`. **Device-validated on GZIF (run8).** Do **not** substitute `ksud-next-dm3q-S9180ZHS8FZF5-kdp` (`f23ede9b…`, 3.4.1) — it embeds only `android13-5.15.189_kernelsu.ko` and provably fails pre-load on this build (17:00 evidence). |
+| `app/src/main/jniLibs/arm64-v8a/libksud.so` | 5,127,584 B · sha256 **`731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4`** (`731c3fa1…`) | **Samsung-patched classic KernelSU 3.3.0** loader (v3.3.0, uapi 2, code 32601), `ksud-dm3q-S9180ZHS8FZG1-kdp` **rebuilt from the P1-08-patched source** on `fix/p1-08-root-owned-staging` (`891e897`), not copied verbatim from the payloads artifacts (CI source-build run 45674540939). It consumes `/data/adb/.ksud-stage` (no old `/data/local/tmp/.ksud-stage` string). Loads 5.15.197-GZIF (vermagic rewrite via ksuinit). Embedded asset: **`android13-5.15_kernelsu.ko`** (2-part/family name — correct for this firmware). Log tag `KernelSU`. **run6 device evidence is historical and applies to the previous loader, not these bytes.** |
+| `app/src/main/jniLibs/arm64-v8a/libksudnext.so` | 4,728,320 B · sha256 **`7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414`** (`7f28f1fb…`) | **Samsung-patched KernelSU-Next 3.4.2** loader (uapi 5, code 33355), `ksud-next-generic-kdp` **rebuilt from the same patched source** (CI source-build run 45674545588), not the old verbatim `support/kernelsu-generic.json` artifact. It consumes `/data/adb/.ksud-stage`. Embedded assets: **`android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`, `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`** (all 2-part/family names). Log tag `KernelSU Next`. **run8 device evidence is historical and applies to the previous loader, not these bytes.** Do **not** substitute `ksud-next-dm3q-S9180ZHS8FZF5-kdp` (`f23ede9b…`, 3.4.1) — it embeds only `android13-5.15.189_kernelsu.ko` and provably fails pre-load on this build (17:00 evidence). |
 | `app/src/main/jni/libcxx.S` | source | tid=1 shellcode + `ko_target` patch point + `/dev/df` mutex + `vendor_modprobe` exec. |
 | `app/src/main/jni/exp.c` | source | the whole exploit (IpSec SA, crash_dump bridge, patching, hook, single final-status consumer). |
 | `app/src/main/jni/bootstrap.c` | source | UMH → `/data/user_de/0/df.root/bootstrap` (Samsung FZG1 staging contract). |
@@ -609,10 +636,12 @@ describe that host evidence explicitly. A green build does not certify safe
 privileged execution. Provenance manifests are informational, not independent
 reproducible-build proofs or attestations. **The byte gate rejects unknown
 bytes but accepts the two known obsolete pins**: release is withheld by policy
-— a reviewed re-pin, unvalidated Auto Soft Reboot / Start on Boot, the OPEN P1-08
-`/data/local/tmp/.ksud-stage` trust gap needing a loader rebuild, and device
-validation — not by the hash gate alone. Passing the gate is not device
-validation.
+— a reviewed re-pin, unvalidated Auto Soft Reboot / Start on Boot, the **OPEN
+P1-08** gate and device validation — not by the hash gate alone. The old
+`/data/local/tmp/.ksud-stage` trust gap described in the historical rows
+required a loader rebuild; that rebuild is now integrated (root-owned
+`/data/adb/.ksud-stage`) but is pending re-review and device validation.
+Passing the gate is not device validation.
 
 | # | Claim | Status | Evidence |
 |---|---|---|---|
@@ -657,12 +686,15 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
 6. **Publishability**: the working tree is uncommitted; decide (a) commit DFRoot-fzg1 locally (never push to diabl0w's upstream), or (b) vendor it into a fork, before the knowledge walks away.
 7. **The classic manager UI**: if the user ever wants `me.weishu.kernelsu` as the *app* again, the Writable-dex defect must be fixed upstream (or a patched classic APK shipped); not a DFRoot problem.
 8. **(Optional) capture `KernelSU Next` logs properly** in future evidence files: `adb logcat -d | grep -E 'KernelSU Next|KernelSU|dfroot'` — unfiltered-or-dual-tag always (see §9.2.4).
-9. **P1-08 remains OPEN (release gate).** The bundled loaders still hardcode
-   `/data/local/tmp/.ksud-stage`; a `shell`-uid process could swap the staged
-   file before the loader renames it. Round 4 adds a write-ahead preference
-   transaction and host-proven launch/boot gating only — documenting a gate is
-   not a fix; closing this needs a loader rebuild. Auto Soft Reboot / Start on
-   Boot also stay disabled by default and unvalidated.
+9. **P1-08 remains OPEN (release gate).** As written against the historical
+   loaders, `/data/local/tmp/.ksud-stage` could be swapped by a `shell`-uid
+   process before the loader renamed it; a write-ahead preference transaction
+   and host-proven launch/boot gating were not a fix — closing it needed a
+   **loader rebuild**, not just DFRoot-side edits. Those rebuilt loaders are
+   now integrated (root-owned `/data/adb/.ksud-stage`, fd-validated), but the
+   gate stays OPEN pending re-review and fresh on-device full-chain validation.
+   Auto Soft Reboot / Start on Boot also stay disabled by default and
+   unvalidated.
 
 ---
 
@@ -959,9 +991,12 @@ pre-rebase heads, never this head. No tag was created by us.
 
 ### 18.3 Release gates and validation boundary
 
-**P1-08 remains OPEN:** `/data/local/tmp/.ksud-stage` can be swapped by a
-`shell`-uid process before the loader renames it; closing it requires a loader
-rebuild, and documentation is not a fix. The byte gate rejects unknown bytes
+**P1-08 remains OPEN** (this §18 text is historical; see the round-8 note at
+the top of this file): the historical loaders' `/data/local/tmp/.ksud-stage`
+could be swapped by a `shell`-uid process before the loader renamed it; closing
+it required a loader rebuild, and documentation was not a fix. Those rebuilt
+loaders are now integrated but are pending re-review and device validation.
+The byte gate rejects unknown bytes
 but accepts the two known obsolete pins; release is withheld by policy pending
 a reviewed re-pin, P1-08 and device validation. Auto Soft Reboot and Start on
 Boot remain disabled by default and unvalidated. All current verification is
@@ -971,11 +1006,15 @@ not certify safe privileged execution.**
 
 ---
 
-## 19. Round-6 repair (2026-11-25) — authoritative current head (`d72838d`)
+## 19. Round-6 repair (2026-11-25) — historical round-6 head (`d72838d`)
 
-This section supersedes §18 and is authoritative for the current head of
+> **Historical section.** It superseded §18 for the round-6 head only. The
+> current head (`2b59684`) is covered by the round-8/P1-08 note at the top of
+> this file and by `CHANGELOG.md` round 8.
+
+This section superseded §18 for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). Everything is **host-only**; no
-hardware run validates this head, no tag was created and no release was
+hardware run validates that head, no tag was created and no release was
 published. For the stable-ID disposition table see the round-6 section at the
 top of `CHANGELOG.md`.
 
@@ -1022,9 +1061,12 @@ top of `CHANGELOG.md`.
 
 ### 19.3 Release gates and validation boundary
 
-- **P1-08 is OPEN:** the loader's hardcoded `/data/local/tmp/.ksud-stage` can be
-  swapped by a `shell`-uid process; closing it requires a loader rebuild.
-  Documentation is not a fix; do not consume or distribute unverified
+- **P1-08 is OPEN** (round-6 head; historical): the then-bundled loader's
+  hardcoded `/data/local/tmp/.ksud-stage` could be swapped by a `shell`-uid
+  process; closing it required a loader rebuild, not DFRoot-side edits alone.
+  Documentation was not a fix. On the current head the rebuilt loaders are
+  integrated (root-owned `/data/adb/.ksud-stage`) but remain OPEN pending
+  re-review and device validation; do not consume or distribute unverified
   privileged content.
 - The byte gate rejects UNKNOWN bytes but **accepts the two known obsolete
   pins**; release is withheld by **POLICY** (a reviewed re-pin, P1-08 and device
