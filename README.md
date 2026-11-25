@@ -54,12 +54,18 @@ never a definitive failure. A global marker alone can no longer end a run.
 | Code | Meaning |
 |---|---|
 | `0` | normal terminal success: the admitted run published its success marker |
-| `1` | bootstrap/terminal error — run-config, module, staging, marker conflict, or an **observed nonzero late-load exit** (`run_status_late_load_wait_code`); an unobserved exit or timeout is rc=7, not rc=1 |
+| `1` | bootstrap/terminal error — run-config, module, staging, or an **observed nonzero late-load exit** (`run_status_late_load_wait_code`); an unobserved exit or timeout is rc=7, not rc=1 |
 | `2` | native `setup()` failure before any operation starts (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
 | `3` | native patch failure |
 | `4` | soft-reboot command returned success |
 | `6` | soft-reboot command failed |
-| `7` | **indeterminate** — completion could not be confirmed: bounded writer wait or reader deadline expiry, unconfirmed/failed terminal publication, or pre-admission uncertainty. Never a success. |
+| `7` | **indeterminate** — completion could not be confirmed: bounded writer wait or reader deadline expiry, unconfirmed/failed terminal publication, contradictory/conflicting terminal markers, or pre-admission uncertainty. Never a success. |
+
+A **marker conflict** is therefore rc=7 indeterminate, never a definitive error
+or success: two different terminal observations disprove each other and confirm
+no completed outcome. An unconfirmed/contradictory observation also never
+authorizes another operation — the owner, lease, configuration freeze, and
+durable attempt barrier are retained until explicit recovery.
 
 A late-load timeout, an unobserved child exit, an unconfirmed publication, and a
 reader deadline expiry are all rc=7 indeterminate: privileged children may still

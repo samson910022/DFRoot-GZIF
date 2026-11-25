@@ -1,11 +1,13 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify every native code maps to a complete typed result. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify native rc=7 maps only to indeterminate, never success. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): tie every mapped exit to the authoritative unverified predicate. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin the explicit rc=7 cause label while unknown exits keep their honest reason. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -48,7 +50,8 @@ public class NativeResultMapperTest {
         cases.add(new Object[] {6, ExploitRunner.RESULT_SOFT_REBOOT_FAILED,
                 RunResult.Type.SOFT_REBOOT_FAILED, RunResult.Detail.NATIVE_EXIT, null});
         cases.add(new Object[] {7, ExploitRunner.RESULT_INDETERMINATE,
-                RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT, null});
+                RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT,
+                "native rc=7 indeterminate publication"});
         for (int unknown : new int[] {5, 8, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
             cases.add(new Object[] {unknown, ExploitRunner.RESULT_UNKNOWN, RunResult.Type.UNKNOWN,
                     RunResult.Detail.NATIVE_EXIT, "native exit code " + unknown});
@@ -80,6 +83,21 @@ public class NativeResultMapperTest {
 
     private static boolean isConfirmedNativeCode(int code) {
         return code == 0 || code == 1 || code == 2 || code == 3 || code == 4 || code == 6;
+    }
+
+    /** Only a genuine rc=7 may carry the rc7 publication label; unknown exits may not. */
+    @Test
+    public void unknownExitsNeverClaimNativeRc7Publication() {
+        for (int unknown : new int[] {5, 8, 73, 255, -1}) {
+            RunResult result = NativeResultMapper.map(unknown);
+            assertEquals("native exit code " + unknown, result.getReason());
+            assertFalse(result.getReason().contains("rc=7"));
+            assertTrue(result.isOutcomeUnverified());
+        }
+        RunResult rc7 = NativeResultMapper.map(7);
+        assertEquals("native rc=7 indeterminate publication", rc7.getReason());
+        assertTrue(rc7.getReason().contains("rc=7"));
+        assertTrue(rc7.isOutcomeUnverified());
     }
 
     /** rc=7 owns the indeterminate contract and cannot alias any other native rc. */

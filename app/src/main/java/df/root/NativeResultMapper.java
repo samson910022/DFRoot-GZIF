@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): map native exit codes without Java/native collisions. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): rc=1 now covers run-config/bootstrap rather than preference XML. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): native rc=7 is indeterminate and never a success. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): label rc=7 explicitly; unknown exits keep their honest reason. See NOTICE.
 package df.root;
 
 /** Pure mapper for the native process exit-code contract. */
@@ -33,7 +34,8 @@ public final class NativeResultMapper {
                 // Unconfirmed terminal publication: the effect of the run is unknown.
                 // Keep the stable RESULT_INDETERMINATE code; never map to success.
                 return new RunResult(ExploitRunner.RESULT_INDETERMINATE,
-                        RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT, null);
+                        RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT,
+                        "native rc=7 indeterminate publication");
             default:
                 return new RunResult(ExploitRunner.RESULT_UNKNOWN, RunResult.Type.UNKNOWN,
                         RunResult.Detail.NATIVE_EXIT, "native exit code " + nativeCode);

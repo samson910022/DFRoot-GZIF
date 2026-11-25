@@ -2,6 +2,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): cover idempotent clears and bounded, non-dropping initialization. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): every unverified outcome holds the barrier; only confirmed codes clear it. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin post-process-death-only persisted recovery and checked clears. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin honest unverified causes and no clear/admission from unconfirmed results. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -582,6 +583,104 @@ public class RunCoordinatorAttemptTest {
         }
     }
 
+    /**
+     * Fake unconfirmed outcomes only (no privileged payload): each published
+     * reason must name exactly the observed cause. An unknown exit, an engine
+     * exception, or a conflict-shaped rc7 observation must never clear the
+     * durable barrier, close the lease, publish TERMINAL, or admit a second run.
+     */
+    @Test
+    public void unverifiedReasonsNameOnlyTheObservedCauseAndNeverAuthorizeAdmission()
+            throws Exception {
+        final String rc7 = "outcome unverified: native terminal publication was not confirmed "
+                + "(native rc=7); the worker may still be running; explicit recovery required";
+        final String unknown = "outcome unverified: native exit code was not recognized; "
+                + "completion could not be confirmed; explicit recovery required";
+        final String exception = "outcome unverified: engine call failed before a confirmed "
+                + "result; external effects remain unproven "
+                + "(IllegalStateException: reporter terminated unexpectedly); "
+                + "explicit recovery required";
+        final String timeout = "child process timed out; outcome remains indeterminate until "
+                + "actual exit";
+        RunResult conflictShapedRc7 = new RunResult(ExploitRunner.RESULT_INDETERMINATE,
+                RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT,
+                "conflicting terminal markers; completion unverified; "
+                        + "native rc=7 indeterminate publication");
+        List<Object[]> cases = Arrays.asList(
+                new Object[] {NativeResultMapper.map(7), rc7, false},
+                new Object[] {conflictShapedRc7, rc7, false},
+                new Object[] {NativeResultMapper.map(73), unknown, false},
+                new Object[] {RunResult.exception(
+                        new IllegalStateException("reporter terminated unexpectedly")),
+                        exception, false},
+                new Object[] {NativeResultMapper.map(7),
+                        "outcome unverified: " + timeout + "; " + rc7.substring(
+                                "outcome unverified: ".length()), true},
+                new Object[] {NativeResultMapper.map(73),
+                        "outcome unverified: " + timeout + "; " + unknown.substring(
+                                "outcome unverified: ".length()), true});
+        for (Object[] testCase : cases) {
+            RunResult outcome = (RunResult) testCase[0];
+            String expectedReason = (String) testCase[1];
+            boolean timeoutFirst = (Boolean) testCase[2];
+
+            ConfigurationRepository localRepository = new ConfigurationRepository(
+                    new Store(), Runnable::run, Runnable::run);
+            localRepository.start();
+            ControllableStore localStore = new ControllableStore();
+            ScriptedEngine localEngine = new ScriptedEngine();
+            localEngine.results.add(outcome);
+            AtomicReference<ConfigurationRepository.RunAdmission> admitted =
+                    new AtomicReference<>();
+            localEngine.inspection = call -> {
+                admitted.set(call.admission);
+                if (timeoutFirst) {
+                    call.events.onTimeout();
+                }
+            };
+            RunCoordinator coordinator = new RunCoordinator(localRepository, Runnable::run,
+                    Runnable::run, localEngine, 0L, localStore, new MutableReader(BOOT_COUNT),
+                    Runnable::run);
+            coordinator.initialize();
+            List<RunCoordinator.State> observed = new ArrayList<>();
+            coordinator.addListener(snapshot -> observed.add(snapshot.getState()));
+            FakeLease lease = new FakeLease();
+
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    lease).isAccepted());
+            RunCoordinator.Snapshot held = coordinator.getSnapshot();
+
+            assertEquals(expectedReason, held.getReason());
+            assertEquals(RunCoordinator.State.INDETERMINATE, held.getState());
+            assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
+            assertEquals("unverified result cleared the durable attempt: " + outcome.getType(),
+                    0, localStore.clearCalls);
+            OperationAttempt persisted = assertStoreAttempt(localStore, held.getOperationId());
+            assertTrue(persisted.isUnconfirmed());
+            assertEquals("unverified result closed the lease: " + outcome.getType(),
+                    0, lease.closeCount.get());
+            assertTrue(admitted.get().isActive());
+            assertTrue(localRepository.isFrozen());
+
+            FakeLease secondLease = new FakeLease();
+            RunCoordinator.Submission second = coordinator.submit(context(),
+                    RunConfig.ExecutionMode.MANUAL, secondLease);
+            assertFalse("unverified result admitted a second operation", second.isAccepted());
+            assertEquals(1, localEngine.calls.get());
+            assertEquals(0, secondLease.closeCount.get());
+
+            // Only an explicit recovery with the exact operation ID may close it.
+            assertFalse(coordinator.recoverIndeterminate("wrong-id"));
+            assertEquals(0, localStore.clearCalls);
+            assertTrue(coordinator.recoverIndeterminate(held.getOperationId()));
+            assertEquals(1, localStore.clearCalls);
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(admitted.get().isActive());
+            assertFalse(localRepository.isFrozen());
+            assertNull(localStore.load());
+        }
+    }
+
     /** Confirmed native codes always finish, close owned resources and clear the attempt. */
     @Test
     public void confirmedNativeCodesClearDurableAttemptAndFinish() throws Exception {
@@ -710,6 +809,7 @@ public class RunCoordinatorAttemptTest {
         RuntimeException loadFailure;
         OperationAttemptStore.Failure loadError;
         RuntimeException clearThrows;
+        int clearCalls;
 
         void seed(OperationAttempt attempt) throws Exception {
             delegate.publish(attempt);
@@ -741,6 +841,7 @@ public class RunCoordinatorAttemptTest {
 
         @Override
         public boolean clear(String operationId) throws Failure {
+            clearCalls++;
             if (clearThrows != null) {
                 throw new Failure("clear failed", clearThrows);
             }

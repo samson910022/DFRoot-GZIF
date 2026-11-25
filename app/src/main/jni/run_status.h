@@ -7,6 +7,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map a terminal classifier observation failure to rc7 through one shared helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): scope the publication guarantee to what is provable across the post-link observation window. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): contradictory terminal markers map to indeterminate rc7, never definitive rc1. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
@@ -67,7 +68,7 @@ enum run_status_verdict {
 
 struct run_status_result {
     enum run_status_verdict verdict;
-    int code;                       /* -1 for NONE; single code; 1 for CONFLICT */
+    int code;                       /* -1 for NONE; single code; 7 (indeterminate) for CONFLICT */
     char diagnostic[RUN_STATUS_DIAGNOSTIC_MAX];
 };
 
@@ -130,8 +131,9 @@ int run_status_write(int code);
 int run_status_publication_exit_code(int write_result, int intended_code);
 
 /* Classify markers for the configured operation. Foreign operation IDs and
- * malformed payloads are ignored; conflicting codes are a terminal error with
- * a stable diagnostic. The whole directory is scanned before any verdict is
+ * malformed payloads are ignored; conflicting codes are indeterminate rc=7
+ * (completion unverified) with a stable diagnostic, never a definitive rc0/rc1.
+ * The whole directory is scanned before any verdict is
  * chosen, and an rc=7 indeterminate marker takes precedence over every other
  * code (including success and conflicts), independent of readdir order. Thus a
  * reader can never read SUCCESS while the indeterminate channel is present,
@@ -152,8 +154,8 @@ int run_status_pre_admission_failure(void);
  * source and the pre-admission scan flag as a separate diagnostic input.
  *
  *   TERMINAL / CONFLICT admitted result -> TERMINAL with the admitted code
- *       (rc0 success included) and its diagnostic; a stale pre-admission
- *       marker MUST NOT downgrade it.
+ *       (rc0 success included; CONFLICT is rc7 indeterminate) and its
+ *       diagnostic; a stale pre-admission marker MUST NOT downgrade it.
  *   NONE admitted result + pre-admission failure -> UNCONFIRMED, rc7, with an
  *       explicit "pre-admission failure; completion unverified" diagnostic.
  *   NONE admitted result without it -> NONE, code -1 (keep polling).
@@ -232,8 +234,9 @@ int run_status_progress_outcome(const char *marker_path);
  * strictly below the limit. Used for the late-load wait deadline. */
 int run_status_wait_continues(int64_t elapsed_ms, int64_t limit_ms);
 
-/* Map a classifier verdict to an exit code. CONFLICT -> 1, TERMINAL -> its
- * code, NONE -> -1 (keep polling). */
+/* Map a classifier verdict to an exit code. CONFLICT -> 7 (indeterminate:
+ * contradictory observations prove nothing), TERMINAL -> its code, NONE -> -1
+ * (keep polling). */
 int run_status_exit_code(const struct run_status_result *result);
 
 /* A failed terminal CLASSIFICATION (as opposed to a terminal marker verdict)

@@ -7,6 +7,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): scan the reserved pre-admission diagnostic and decide through a pure helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): add a shared classifier-failure rc7 mapping and a harmless host injection seam. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link/pre-confirmation observation window with a host-only hook. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): map contradictory terminal markers to indeterminate rc7 instead of definitive rc1. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -403,9 +404,13 @@ int run_status_classify(struct run_status_result *out)
     }
 
     out->verdict = RUN_STATUS_VERDICT_CONFLICT;
-    out->code = RUN_STATUS_TERMINAL_ERROR;
+    /* Contradictory observations prove no completed outcome: keep the code
+     * indeterminate so a reader can never turn a conflict into a definitive
+     * error or success. The verdict still records that markers disagreed. */
+    out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
     snprintf(out->diagnostic, sizeof(out->diagnostic),
-             "conflicting terminal markers for operation %s:", status_operation_id);
+             "conflicting markers; completion unverified for operation %s:",
+             status_operation_id);
     size_t used = strlen(out->diagnostic);
     for (size_t i = 0; i < sizeof(code_order) / sizeof(code_order[0]); i++) {
         if ((found & (1u << code_index(code_order[i]))) == 0) {
@@ -472,8 +477,9 @@ void run_status_decide(const struct run_status_result *admitted,
 
     int admitted_code = run_status_exit_code(admitted);
     if (admitted_code >= 0) {
-        /* TERMINAL or CONFLICT: both are terminal results for the admitted
-         * operation (CONFLICT maps to rc=1). Preserve its diagnostic. */
+        /* TERMINAL or CONFLICT: both end the admitted operation's observation,
+         * but CONFLICT maps to rc=7 indeterminate (never a definitive rc=1).
+         * Preserve its diagnostic. */
         out->outcome = RUN_STATUS_OUTCOME_TERMINAL;
         out->code = admitted_code;
         snprintf(out->diagnostic, sizeof(out->diagnostic), "%s",
@@ -984,7 +990,8 @@ int run_status_exit_code(const struct run_status_result *result)
         return -1;
     }
     if (result->verdict == RUN_STATUS_VERDICT_CONFLICT) {
-        return RUN_STATUS_TERMINAL_ERROR;
+        /* Two different confirmed codes disagree, so neither is proven. */
+        return RUN_STATUS_TERMINAL_INDETERMINATE;
     }
     return result->code;
 }

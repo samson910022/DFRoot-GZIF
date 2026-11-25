@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): cover rc7 ownership retention only with connected fakes; live-child proof is native. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): a timeout observation plus rc7 keeps the barrier and never publishes TERMINAL. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recovery is refused while the supervised child/engine is still active. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin the exact combined timeout+rc7 reason for a fake child outcome. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -196,7 +197,10 @@ public class RunCoordinatorProcessIntegrationTest {
         assertEquals(RunCoordinator.State.INDETERMINATE, held.getState());
         assertEquals(ExploitRunner.RESULT_INDETERMINATE, held.getResult().getCode());
         assertFalse(held.getResult().isSuccess());
-        assertTrue(held.getReason().contains("outcome unverified"));
+        assertEquals("outcome unverified: child process timed out; outcome remains indeterminate "
+                + "until actual exit; native terminal publication was not confirmed "
+                + "(native rc=7); the worker may still be running; explicit recovery required",
+                held.getReason());
         assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
         assertEquals(0, process.destroyCount.get());
         assertEquals(0, lease.closeCount.get());

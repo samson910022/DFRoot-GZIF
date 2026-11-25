@@ -1,5 +1,14 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-25 — Result-contract wording (R4.2, R2-12)
+
+- A **marker conflict** is rc=7 **indeterminate**, no longer rc=1: contradictory
+  terminal observations confirm no completed outcome, so a conflicted or
+  otherwise unconfirmed result is neither a definitive error nor a success and
+  never authorizes another operation. The rc contract values (0/1/2/3/4/6/7),
+  `/dev/df` and `/dev/dfm6` progress-only SUCCESS semantics, and the no-root-probe
+  policy are unchanged.
+
 ## 2026-11-25 — Third repair round (R3) consolidated summary — PR #1 rebase, CI integration, R2-12/13/14/16/17/18/19 + R2-04 caveat
 
 Authoritative record of the third repair round on `fix/app-correctness-safety`

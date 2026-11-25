@@ -6,6 +6,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): inject a classifier observation failure and assert the reader exits rc7 with no confirmed result. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the whole post-link/pre-rc7 observation window with a deterministic concurrent reader. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): assert conflicting terminal observations map to indeterminate rc7, not definitive rc1. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -295,17 +296,25 @@ static void test_valid_code(int code)
 
 static void test_conflict(void)
 {
+    /* reset_root() rewrites the global root buffer, so keep a stable copy for
+     * the second, independent conflict pair below. */
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("case root path is too long");
+    }
     configure(OUR_ID);
     expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
     expect_write_ok(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
     struct run_status_result result = classify();
     if (result.verdict != RUN_STATUS_VERDICT_CONFLICT
-        || result.code != RUN_STATUS_TERMINAL_ERROR
-        || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_ERROR) {
-        die("conflicting markers were not classified as a terminal error");
+        || result.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("conflicting markers were not classified as indeterminate rc=7");
     }
     if (strstr(result.diagnostic, OUR_ID) == NULL
         || strstr(result.diagnostic, "conflicting") == NULL
+        || strstr(result.diagnostic, "completion unverified") == NULL
         || strstr(result.diagnostic, "rc=0") == NULL
         || strstr(result.diagnostic, "rc=6") == NULL) {
         fprintf(stderr, "unstable conflict diagnostic: '%s'\n", result.diagnostic);
@@ -315,6 +324,24 @@ static void test_conflict(void)
     struct run_status_result again = classify();
     if (strcmp(result.diagnostic, again.diagnostic) != 0) {
         die("conflict diagnostic is not stable");
+    }
+
+    /* A different pair of CONFIRMED codes also disagrees: rc=1 and rc=4 must
+     * still be an indeterminate conflict, never a definitive rc=1 error. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_ERROR);
+    expect_write_ok(RUN_STATUS_TERMINAL_SOFT_REBOOT_OK);
+    struct run_status_result second = classify();
+    if (second.verdict != RUN_STATUS_VERDICT_CONFLICT
+        || second.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_exit_code(&second) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || strstr(second.diagnostic, "completion unverified") == NULL
+        || strstr(second.diagnostic, "rc=1") == NULL
+        || strstr(second.diagnostic, "rc=4") == NULL) {
+        fprintf(stderr, "confirmed-code conflict was definitive: code=%d diagnostic='%s'\n",
+                run_status_exit_code(&second), second.diagnostic);
+        exit(1);
     }
 }
 
@@ -629,8 +656,8 @@ static void test_protocol_helpers(void)
     memset(&conflict, 0, sizeof(conflict));
     conflict.verdict = RUN_STATUS_VERDICT_CONFLICT;
     conflict.code = RUN_STATUS_TERMINAL_SUCCESS;
-    if (run_status_exit_code(&conflict) != RUN_STATUS_TERMINAL_ERROR) {
-        die("conflict did not map to rc=1");
+    if (run_status_exit_code(&conflict) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("conflict did not map to indeterminate rc=7");
     }
     if (run_status_exit_code(NULL) != -1) {
         die("NULL classifier result did not map to keep-waiting");
@@ -1473,7 +1500,7 @@ static void test_pre_admission_unconfirmed(void)
 }
 
 /* Any valid terminal marker for the admitted operation wins over the stale
- * reserved diagnostic, including rc0 success and CONFLICT (rc1). */
+ * reserved diagnostic, including rc0 success and CONFLICT (rc7 indeterminate). */
 static void test_pre_admission_terminal_wins(void)
 {
     /* Save the case root before any reset: reset_root() rewrites the global. */
@@ -1517,7 +1544,7 @@ static void test_pre_admission_terminal_wins(void)
         }
     }
 
-    /* A conflict for the admitted operation is terminal rc=1 from the
+    /* A conflict for the admitted operation is indeterminate rc=7 from the
      * conflict itself, and must keep its conflict diagnostic. */
     reset_root(case_root);
     publish_pre_admission_failure();
@@ -1530,7 +1557,7 @@ static void test_pre_admission_terminal_wins(void)
     }
     struct run_status_decision decision = decide_from_reader(&admitted);
     if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
-        || decision.code != RUN_STATUS_TERMINAL_ERROR
+        || decision.code != RUN_STATUS_TERMINAL_INDETERMINATE
         || strstr(decision.diagnostic, "conflicting") == NULL) {
         die("stale pre-admission marker replaced an admitted conflict result");
     }
@@ -1684,14 +1711,15 @@ static void test_pre_admission_decide_pure(void)
     }
 
     admitted.verdict = RUN_STATUS_VERDICT_CONFLICT;
-    admitted.code = RUN_STATUS_TERMINAL_ERROR;
+    admitted.code = RUN_STATUS_TERMINAL_INDETERMINATE;
     snprintf(admitted.diagnostic, sizeof(admitted.diagnostic),
-             "conflicting terminal markers for operation %s: rc=0 rc=6", OUR_ID);
+             "conflicting terminal markers; completion unverified for operation %s: rc=0 rc=6",
+             OUR_ID);
     run_status_decide(&admitted, 1, &decision);
     if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
-        || decision.code != RUN_STATUS_TERMINAL_ERROR
+        || decision.code != RUN_STATUS_TERMINAL_INDETERMINATE
         || strcmp(decision.diagnostic, admitted.diagnostic) != 0) {
-        die("admitted conflict was not mapped to terminal rc=1");
+        die("admitted conflict was not preserved as indeterminate rc=7");
     }
 
     run_status_decide(NULL, 1, &decision);

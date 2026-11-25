@@ -9,6 +9,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): every unverified outcome keeps the barrier; only proven outcomes clear it. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recovery needs proof the supervised engine call has actually finished. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): persisted-attempt recovery is a post-process-death, trusted-caller-only boundary. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): unverified diagnostics name only the observed cause; an unknown exit or exception never claims native rc=7. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -62,9 +63,48 @@ public final class RunCoordinator {
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
     /** Short bounded wait so the first service request is not dropped during off-main init. */
     static final long INITIALIZATION_WAIT_MS = 500L;
-    private static final String UNVERIFIED_REASON =
-            "outcome unverified: native rc=7 terminal publication was not confirmed; "
-            + "the worker may still be running and explicit recovery is required";
+
+    /**
+     * Honest, origin-aware diagnostic for an unconfirmed outcome. It names ONLY
+     * the cause that was actually observed: native rc=7, an unrecognized native
+     * exit, or an engine exception. No generic message may claim "native rc=7"
+     * for an unknown exit or a Java exception.
+     *
+     * @param priorDetail the already-published timeout/interruption detail when
+     *                    an unverified exit arrives after a supervision
+     *                    observation; {@code null} for a first publication.
+     */
+    private static String unverifiedReason(RunResult result, String priorDetail) {
+        String cause;
+        if (result != null
+                && result.getDetail() == RunResult.Detail.NATIVE_EXIT
+                && result.getType() == RunResult.Type.INDETERMINATE) {
+            // A genuine native rc=7 (including a conflict-shaped observation).
+            cause = "native terminal publication was not confirmed (native rc=7); "
+                    + "the worker may still be running";
+        } else if (result != null && result.getDetail() == RunResult.Detail.NATIVE_EXIT) {
+            // Unknown/unrecognized exit: no rc7 claim, no confirmed completion.
+            cause = "native exit code was not recognized; completion could not be confirmed";
+        } else if (result != null && result.getDetail() == RunResult.Detail.EXCEPTION) {
+            cause = "engine call failed before a confirmed result; external effects remain unproven";
+            String detail = result.getReason();
+            if (detail != null && !detail.isEmpty()) {
+                cause += " (" + detail + ")";
+            }
+        } else if (result == null) {
+            cause = "no result was observed; external effects remain unproven";
+        } else {
+            // Timeout/interruption detail: use the actual detail, never rc7.
+            cause = result.getReason() == null ? result.getDetail().name() : result.getReason();
+        }
+        String prefix = "outcome unverified: "
+                + (priorDetail == null || priorDetail.isEmpty() ? "" : priorDetail + "; ");
+        return prefix + cause + "; explicit recovery required";
+    }
+
+    private static String unverifiedReason(RunResult result) {
+        return unverifiedReason(result, null);
+    }
 
     private static volatile RunCoordinator instance;
 
@@ -588,6 +628,8 @@ public final class RunCoordinator {
      * config stays frozen, and new submissions stay rejected. The only exit is
      * an explicit {@link #recoverIndeterminate(String)} call by a trusted
      * caller. The persisted attempt stays unconfirmed across process death.
+     * The published reason is derived from the observed cause only, so an
+     * unrecognized exit or an engine exception is never reported as native rc7.
      */
     private void markOutcomeUnverified(Operation operation, RunResult completed) {
         Snapshot changed;
@@ -597,17 +639,19 @@ public final class RunCoordinator {
             }
             if (result == null || state != State.INDETERMINATE) {
                 result = completed;
-                reason = UNVERIFIED_REASON;
+                reason = unverifiedReason(completed);
                 state = State.INDETERMINATE;
                 appendLogLocked("indeterminate: outcome unverified; retaining lease and "
                         + "configuration freeze until explicit recovery");
             } else {
                 // A supervision timeout/interruption already published the
                 // unverified state. Keep its result and ownership intact, but
-                // state plainly that the combined outcome is unverified.
-                appendLogLocked("indeterminate: native rc=7 also unconfirmed; ownership retained");
-                reason = "outcome unverified: " + (reason == null ? "native rc=7" : reason)
-                        + "; explicit recovery required";
+                // build the combined reason from the actual observation: an
+                // unknown exit or exception must never be reported as rc=7.
+                String priorDetail = reason != null ? reason : result.getReason();
+                reason = unverifiedReason(completed, priorDetail);
+                appendLogLocked("indeterminate: unconfirmed exit also observed; "
+                        + "ownership retained");
             }
             changed = buildSnapshotLocked();
             snapshot = changed;
