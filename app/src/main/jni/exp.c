@@ -615,18 +615,13 @@ static int preflight(struct preflight *pf) {
     raw_len = (size_t)(ko->end - ko->start);
     pf->ko_buf = pad16(ko->start, raw_len, &pf->ko_len);
     if (!pf->ko_buf || pf->ko_len < 16) goto fail;
-    fd = open(libcxx_ko_target, O_RDONLY | O_CLOEXEC);
-    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 ||
-        (uint64_t)st.st_size < pf->ko_len) {
-        printf("preflight: %s missing/too short for KO payload "
-               "(errno=%d: %s; st_size=%lld; ko_len=%zu)\n",
-               libcxx_ko_target, errno, strerror(errno),
-               fd >= 0 && fstat(fd, &st) == 0 ? (long long)st.st_size : -1LL,
-               pf->ko_len);
-        if (fd >= 0) close(fd);
-        goto fail;
-    }
-    close(fd);
+    /* The app's SELinux domain cannot open() vendor files directly (errno 13).
+     * The crash_dump64 read mode is also not yet installed at preflight time,
+     * so path presence was already checked by detect_ko_target() with
+     * access(F_OK). Authoritative readability of every 16-byte block is
+     * checked later by capture_ko_originals(), AFTER patch_helper(), through
+     * the patched helper; that path fails closed. Do not probe the vendor
+     * target here. */
     pf->ko_orig = (uint8_t *)malloc(pf->ko_len);
     if (!pf->ko_orig) goto fail;
 
