@@ -19,6 +19,7 @@ import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -40,7 +41,11 @@ public class MainActivity extends Activity {
     private Button btnRun;
     private ScrollView outputScroll;
     private TextView outputView;
+    private TextView availabilityView;
     private Spinner spinnerSuManager;
+    /** Supplies read-only observations to the same canonical preflight the runner uses. */
+    private static AvailabilityEnvironmentFactory sAvailabilityEnvironmentFactory =
+            MainActivity::androidAvailabilityEnvironment;
     private Context mDeCtx;
     private ConfigurationRepository mConfiguration;
     private RunCoordinator mCoordinator;
@@ -116,6 +121,12 @@ public class MainActivity extends Activity {
         });
 
         btnRun.setOnClickListener(v -> requestManualRun());
+
+        // Diagnostics get their own view so the operation-output buffer stays untouched.
+        availabilityView = new TextView(this);
+        availabilityView.setTextSize(12);
+        LinearLayout root = findViewById(R.id.rootLayout);
+        root.addView(availabilityView, 1);
     }
 
     @Override
@@ -247,6 +258,7 @@ public class MainActivity extends Activity {
         mReportedConfigurationState = state;
         renderOutput();
         updateRunButton();
+        updateAvailabilityDiagnostic();
     }
 
     private void renderRunSnapshot(RunCoordinator.Snapshot snapshot) {
@@ -318,6 +330,52 @@ public class MainActivity extends Activity {
 
     private void updateRunButton() {
         btnRun.setEnabled(isRunEligible());
+    }
+
+    /**
+     * Surfaces the runner's own fail-closed precheck result without invoking any of
+     * its effects. This is diagnostic only: it never starts, stages, or substitutes
+     * a manager/loader, and the runner's precheck remains authoritative.
+     */
+    private void updateAvailabilityDiagnostic() {
+        if (mDestroyed || availabilityView == null) {
+            return;
+        }
+        String diagnostic;
+        try {
+            RunConfig confirmed = mConfiguration == null
+                    ? null : mConfiguration.getConfirmedSnapshot();
+            RunPreflight.Result result = RunPreflight.check(
+                    sAvailabilityEnvironmentFactory.create(this, confirmed));
+            diagnostic = result.isReady() ? "" : "Run unavailable: " + result.getReason();
+        } catch (RuntimeException e) {
+            // Unreadable observations are not proof of availability; never guess.
+            diagnostic = "Run unavailable: availability could not be determined"
+                    + " from read-only observations";
+        }
+        availabilityView.setText(diagnostic);
+    }
+
+    /** Read-only Android observations; identical to the runner's environment source. */
+    private static RunPreflight.Environment androidAvailabilityEnvironment(
+            Context context, RunConfig confirmed) {
+        return AndroidRunEnvironment.forConfig(context, confirmed);
+    }
+
+    interface AvailabilityEnvironmentFactory {
+        RunPreflight.Environment create(Context context, RunConfig confirmed);
+    }
+
+    static void installAvailabilityEnvironmentForTesting(AvailabilityEnvironmentFactory factory) {
+        sAvailabilityEnvironmentFactory = Objects.requireNonNull(factory, "factory");
+    }
+
+    static void resetAvailabilityEnvironmentForTesting() {
+        sAvailabilityEnvironmentFactory = MainActivity::androidAvailabilityEnvironment;
+    }
+
+    static TextView availabilityViewForTesting(MainActivity activity) {
+        return activity.availabilityView;
     }
 
     private int managerPosition(String packageName) {

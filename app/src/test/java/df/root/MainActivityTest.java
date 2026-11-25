@@ -13,12 +13,15 @@ import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
+import android.view.View;
 import android.widget.Spinner;
 import android.widget.TextView;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
@@ -33,13 +36,21 @@ import org.robolectric.shadows.ShadowToast;
 import org.robolectric.util.ReflectionHelpers;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -52,6 +63,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivityTest {
     private static final long TEST_TIMEOUT_MS = 5_000L;
     private static final int MAX_UI_OUTPUT_CHARACTERS = 32 * 1024;
+
+    @Rule
+    public TemporaryFolder assetFolder = new TemporaryFolder();
 
     private final List<ActivityController<MainActivity>> activityControllers = new ArrayList<>();
     private final List<ServiceController<ExploitService>> serviceControllers = new ArrayList<>();
@@ -70,6 +84,7 @@ public class MainActivityTest {
         ConfigurationRepository.resetForTesting();
         RunCoordinator.resetForTesting();
         MainActivity.resetResultToastForTesting();
+        MainActivity.resetAvailabilityEnvironmentForTesting();
         ShadowToast.reset();
         installManager(SuManager.CLASSIC.getPackageName());
         installManager(SuManager.NEXT.getPackageName());
@@ -96,6 +111,7 @@ public class MainActivityTest {
             worker.shutdownNow();
             assertTrue(worker.awaitTermination(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         }
+        MainActivity.resetAvailabilityEnvironmentForTesting();
         RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
@@ -569,6 +585,320 @@ public class MainActivityTest {
         }
         assertTrue(text.contains("ExploitService.ACTION_MANUAL"));
         assertTrue(text.contains("RunCoordinator"));
+    }
+
+    @Test
+    public void availabilityDiagnosticReportsEveryPreflightRejectionWithoutEffects() throws Exception {
+        boolean symlinksSupported = symlinksSupported(assetFolder.getRoot());
+        List<AssetCase> cases = new ArrayList<>(Arrays.asList(AssetCase.values()));
+        if (!symlinksSupported) {
+            cases.remove(AssetCase.LOADER_SYMLINK);
+            cases.remove(AssetCase.BOOTSTRAP_SYMLINK);
+            cases.remove(AssetCase.NATIVE_SYMLINK);
+        }
+
+        for (AssetCase assetCase : cases) {
+            SuManager manager = SuManager.CLASSIC;
+            File nativeDir = assetFolder.newFolder("native-" + assetCase.name());
+            installReadyAssets(manager, nativeDir);
+            FakeAvailabilityEnvironment environment = new FakeAvailabilityEnvironment(
+                    manager.getPackageName(), nativeDir.getAbsolutePath());
+            String configPackage = manager.getPackageName();
+            switch (assetCase) {
+                case READY:
+                    break;
+                case NO_MANAGER_SELECTED:
+                    configPackage = null;
+                    environment.selectedPackage = null;
+                    break;
+                case UNSUPPORTED_MANAGER:
+                    configPackage = "com.example.unsupported";
+                    environment.selectedPackage = configPackage;
+                    break;
+                case MANAGER_NOT_INSTALLED:
+                    environment.installedPackages.remove(environment.selectedPackage);
+                    break;
+                case SECONDARY_USER:
+                    environment.ownerUser = false;
+                    break;
+                case UNSUPPORTED_FIRMWARE:
+                    environment.firmware = new FirmwareGate.Inputs("dm2q", "SM-S9180",
+                            "CP2A.260605.016", 37, "2026-10-05",
+                            "samsung/dm2qzhx/dm3q:17/CP2A.260605.016/S9180ZHU8GZIF:user/release-keys",
+                            "5.15.197-android13-8-34343818-abS9180ZHU8GZIF");
+                    break;
+                case LOG_BUFFER_OFF:
+                    environment.logTag = "S";
+                    break;
+                case NATIVE_LIBRARY_DIR_MISSING:
+                    environment.nativeLibraryDir = null;
+                    break;
+                case LOADER_MISSING:
+                    Files.delete(new File(nativeDir, manager.getLoaderName()).toPath());
+                    break;
+                case LOADER_SYMLINK:
+                    replaceWithSymlink(nativeDir, manager.getLoaderName());
+                    break;
+                case LOADER_NOT_REGULAR:
+                    replaceWithDirectory(nativeDir, manager.getLoaderName());
+                    break;
+                case LOADER_HASH_MISMATCH:
+                    corruptLastByte(nativeDir, manager.getLoaderName());
+                    break;
+                case BOOTSTRAP_MISSING:
+                    Files.delete(new File(nativeDir, RunPreflight.BOOTSTRAP_BIN).toPath());
+                    break;
+                case BOOTSTRAP_SYMLINK:
+                    replaceWithSymlink(nativeDir, RunPreflight.BOOTSTRAP_BIN);
+                    break;
+                case BOOTSTRAP_NOT_REGULAR:
+                    replaceWithDirectory(nativeDir, RunPreflight.BOOTSTRAP_BIN);
+                    break;
+                case NATIVE_MISSING:
+                    Files.delete(new File(nativeDir, RunPreflight.NATIVE_BIN).toPath());
+                    break;
+                case NATIVE_SYMLINK:
+                    replaceWithSymlink(nativeDir, RunPreflight.NATIVE_BIN);
+                    break;
+                case NATIVE_NOT_REGULAR:
+                    replaceWithDirectory(nativeDir, RunPreflight.NATIVE_BIN);
+                    break;
+                case ASSET_INSPECTION_FAILED:
+                    environment.nativeLibraryDir =
+                            assetFolder.newFile("not-a-directory-" + assetCase.name()).getAbsolutePath();
+                    break;
+                case NEXT_WITH_ONLY_CLASSIC_LOADER:
+                    configPackage = SuManager.NEXT.getPackageName();
+                    environment.selectedPackage = configPackage;
+                    break;
+                case CLASSIC_WITH_ONLY_NEXT_LOADER:
+                    Files.delete(new File(nativeDir, SuManager.CLASSIC.getLoaderName()).toPath());
+                    Files.copy(TestFixtures.bundledLoader(SuManager.NEXT),
+                            new File(nativeDir, SuManager.NEXT.getLoaderName()).toPath());
+                    break;
+                default:
+                    throw new AssertionError(assetCase);
+            }
+
+            Map<String, String> before = snapshot(nativeDir);
+            final String expectedConfigPackage = configPackage;
+            MainActivity.installAvailabilityEnvironmentForTesting((context, confirmed) -> {
+                assertEquals("diagnostic must be built from the confirmed selection",
+                        expectedConfigPackage,
+                        confirmed == null ? null : confirmed.getManagerPackage());
+                return environment;
+            });
+            installConfiguration(new RunConfig(configPackage, false, false, 0, 12), true);
+            installIdleCoordinator();
+            MainActivity activity = launch();
+
+            TextView diagnosticView = MainActivity.availabilityViewForTesting(activity);
+            assertEquals(assetCase.name(), View.VISIBLE, diagnosticView.getVisibility());
+            String diagnostic = diagnosticView.getText().toString();
+            if (assetCase == AssetCase.READY) {
+                assertTrue("expected no diagnostic, got: " + diagnostic, diagnostic.isEmpty());
+            } else {
+                assertTrue(assetCase.name() + ": " + diagnostic,
+                        diagnostic.startsWith("Run unavailable: "));
+                assertTrue(assetCase.name() + ": " + diagnostic,
+                        diagnostic.contains(assetCase.expectedReason));
+            }
+
+            // A read-only diagnostic must not stage, execute, fall back, or write anything.
+            assertEquals(assetCase.name() + " mutated bundled assets", before, snapshot(nativeDir));
+            assertNull(assetCase.name() + " started an operation",
+                    Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                            .getNextStartedService());
+            assertTrue(assetCase.name() + " wrote configuration", store.writes.isEmpty());
+            if (environment.queriedManagerPackage != null) {
+                assertEquals(assetCase.name() + " queried a different manager",
+                        environment.selectedPackage, environment.queriedManagerPackage);
+            }
+            assertEquals(assetCase.name() + " changed the manager spinner", 3,
+                    ((android.widget.Spinner) activity.findViewById(R.id.spinnerSuManager))
+                            .getAdapter().getCount());
+        }
+    }
+
+    @Test
+    public void availabilityDiagnosticUsesRealReadOnlyEnvironmentByDefault() {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        installIdleCoordinator();
+
+        MainActivity activity = launch();
+
+        String diagnostic = MainActivity.availabilityViewForTesting(activity).getText().toString();
+        assertTrue(diagnostic, diagnostic.startsWith("Run unavailable: "));
+        assertTrue(diagnostic, diagnostic.contains("unsupported firmware"));
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+    }
+
+    @Test
+    public void unreadableAvailabilityObservationsFailClosedWithoutEffects() {
+        MainActivity.installAvailabilityEnvironmentForTesting((context, confirmed) -> {
+            throw new IllegalStateException("observation denied");
+        });
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        installIdleCoordinator();
+
+        MainActivity activity = launch();
+
+        String diagnostic = MainActivity.availabilityViewForTesting(activity).getText().toString();
+        assertTrue(diagnostic, diagnostic.contains("availability could not be determined"));
+        assertFalse(diagnostic, diagnostic.contains("SUCCESS"));
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+    }
+
+    private static void installReadyAssets(SuManager manager, File nativeDir) throws Exception {
+        Files.copy(TestFixtures.bundledLoader(manager),
+                new File(nativeDir, manager.getLoaderName()).toPath());
+        Files.write(new File(nativeDir, RunPreflight.BOOTSTRAP_BIN).toPath(),
+                new byte[] {1, 2, 3});
+        Files.write(new File(nativeDir, RunPreflight.NATIVE_BIN).toPath(),
+                new byte[] {4, 5, 6});
+    }
+
+    private static void replaceWithSymlink(File nativeDir, String name) throws Exception {
+        File target = new File(nativeDir, "link-target-" + name);
+        Files.write(target.toPath(), new byte[] {9});
+        Files.delete(new File(nativeDir, name).toPath());
+        Files.createSymbolicLink(new File(nativeDir, name).toPath(), target.toPath());
+    }
+
+    private static void replaceWithDirectory(File nativeDir, String name) throws Exception {
+        Files.delete(new File(nativeDir, name).toPath());
+        Files.createDirectory(new File(nativeDir, name).toPath());
+    }
+
+    private static void corruptLastByte(File nativeDir, String name) throws Exception {
+        File file = new File(nativeDir, name);
+        byte[] bytes = Files.readAllBytes(file.toPath());
+        bytes[bytes.length - 1] ^= 0x01;
+        Files.write(file.toPath(), bytes);
+    }
+
+    private static boolean symlinksSupported(File directory) {
+        try {
+            File target = new File(directory, "probe-target");
+            File link = new File(directory, "probe-link");
+            Files.write(target.toPath(), new byte[] {1});
+            Files.createSymbolicLink(link.toPath(), target.toPath());
+            boolean supported = Files.isSymbolicLink(link.toPath());
+            Files.deleteIfExists(link.toPath());
+            Files.deleteIfExists(target.toPath());
+            return supported;
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            return false;
+        }
+    }
+
+    private static Map<String, String> snapshot(File directory) {
+        File[] files = directory.listFiles();
+        assertNotNull(files);
+        Map<String, String> result = new TreeMap<>();
+        for (File file : files) {
+            try {
+                BasicFileAttributes attributes = Files.readAttributes(file.toPath(),
+                        BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                String kind = attributes.isSymbolicLink() ? "link"
+                        : attributes.isRegularFile() ? "regular"
+                        : attributes.isDirectory() ? "dir" : "other";
+                String content = attributes.isRegularFile()
+                        ? Base64.getEncoder().encodeToString(Files.readAllBytes(file.toPath())) : "";
+                result.put(file.getName(), kind + ":" + attributes.size() + ":" + content);
+            } catch (IOException e) {
+                throw new AssertionError("could not snapshot " + file, e);
+            }
+        }
+        return result;
+    }
+
+    private enum AssetCase {
+        READY(""),
+        NO_MANAGER_SELECTED("select a supported SU manager"),
+        UNSUPPORTED_MANAGER("selected SU manager is not supported"),
+        MANAGER_NOT_INSTALLED("selected SU manager is not installed or visible"),
+        SECONDARY_USER("runs are supported only for the owner Android user"),
+        UNSUPPORTED_FIRMWARE("unsupported firmware: device does not match documented target"),
+        LOG_BUFFER_OFF("Developer Options log buffer size is Off"),
+        NATIVE_LIBRARY_DIR_MISSING("nativeLibraryDir is unavailable"),
+        LOADER_MISSING("selected bundled loader is missing"),
+        LOADER_SYMLINK("selected bundled loader must not be a symlink"),
+        LOADER_NOT_REGULAR("selected bundled loader must be a regular file"),
+        LOADER_HASH_MISMATCH("selected bundled loader failed its SHA-256 pin"),
+        BOOTSTRAP_MISSING("libbootstrap.so is missing"),
+        BOOTSTRAP_SYMLINK("libbootstrap.so must not be a symlink"),
+        BOOTSTRAP_NOT_REGULAR("libbootstrap.so must be a regular file"),
+        NATIVE_MISSING("libdfroot.so is missing"),
+        NATIVE_SYMLINK("libdfroot.so must not be a symlink"),
+        NATIVE_NOT_REGULAR("libdfroot.so must be a regular file"),
+        ASSET_INSPECTION_FAILED("bundled assets could not be inspected safely"),
+        NEXT_WITH_ONLY_CLASSIC_LOADER("selected bundled loader is missing"),
+        CLASSIC_WITH_ONLY_NEXT_LOADER("selected bundled loader is missing");
+
+        final String expectedReason;
+
+        AssetCase(String expectedReason) {
+            this.expectedReason = expectedReason;
+        }
+    }
+
+    private static final class FakeAvailabilityEnvironment implements RunPreflight.Environment {
+        String selectedPackage;
+        final Set<String> installedPackages = new HashSet<>(Arrays.asList(
+                SuManager.CLASSIC.getPackageName(), SuManager.NEXT.getPackageName()));
+        boolean ownerUser = true;
+        String nativeLibraryDir;
+        String logTag = "";
+        FirmwareGate.Inputs firmware = supportedFirmware();
+        String queriedManagerPackage;
+
+        FakeAvailabilityEnvironment(String selectedPackage, String nativeLibraryDir) {
+            this.selectedPackage = selectedPackage;
+            this.nativeLibraryDir = nativeLibraryDir;
+        }
+
+        @Override
+        public String getSelectedManagerPackage() {
+            return selectedPackage;
+        }
+
+        @Override
+        public boolean isManagerInstalled(String packageName) {
+            queriedManagerPackage = packageName;
+            return installedPackages.contains(packageName);
+        }
+
+        @Override
+        public boolean isOwnerUser() {
+            return ownerUser;
+        }
+
+        @Override
+        public String getNativeLibraryDir() {
+            return nativeLibraryDir;
+        }
+
+        @Override
+        public String getLogTag() {
+            return logTag;
+        }
+
+        @Override
+        public FirmwareGate.Inputs getFirmware() {
+            return firmware;
+        }
+
+        private static FirmwareGate.Inputs supportedFirmware() {
+            return new FirmwareGate.Inputs("dm3q", "SM-S9180", "CP2A.260605.016", 37,
+                    "2026-10-05",
+                    "samsung/dm3qzhx/dm3q:17/CP2A.260605.016/S9180ZHU8GZIF:user/release-keys",
+                    "5.15.197-android13-8-34343818-abS9180ZHU8GZIF");
+        }
     }
 
     private void assertActiveOperationDisablesControls(boolean indeterminate) throws Exception {

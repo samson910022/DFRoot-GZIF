@@ -9,7 +9,8 @@ final class ResultMessages {
         switch (result.getType()) {
             case SUCCESS:
                 return result.getDetail() == RunResult.Detail.ALREADY_HOOKED
-                        ? "DFRoot: SUCCESS (already hooked)" : "DFRoot: SUCCESS";
+                        ? "DFRoot: SUCCESS (already attempted/hooked; root status unverified)"
+                        : "DFRoot: SUCCESS";
             case BOOTSTRAP_ERROR:          return "DFRoot: Error - bootstrap/late-load failed";
             case PRECHECK_FAILED:          return "DFRoot: Error - precheck failed (see output)";
             case PATCH_FAILED:             return "DFRoot: Error - failed to patch files";
