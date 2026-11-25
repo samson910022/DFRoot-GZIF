@@ -26,33 +26,35 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 
 > [!WARNING]
 > **Validation boundary.** run6/run8 happened on 2026-11-17 against the
-> **historical implementation** (old multi-marker status protocol and the
-> then-current `dfroot.ko` pins). The current round-2 PR #3 tree — single
-> `/dev/dffinal` outcome, KO hash-skip policy, build provenance and Java
-> preference persistence — is **host-tested only and UNVALIDATED on device**.
-> Do not publish a release with obsolete KO pins: if a rebuilt DDK artifact no
-> longer matches the two reviewed pins, stop and review/update them in a
-> reviewed commit; never skip the check for CI or release builds. Gradle now
-> passes the Android variant (`release` / `debug`) as the authoritative native
-> policy signal, and the KO is linked into a dedicated `.dfroot_ko` section so
-> the **final bytes inside `libdfroot.so`** are SHA-256-checked against the same
-> pins before a tag is published. That real packaged-byte gate is **blocked
-> until the KO is re-pin-reviewed**; passing the host fixture tests is not
-> device validation. Provenance manifests are informational evidence, **not**
-> an independent reproducible-build proof or attestation. Auto Soft Reboot and
-> Start on Boot stay disabled by default and unvalidated. The residual
-> `/data/local/tmp/.ksud-stage` trust issue (P1-08) cannot be closed without
-> rebuilding the bundled loaders and is a release gate.
-> Round-3 PR #3 phase 3 adds a process-wide SharedPreferences quarantine with a
-> durable device-protected marker: a failed preference write (memory/disk
-> divergence) blocks LAUNCH ROOT (rc 8) and boot-time launching, and a lingering
-> `/dev/df` now returns rc 9 ("already hooked") instead of rc 0. The Java rc
-> table (including rc 7, 8, 9 and the additive 64 recovery-failed bit) is
-> truthful — no toast claims verified root or a confirmed reboot. If the marker
-> cannot be persisted, "Start on Boot" is disabled fail-closed. All of this is
-> host-only JVM testing (15 tests), **UNVALIDATED on device**; P1-08 remains
-> **OPEN** and documenting it is not a fix. Auto Soft Reboot and Start on Boot
-> stay disabled by default and unvalidated.
+> **historical implementation** (old multi-marker protocol, then-current KO
+> pins, old preference path); no hardware run validates the current head of
+> `fix/native-exploit-robustness`. That head is **host-tested only and
+> UNVALIDATED on device**; a successful build does not certify safe privileged
+> execution. PR CI is green on host suites only and is **non-publishing**: no
+> APK is uploaded and no release claim is made. Publishing (non-PR) events add
+> real KO/APK gates before upload: every distributable APK gets its own
+> packaged-byte manifest with `so_sha256` binding, provenance identity is
+> checked for every record, and a distributable-evidence choke point gates the
+> upload. Provenance manifests are informational evidence, **not** an
+> attestation or an independent reproducible-build proof.
+> Host suites: 49 status + 13 proc-scan + 26 ELF + 16/14/10 device-version
+> cases, CMake 23/15/3 cases, JVM **28 tests** (4/5/8/11 in LaunchGate /
+> ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
+> XML assertion, and **7/7** suite markers.
+> Do not publish with obsolete KO pins: the pins remain unchanged and the gate
+> is fail-closed until a reviewed re-pin; no tag was created. Gradle passes the
+> Android variant (`release` / `debug`) as the authoritative native policy
+> signal, and the KO is linked into a dedicated `.dfroot_ko` section whose final
+> bytes in `libdfroot.so` are SHA-256-checked against the same pins.
+> The app uses a single atomically published nonce-bound `/dev/dffinal` outcome
+> (truthful rc 0–9 plus the additive 64 recovery bit), separate app-owned
+> `dfbootfail` / `dfrecover` channels, a write-ahead durable preference marker,
+> lifecycle-scoped listeners and a component-state-authoritative boot switch —
+> all host-proven only. Auto Soft Reboot and Start on Boot remain disabled by
+> default and unvalidated. **P1-08 remains OPEN:** `/data/local/tmp/.ksud-stage`
+> can be swapped by a `shell`-uid process and needs a loader rebuild;
+> documenting it is not a fix. See `CHANGELOG.md` round-4 (2026-11-25) and
+> `PORTING-GZIF.md` §16–17 for the test/lifecycle/failure-path detail.
 
 ## FAQ
 

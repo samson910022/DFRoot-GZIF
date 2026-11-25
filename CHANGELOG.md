@@ -1,6 +1,81 @@
 # Changelog — DFRoot GZIF
 
+## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
+
+**All evidence in this section is host-only.** No hardware run validates the
+current head of `fix/native-exploit-robustness`; a green build does not certify
+safe privileged execution. No tag was created and no release artifact was
+published. This repair updates documentation (and the PR description) only; it
+does not change code, tests, CMake or CI. Historical run6/run8 results stay
+attached to the historical implementation described in §4.8-gzif below.
+
+### Stable-ID disposition (consolidated review comment 7126155178, round 4)
+
+| ID | Round-4 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing/quiescence UNVALIDATED** | 128-bit nonce generated and bound before any state write; strict `df_parse_final_token()` (exact length, no embedded NUL, exact nonce, no extra bytes) with garbled/foreign tokens ignored; reserved-nonce `BOOTSTRAP_FAILED` published only on the separate app-owned `dfbootfail` channel and consumed as observable rc=1 via a dedicated reader. Real-file and mock tests cover stale state and repeated observations. Android publication/access and on-device freshness remain unproven. |
+| P1-07 | **Addressed in host-tested scope; asynchronous safety UNVALIDATED** | Cleanup runs exactly once, after the first valid bound status observation (or once on the shared deadline if none arrives), on the SAME absolute deadline as the poll loop; its time is charged to that deadline and the clock is rechecked. Recovery polling is bounded to 5 s and clamped to the remaining deadline; a NULL/failed `recovery_ok()` or timeout publishes `REBOOT_SKIPPED` and can only disable the reboot. A failed restore adds the rc-64 bit to every code. Mocks prove ordering, count and fail-closed branches, not device quiescence or that asynchronous activity has finished. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing it requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not claim fixed. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | The packaged-byte gate always runs; the real APK gate runs on every non-PR (publishing) event before any upload, over the complete staged APK set, with per-APK manifest + `so_sha256` binding, manifest/dump invalidation at entry and `if-no-files-found: error`. PR runs are non-publishing (host fixtures only, no APK uploaded, no release claim). Pins are unchanged and the gate is fail-closed pending a reviewed re-pin; no tag was created. |
+| P2-06 | **Addressed for identity checks; provenance remains informational** | Required identity check on EVERY `dfroot-build-provenance.txt` (git HEAD == `GITHUB_SHA`, release variant, reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler identity fields), plus complete-set release evidence with one row per uploaded APK. Records are audit evidence, not an attestation or an independent reproducible-build proof. |
+| P2-07 | **Addressed in this repair** | Test/lifecycle/failure-path counts and CI markers documented below; the PR description is replaced to match the current head and actual CI without device-verification claims; historical run6/run8 remain attached only to the historical implementation. |
+| P2-08 | **Addressed in host-tested scope; real PackageManager/fsync UNVALIDATED** | A durable write-ahead `PENDING` marker is published before the commit (full write, read-back, fsync); recovery requires a fully validated PENDING→commit cycle of the SAME key; unattributable faults latch a sticky fail-closed `WILDCARD`; the boot component is disabled synchronously at the failure boundary. Device-protected storage and real PackageManager/fsync behavior are untested. |
+| P2-09 | **Addressed; verified by host fixtures** | The packaged verifier invalidates its manifest and section dump at entry; fixtures reuse a single output path for success→failure, poisoned-dump and failure→success sequences, and the upload path verifies the complete staged set before upload. |
+| P2-10 | **Addressed in host-tested scope; real UI lifecycle UNVALIDATED** | Lifecycle-scoped listener registration/removal, component-state-authoritative boot switch, the user can always turn boot OFF, nothing auto-enables, and a framework write is accepted only when actual component state matches. Real Activity/Fragment recreation and PackageManager behavior are unvalidated. |
+
+Findings that **remain resolved in the prior narrow scope**: P1-01, P1-03,
+P1-04, P1-05, P1-06, P2-01, P2-02, P2-03, P2-05 and P1-09 (newly resolved in
+round 4 through the CI-policy environment isolation). Their earlier evidence is
+unchanged; none of them constitutes device validation.
+
+### Final host test shape (current head)
+
+- **Native** (`make -C tests/native test`): **49** `status_protocol` cases;
+  `final_publish_test` against real temp files (0644 under a hostile umask,
+  atomic replace, symlink temp sabotage, reserved-nonce bootfail token and
+  strict recovery-status reader); **13** `proc_scan_policy` cases; **26** ELF
+  fixtures; **16 + 14 + 10** kernel / token / release device-version cases.
+  Host tests never execute privileged payloads.
+- **CMake** (`cmake -P`): `ko_hash_policy_test.cmake` **23** cases (clean
+  environment and simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`, skip
+  rejection, variant authority); `packaged_ko_test.cmake` **15** cases
+  including reused-path stale manifest/dump evidence;
+  `apk_packaging_gate_test.cmake` **3** cases using a harmless deterministic ZIP
+  fixture (not a real APK).
+- **JVM** (`:app:testDebugUnitTest`): **28 tests, 0 failures, 0 errors,
+  0 skips** — `LaunchGate` 4, `ListenerLifecycle` 5, `PreferenceIntegrity` 8,
+  `PreferencePersister` 11. CI parses the JUnit XML and asserts exactly
+  28/0/0/0; a green Gradle exit code alone is not accepted.
+- **All-events suite markers (7/7)**: `marker-native`, `marker-ko-policy`,
+  `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`,
+  `marker-jvm`, `marker-junit`; one gate fails if any marker is missing.
+- **Publishing-only gates (non-PR events, before upload)**: `marker-apk-gate`
+  (every distributable APK, per-APK manifest + `so_sha256` binding),
+  `marker-provenance-identity` (required, every record),
+  `marker-release-evidence`, `marker-distributable-evidence`, then a single
+  upload choke point on the staged set. PR runs are **non-publishing**: host
+  fixtures only, no APK uploaded, no release claim. Provenance is informational
+  evidence, not attestation or reproducible-build proof.
+
+### Validation boundary
+
+P1-02/P1-07 are proven only with host mocks and real-file adapters; device
+timing, quiescence and privileged-state safety are UNVALIDATED. P2-04/P2-06/
+P2-09 are proven with host fixtures and CI-shaped checks; the real release APK
+path stays fail-closed with the unchanged obsolete pre-CFI pins until a
+reviewed re-pin, and no tag was created. P2-08/P2-10 are proven with host JVM
+tests; real PackageManager/fsync and UI lifecycle behavior are UNVALIDATED.
+P1-08 remains OPEN. Auto Soft Reboot and Start on Boot remain disabled by
+default and unvalidated. No hardware run validates this head — run6/run8
+validate only the historical implementation (old multi-marker protocol,
+then-current pins, old preference path). A successful build does not certify
+safe privileged execution.
+
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
+
+> Historical section. The round-4 section above is authoritative for current
+> counts, cleanup timing and the reserved bootfail channel; this section and
+> the two phase sections below are kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**
 No hardware run has exercised the quarantine latch, the new rc gates or the
@@ -20,6 +95,12 @@ updated UI messages. Documenting a release gate is not closing it.
   reported first and then calls `markAmbiguous(key)`; a successful commit calls
   `markConsistent(key)`. The JVM fake now models separate in-memory and on-disk
   maps, so a failed commit really leaves them divergent.
+  **Round-4 final behavior (supersedes the in-process latch above):** a durable
+  `PENDING` marker is published *before* the commit with full-write/read-back/
+  fsync; recovery needs a fully validated PENDING→commit cycle of the SAME key;
+  unattributable faults latch a sticky fail-closed `WILDCARD` that no key can
+  clear, and the boot component is disabled synchronously at the failure
+  boundary. Real PackageManager/fsync behavior is UNVALIDATED.
 - **Launch / boot gating.** `ExploitRunner.run()` initializes
   `PreferenceIntegrity` and evaluates the pure static `earlyExitRc(devDfExists,
   prefsQuarantined)` before touching the device: `/dev/df` now returns rc 9
@@ -33,6 +114,9 @@ updated UI messages. Documenting a release gate is not closing it.
   enable it, uses the same failure toast/boot-component guard, and refreshes on
   listener callbacks. `BootReceiver` initializes the latch from the DE context
   and skips the boot launch when quarantined.
+  Round 4 makes listener registration lifecycle-scoped and the boot switch
+  component-state-authoritative (the user can always turn boot OFF; nothing
+  auto-enables). See the round-4 section above and `PORTING-GZIF.md` §17.
 - **Java rc map is now truthful (phase 1b follow-up).** New `StatusRc.java`
   mirrors `status_protocol.h`: rc 0 root-only, 1 error, 2 unknown, 3 patch
   failure, 4 reboot requested, 5 reboot skipped, 6 reboot failed,
@@ -47,7 +131,7 @@ updated UI messages. Documenting a release gate is not closing it.
   `tests/java/LaunchGateTest.java` has 4 cases (early-exit truth table including
   `/dev/df` precedence, rc constants, recovery bit on every code, never claiming
   verified root/confirmed reboot). The Gradle `test` source dir already points
-  at `tests/java`; CI's JUnit XML assertion now expects **15 tests**, 0
+  at `tests/java`; CI's JUnit XML assertion now expects **28 tests** (four JVM classes; see round-4 section above), 0
   failures/errors/skips. These are host-only JVM tests, not device validation.
 - **Release gates unchanged.** P1-08 (`/data/local/tmp/.ksud-stage` swapped by a
   `shell`-uid process before the loader renames it) remains **OPEN**: this phase
@@ -82,13 +166,16 @@ not be published.
   KO SHA-256 MISMATCH) and writes a manifest with status, sha256, bytes,
   section, so_sha256, pins, timestamp and git HEAD. No pin was added or
   relaxed. `ko_pin_policy.cmake` shares pin validation between both verifiers.
-- **Real APK gate (P2-04).** Tag builds unzip `lib/arm64-v8a/libdfroot.so`
-  from the release APK, run the same verifier with the NDK's llvm-objcopy and
-  assert `status: verified` **before** artifact upload / GitHub Release, with
-  no `continue-on-error`. **This real gate is blocked until KO re-pin**: the
-  final linked bytes must be reviewed and deliberately re-pinned before a tag
-  can ship; an unknown blob fails closed rather than being accepted by a skip
-  flag. Do not treat a passing host fixture run as device validation.
+- **Real APK gate (P2-04).** On every non-PR (publishing) event the workflow
+  unzips `lib/arm64-v8a/libdfroot.so` from EACH release APK, runs the same
+  verifier with the NDK's llvm-objcopy and asserts `status: verified` plus a
+  matching manifest `so_sha256` **before** any upload or GitHub Release, with
+  no `continue-on-error`. PR runs are non-publishing: host fixtures only, no
+  APK uploaded, no release claim. **The real gate is blocked until KO re-pin**:
+  pins are unchanged and the final bytes must be reviewed and deliberately
+  re-pinned before a tag can ship; an unknown blob fails closed rather than
+  being accepted by a skip flag. Do not treat a passing host fixture run as
+  device validation.
 - **Provenance is evidence, never stale (P2-06).**
   `record_build_provenance.cmake` now fails closed if the KO manifest is
   missing, malformed or disagrees with the stable stamp (status and hash), and
@@ -101,9 +188,9 @@ not be published.
   from `make_packaged_ko_fixture.py`) covers valid pin, ANY-pin, mismatch,
   corrupted byte, missing section, wrong size, bad objcopy, skip-cannot-bypass
   and fail-closed manifest behaviour. CI asserts a marker from every native /
-  CMake / JVM suite and parses the JUnit XML for **15 tests, 0
-  failures/errors/skips** after phase 3 added the launch-gate JVM cases, so one
-  failure cannot hide another. Required gates
+  CMake / JVM suite (the round-4 final shape asserts 7/7 markers) and parses the
+  JUnit XML for **28 tests, 0 failures/errors/skips** across four JVM classes, so
+  one failure cannot hide another. Required gates
   have no `continue-on-error`; only the informational provenance uploads stay
   best-effort. A release-evidence step checks the git SHA, skip OFF in every
   CMakeCache, a verified KO manifest whose hash is in the pins, a verified
@@ -175,7 +262,8 @@ not be published.
   claims root was verified or a reboot is guaranteed.
 - Build/tests: `status_protocol.c` is linked into both native targets;
   `tests/native/status_protocol_test.c` replaces the marker test with 28
-  mock-based cases and touches no real `/dev`. `final_status_publish.c` is
+  mock-based cases at that time (**49 in the round-4 final suite**) and touches
+  no real `/dev`. `final_status_publish.c` is
   linked into `bootstrap` and exercised by `tests/native/final_publish_test.c`
   against real temp files (0644 under a hostile umask, atomic replace, symlink
   temp sabotage).
@@ -203,14 +291,18 @@ not be published.
   the SU-manager spinner (with a recursion guard) and `SettingsFragment`
   returns the listener result so switches revert on a failed write; both show
   a Toast and log. New `tests/java/PreferencePersisterTest.java` (fake
-  `SharedPreferences`, 8 JVM cases) and a `:app:testDebugUnitTest` CI step.
-  PR builds now configure without `signing.properties`: the release signing
+  `SharedPreferences`, 8 JVM cases at introduction; 11 in the round-4 final
+  suite) and a `:app:testDebugUnitTest` CI step.
+  PR builds configure without `signing.properties`: the release signing
   config is a harmless placeholder unless the real keystore and all secrets
-  are present, and `assembleRelease` fails closed otherwise.
-- Test/docs truthfulness (P2-07): 20-case (14 numbered groups, some with a/b
-  subcases) host-only `tests/cmake/ko_hash_policy_test.cmake` is wired into CI
-  alongside the existing `make -C tests/native test` step; docs below state
-  the validation boundary explicitly.
+  are present, and `assembleRelease` fails closed otherwise. This resolves the
+  earlier CI signing configuration issue; it is unrelated to the P1-08
+  staging gate.
+- Test/docs truthfulness (P2-07): 20 cases at introduction (14 numbered groups,
+  some with a/b subcases; **23 cases** in the round-4 final shape) in host-only
+  `tests/cmake/ko_hash_policy_test.cmake`, wired into CI alongside the existing
+  `make -C tests/native test` step; docs below state the validation boundary
+  explicitly.
 - Round-3 docs correction: `PORTING-GZIF.md` §4's "70 s plus a 10 s grace" was
   inaccurate — the wait is capped at 70 s total, with the grace
   `min(observation + 10 s, start + 70 s)` and cleanup once on observation or
@@ -228,9 +320,11 @@ this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
   (`/dev/urandom` fallback), writes it atomically (0644, `fchmod`, `fsync`,
   `rename`) to `/data/user_de/0/df.root/files/dfinv` **before**
   `createOrphanProcess()`, and uses it for the consumer. `bootstrap.c` strictly
-  reads/validates the same 32-hex-char nonce at startup; missing/malformed →
-  publish ERROR with the reserved zero nonce, force `soft_reboot=0`, and no
-  reboot or late-load at all. The single final token is now
+  reads/validates the same 32-hex-char nonce at startup; at this phase a
+  missing/malformed nonce published ERROR with the reserved zero nonce and
+  skipped reboot/late-load. Round 4 changed this to `BOOTSTRAP_FAILED` under
+  the reserved nonce on the separate app-owned `dfbootfail` channel (rc=1) and
+  binds the nonce before any state write. The single final token is now
   `dfroot-v2:<nonce>:<outcome>\n`; `df_format_final_token()` /
   `df_parse_final_token()` reject embedded NUL, truncated or extra bytes, a
   stale/foreign nonce and unknown/`none` outcomes. `df_publish_final()`
@@ -247,10 +341,13 @@ this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
   no refinement becomes `REBOOT_ATTEMPT_UNKNOWN`. New rc constants:
   `DF_RC_ATTEMPT_UNKNOWN=7`, `DF_RC_ALREADY_HOOKED=9`,
   `DF_RC_RECOVERY_FAILED_BIT=64`; both pending and unknown map to rc 7.
-- **Cleanup before the extended wait.** `status_flow_run()` calls `cleanup_cb`
-  exactly once **before** `consumer_await()`, so patched files are released
-  before the bounded wait; producer-side confirms absence only if the checked
-  deadline has not expired. `/proc` scanning uses the new pure
+- **Cleanup timing (superseded in round 4).** At this phase `status_flow_run()`
+  called `cleanup_cb` exactly once **before** `consumer_await()`; the round-4
+  lifecycle fix moved it to exactly once **after the first valid bound status
+  observation** (or once at the end of the shared deadline), charged to that
+  same deadline, with a bounded/clamped recovery poll and `REBOOT_SKIPPED` on a
+  NULL/failed `recovery_ok()` or timeout. Producer-side confirms absence only
+  if the checked deadline has not expired. `/proc` scanning uses the new pure
   `proc_scan_policy.{c,h}` verdict (benign ENOENT/ESRCH/zero bytes, incomplete
   on other errno or a full buffer without a match, match wins), strict PID
   `strtol` validation and a tri-state -1/0/1 result. `run_ctx()` and
@@ -260,11 +357,12 @@ this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
   failed (instead of downgrading only rc 0 to 1). `cleanup()` now reads each
   restored region back, `memcmp`s it with the saved original and logs
   `VERIFICATION FAILED` + marks failure on any mismatch.
-- **Tests:** `status_protocol_test.c` has 34 mock cases (strict v2
-  format/parse, new outcomes, pending preflight, unknown on refinement failure,
-  grace past budget and clamped by overall, cleanup-before-first-read, pending
-  timeout, clock/deadline boundaries); new `proc_scan_policy_test.c` has 13
-  table cases; `final_publish_test.c` exercises canonical tokens and rejects
+- **Tests:** `status_protocol_test.c` had 34 mock cases at this phase (**49 in
+  the round-4 final suite**, adding lifecycle, reserved-bootfail and strict
+  recovery-status paths: strict v2 format/parse, new outcomes, pending preflight,
+  unknown on refinement failure, grace past budget and clamped by overall,
+  cleanup timing, pending timeout, clock/deadline boundaries); new
+  `proc_scan_policy_test.c` has 13 table cases; `final_publish_test.c` exercises canonical tokens and rejects
   malformed ones with the prior final untouched. `make -C tests/native test`,
   host compiles and `git diff --check` are clean.
 
