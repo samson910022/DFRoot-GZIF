@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): require all process wrappers to fail closed after a checked commit fails. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): define the checked, process-independent attempt barrier boundary. See NOTICE.
 package df.root;
 
@@ -15,13 +16,15 @@ package df.root;
  *
  * <p><b>Uncertain commit contract.</b> After any checked commit in
  * {@link #publish(OperationAttempt)} or {@link #clear(String)} returns false or
- * throws, that store instance is UNCERTAIN: a process-local preference cache may
- * already have been mutated even though durable state was not. That instance
- * must then fail closed on every subsequent {@code load()}, {@code publish()},
- * and {@code clear()} (throw Failure, or return false where the boolean contract
- * requires) instead of treating its cache as proof of durable absence. Only a
- * store created after a PROCESS restart re-reads durable state; a new wrapper
- * in the same process shares the cached SharedPreferences view.</p>
+ * throws, ALL stores in the same process for that durable store are UNCERTAIN:
+ * the process-local preference cache may already have been mutated even though
+ * durable state was not. Every such store — including one constructed after the
+ * failed commit — must then fail closed on {@code load()} and {@code publish()}
+ * and on {@code clear(String)} with a non-null ID (throw Failure, or return
+ * false where the boolean contract requires) instead of treating its cache as
+ * proof of durable absence. A null-ID {@code clear()} still returns false
+ * without a certainty check. Only a PROCESS restart re-reads durable state; a
+ * new wrapper in the same process shares the cached SharedPreferences view.</p>
  */
 interface OperationAttemptStore {
     /** Checked persistence failure; callers must not proceed on this path. */
@@ -38,23 +41,24 @@ interface OperationAttemptStore {
     /**
      * Persisted record, or {@code null} only when no attempt key exists at all.
      * Throws {@link Failure} for an existing-but-incomplete/corrupt record, a
-     * corrupt value type, or an instance left uncertain by a failed commit.
+     * corrupt value type, or any store left uncertain by a failed commit in
+     * this process.
      */
     OperationAttempt load() throws Failure;
 
     /**
      * Publishes an unconfirmed attempt. False when a different unconfirmed
      * attempt already exists or the checked commit did not persist; never
-     * overwrites another operation's barrier. Throws {@link Failure} if this
-     * instance is uncertain after an earlier failed commit.
+     * overwrites another operation's barrier. Throws {@link Failure} if the
+     * durable store is uncertain in this process after an earlier failed commit.
      */
     boolean publish(OperationAttempt attempt) throws Failure;
 
     /**
      * Compare-and-clear by operation ID. False for a mismatch, a null ID, or a
      * failed commit. A null ID returns false before the certainty check. Throws
-     * {@link Failure} if this instance is uncertain after an earlier failed
-     * commit.
+     * {@link Failure} if the durable store is uncertain in this process after
+     * an earlier failed commit.
      */
     boolean clear(String operationId) throws Failure;
 

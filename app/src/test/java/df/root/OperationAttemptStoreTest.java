@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): prove failed-commit uncertainty fails closed across fresh process wrappers. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify checked commits, CAS clear, duplicate rejection, and fail-closed loads. See NOTICE.
 package df.root;
 
@@ -8,6 +9,8 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.lang.reflect.InvocationHandler;
@@ -21,6 +24,16 @@ import java.util.Map;
 public class OperationAttemptStoreTest {
     private static final String ID = "attempt-store-run-1";
     private static final String OTHER = "attempt-store-run-2";
+
+    @Before
+    public void setUp() {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
+    }
+
+    @After
+    public void tearDown() {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
+    }
 
     @Test
     public void publishUsesOneCheckedCommitOfTheDedicatedKeys() throws Exception {
@@ -121,8 +134,10 @@ public class OperationAttemptStoreTest {
         assertThrows(OperationAttemptStore.Failure.class, store::load);
         assertThrows(OperationAttemptStore.Failure.class, () -> store.clear(ID));
 
-        // Only durable values survive a process restart, where a checked clear
-        // can succeed through a fresh store instance.
+        // Only durable values survive a PROCESS restart, which also clears the
+        // process-wide latch (test seam): a fresh store may then check the
+        // still-present durable record and clear it successfully.
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
         SharedPreferencesOperationAttemptStore restarted =
                 new SharedPreferencesOperationAttemptStore(
                         new FakePreferences(new HashMap<>(prefs.values)).delegate());
@@ -296,6 +311,9 @@ public class OperationAttemptStoreTest {
         // The boolean contract for a null ID stays false even on an uncertain store.
         assertFalse(store.clear(null));
 
+        // A PROCESS restart clears the process-wide latch; the fresh wrapper
+        // then re-reads the durable record that the failed clear did not remove.
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
         SharedPreferencesOperationAttemptStore fresh =
                 new SharedPreferencesOperationAttemptStore(prefs.freshDelegate());
         OperationAttempt loaded = fresh.load();
@@ -334,6 +352,76 @@ public class OperationAttemptStoreTest {
     }
 
     @Test
+    public void failedClearPoisonsAFreshWrapperOverTheSameCache() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore first =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        assertTrue(first.publish(attempt(ID, 47L)));
+        prefs.failCommits();
+
+        assertFalse(first.clear(ID));
+        assertTrue("durable record survived the failed clear",
+                prefs.durableContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        assertFalse("the in-memory cache now looks empty",
+                prefs.cachedContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+
+        // Production obtains a new wrapper over the same cached view in the
+        // boot-claim worker and in run-config authorization. It must not read
+        // that empty cache as proof of durable absence.
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.sameCacheDelegate());
+        assertThrows(OperationAttemptStore.Failure.class, fresh::load);
+        assertThrows(OperationAttemptStore.Failure.class,
+                () -> fresh.publish(attempt(OTHER, 47L)));
+        assertThrows(OperationAttemptStore.Failure.class, () -> fresh.clear(ID));
+        assertFalse("null-ID clear keeps its boolean contract", fresh.clear(null));
+        assertThrows(OperationAttemptStore.Failure.class, first::load);
+    }
+
+    @Test
+    public void failedPublishPoisonsAFreshWrapperOverTheSameCache() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore first =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        prefs.failCommits();
+
+        assertFalse(first.publish(attempt(ID, 48L)));
+        assertFalse("durable state was not written",
+                prefs.durableContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        assertTrue("the in-memory cache was mutated anyway",
+                prefs.cachedContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.sameCacheDelegate());
+        assertThrows(OperationAttemptStore.Failure.class, fresh::load);
+        assertThrows(OperationAttemptStore.Failure.class,
+                () -> fresh.publish(attempt(ID, 48L)));
+        assertThrows(OperationAttemptStore.Failure.class, () -> fresh.clear(ID));
+        assertFalse(fresh.clear(null));
+    }
+
+    @Test
+    public void thrownCommitPoisonsAFreshWrapperOverTheSameCache() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore first =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        prefs.throwOnCommit(new IllegalStateException("disk full"));
+
+        assertThrows(OperationAttemptStore.Failure.class,
+                () -> first.publish(attempt(ID, 49L)));
+        assertFalse("durable state was not written",
+                prefs.durableContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.sameCacheDelegate());
+        assertThrows(OperationAttemptStore.Failure.class, fresh::load);
+        assertThrows(OperationAttemptStore.Failure.class,
+                () -> fresh.publish(attempt(ID, 49L)));
+        assertThrows(OperationAttemptStore.Failure.class, () -> fresh.clear(ID));
+        assertFalse(fresh.clear(null));
+    }
+
+    @Test
     public void successfulClearRemainsIdempotent() throws Exception {
         FakePreferences prefs = new FakePreferences(new HashMap<>());
         SharedPreferencesOperationAttemptStore store =
@@ -362,7 +450,7 @@ public class OperationAttemptStoreTest {
     }
 
     /** Models Android's in-memory edit before disk commit, with durable values separate. */
-    private static final class FakePreferences implements InvocationHandler {
+    static final class FakePreferences implements InvocationHandler {
         private final Map<String, Object> values;
         private final Map<String, Object> cached;
         private final Object preferences;
@@ -375,8 +463,12 @@ public class OperationAttemptStoreTest {
         private RuntimeException commitFailure;
 
         FakePreferences(Map<String, Object> values) {
+            this(values, new HashMap<>(values));
+        }
+
+        private FakePreferences(Map<String, Object> values, Map<String, Object> cached) {
             this.values = values;
-            this.cached = new HashMap<>(values);
+            this.cached = cached;
             this.preferences = proxy(android.content.SharedPreferences.class, this);
             this.editor = proxy(android.content.SharedPreferences.Editor.class,
                     (ignored, method, args) -> invokeEditor(method, args));
@@ -389,6 +481,27 @@ public class OperationAttemptStoreTest {
         /** A fresh process-local view over the SAME durable map (a new store instance). */
         android.content.SharedPreferences freshDelegate() {
             return new FakePreferences(values).delegate();
+        }
+
+        /** Another wrapper over the SAME in-memory cache, as production obtains. */
+        android.content.SharedPreferences sameCacheDelegate() {
+            return new FakePreferences(values, cached).delegate();
+        }
+
+        void failCommits() {
+            this.commitResult = false;
+        }
+
+        void throwOnCommit(RuntimeException failure) {
+            this.commitFailure = failure;
+        }
+
+        boolean durableContains(String key) {
+            return values.containsKey(key);
+        }
+
+        boolean cachedContains(String key) {
+            return cached.containsKey(key);
         }
 
         private Object invokeEditor(Method method, Object[] args) {

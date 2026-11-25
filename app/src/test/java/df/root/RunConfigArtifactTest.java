@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): prove a fresh process-wide poisoned attempt store publishes no run_config. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): specify atomic private run-config publication and failure cleanup. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover '=' rejection and the no-follow-before-chmod ordering. See NOTICE.
 package df.root;
@@ -8,6 +9,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -26,6 +28,7 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
@@ -45,12 +48,18 @@ public class RunConfigArtifactTest {
 
     @Before
     public void setUp() throws Exception {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
         PosixFileSupport.assumePosixPermissionsSupported(temporaryFolder.getRoot().toPath());
         directory = temporaryFolder.newFolder("de-root").toPath();
         plan = new RunPreflight.Plan(SuManager.NEXT,
                 new File(directory.toFile(), "loader"),
                 new File(directory.toFile(), "bootstrap"),
                 new File(directory.toFile(), "native"));
+    }
+
+    @After
+    public void tearDown() {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
     }
 
     @Test
@@ -258,6 +267,39 @@ public class RunConfigArtifactTest {
         assertArrayEquals(victimBytes, Files.readAllBytes(victim));
         assertFalse(Files.exists(directory.resolve(RunConfigArtifact.RUN_CONFIG)));
         assertNoTemporaryFiles(directory);
+    }
+
+    @Test
+    public void freshUncertainAttemptStoreRefusesAuthorizedPublishAndCreatesNoFile() throws Exception {
+        // Wrapper A fails a checked clear, leaving the shared cache empty while
+        // the durable attempt is unchanged.
+        OperationAttemptStoreTest.FakePreferences prefs =
+                new OperationAttemptStoreTest.FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore poisoned =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        assertTrue(poisoned.publish(new OperationAttempt(OPERATION_ID,
+                RunConfig.ExecutionMode.MANUAL, 23L, true, "admitted")));
+        prefs.failCommits();
+        assertFalse(poisoned.clear(OPERATION_ID));
+        assertTrue("durable attempt survives the failed clear",
+                prefs.durableContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        assertFalse("the shared cache now looks empty",
+                prefs.cachedContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+
+        // Production authorization constructs a new wrapper in this process.
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.sameCacheDelegate());
+        RecordingFileSystem fileSystem = new RecordingFileSystem();
+        IOException refused = assertThrows(IOException.class,
+                () -> RunConfigArtifact.publishAuthorized(directory, OPERATION_ID, CONFIG,
+                        plan, RunConfig.ExecutionMode.MANUAL, fresh, FINGERPRINT, KERNEL,
+                        fileSystem));
+
+        assertTrue(refused.getMessage(), refused.getMessage().contains("unreadable"));
+        assertFalse("uncertain store published run_config",
+                Files.exists(directory.resolve(RunConfigArtifact.RUN_CONFIG)));
+        assertNoTemporaryFiles(directory);
+        assertTrue("no filesystem writes were attempted", fileSystem.events.isEmpty());
     }
 
     private void publish(RunConfigArtifact.FileSystem fileSystem) throws IOException {

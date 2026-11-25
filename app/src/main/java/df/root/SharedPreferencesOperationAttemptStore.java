@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): make failed-commit uncertainty process-wide across all attempt-store wrappers. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): persist the operation-attempt barrier in an isolated DE store with checked commit. See NOTICE.
 package df.root;
 
@@ -5,6 +6,8 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Device-protected-storage attempt barrier. The preferences file is dedicated
@@ -14,9 +17,10 @@ import java.util.Objects;
  *
  * <p>Android may mutate the process-local preference view before a checked
  * commit is known to have reached disk. Consequently a false or throwing commit
- * makes THIS store instance uncertain: every later operation fails closed
- * instead of consulting the cache. A newly constructed store re-reads durable
- * state. See {@link OperationAttemptStore} for the full contract.</p>
+ * makes ALL stores in this process for that durable store uncertain: every
+ * later operation on any wrapper fails closed instead of consulting the shared
+ * cache. Only a process restart re-reads durable state. See
+ * {@link OperationAttemptStore} for the full contract.</p>
  */
 final class SharedPreferencesOperationAttemptStore implements OperationAttemptStore {
     static final String PREFS_NAME = "dfroot_operation_attempt";
@@ -29,8 +33,17 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
     /** Serializes read-modify-write across short-lived stores in this process. */
     private static final Object STORE_LOCK = new Object();
 
+    /**
+     * Process-wide uncertain-commit latch, keyed by durable preference file.
+     * The attempt file is dedicated and singular, so every wrapper in this
+     * process shares the same key. A false or throwing checked commit poisons
+     * the key: no wrapper may treat the mutated in-memory view as proof of
+     * durable absence until the process restarts.
+     */
+    private static final Set<String> UNCERTAIN_STORES = ConcurrentHashMap.newKeySet();
+
     private final SharedPreferences preferences;
-    /** Guarded by STORE_LOCK; see the uncertain-commit contract on the interface. */
+    /** Local marker in addition to the process-wide latch; guarded by STORE_LOCK. */
     private boolean uncertain;
 
     SharedPreferencesOperationAttemptStore(Context deviceProtectedContext) {
@@ -47,6 +60,17 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
         Context deContext = (application != null ? application : context)
                 .createDeviceProtectedStorageContext();
         return new SharedPreferencesOperationAttemptStore(deContext);
+    }
+
+    /**
+     * Test-only seam: models a process restart by clearing the in-process
+     * uncertainty latch. Production code never resets uncertainty; the only
+     * legitimate reset is a new process re-reading durable state.
+     */
+    static void resetUncertaintyForTesting() {
+        synchronized (STORE_LOCK) {
+            UNCERTAIN_STORES.remove(PREFS_NAME);
+        }
     }
 
     @Override
@@ -140,9 +164,10 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
     }
 
     private void requireCertain() throws Failure {
-        if (uncertain) {
+        if (uncertain || UNCERTAIN_STORES.contains(PREFS_NAME)) {
             throw new Failure("attempt store is uncertain after a failed commit; "
-                    + "only a store created after a process restart re-reads durable state");
+                    + "all stores in this process for that durable store fail closed until "
+                    + "a process restart re-reads durable state");
         }
     }
 
@@ -152,17 +177,23 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
             // Checked commit: a false result or thrown exception never admits a run.
             committed = editor.commit();
         } catch (RuntimeException e) {
-            // The in-memory view may already have changed; never trust it again.
-            uncertain = true;
+            // The in-memory view may already have changed; no wrapper in this
+            // process may trust it again.
+            markUncertain();
             throw new Failure("attempt store commit failed", e);
         } catch (Error e) {
-            uncertain = true;
+            markUncertain();
             throw e;
         }
         if (!committed) {
-            uncertain = true;
+            markUncertain();
         }
         return committed;
+    }
+
+    private void markUncertain() {
+        uncertain = true;
+        UNCERTAIN_STORES.add(PREFS_NAME);
     }
 
     private static RunConfig.ExecutionMode parseMode(String value) {

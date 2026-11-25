@@ -1,18 +1,23 @@
+// Modified 2026-11-25 (DFRoot GZIF): prove a fresh process-wide poisoned attempt store blocks boot claim and start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify one durable claim per boot, coalescing, and fail-closed ordering. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): assert exactly-once finish on every claim path. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover claim-time component OFF, unreadable gate, and late queued claims. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.content.Intent;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
@@ -24,6 +29,16 @@ import java.util.concurrent.TimeUnit;
 public class BootClaimTest {
     private static final String LOCKED = Intent.ACTION_LOCKED_BOOT_COMPLETED;
     private static final String UNLOCKED = Intent.ACTION_BOOT_COMPLETED;
+
+    @Before
+    public void setUp() {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
+    }
+
+    @After
+    public void tearDown() {
+        SharedPreferencesOperationAttemptStore.resetUncertaintyForTesting();
+    }
 
     @Test
     public void lockedThenUnlockedClaimsOnceAndStartsOnce() {
@@ -132,6 +147,41 @@ public class BootClaimTest {
                 .submit(null,finisher, starter);
 
         assertEquals(0, starter.calls);
+        assertEquals(1, finisher.calls);
+    }
+
+    @Test
+    public void freshWrapperPoisonedByFailedClearClaimsNothingAndStartsNothing() throws Exception {
+        // Wrapper A fails a checked clear; the shared cache now looks empty
+        // although the durable attempt record is still present.
+        OperationAttemptStoreTest.FakePreferences prefs =
+                new OperationAttemptStoreTest.FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore poisoned =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        String operationId = "boot-claim-poison-run";
+        assertTrue(poisoned.publish(new OperationAttempt(operationId,
+                RunConfig.ExecutionMode.MANUAL, 50L, true, "admitted")));
+        prefs.failCommits();
+        assertFalse(poisoned.clear(operationId));
+        assertTrue("durable attempt survives the failed clear",
+                prefs.durableContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        assertFalse("the shared cache now looks empty",
+                prefs.cachedContains(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+
+        // The boot-claim worker constructs its own wrapper; it must inherit the
+        // process-wide uncertainty and refuse the boot claim and service start.
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.sameCacheDelegate());
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        BootClaimFakes.Finisher finisher = new BootClaimFakes.Finisher();
+        new BootClaimCoordinator(new BootClaimFakes.MutableReader(50L), store, fresh,
+                Runnable::run, BootClaimCoordinator.Logger.NO_OP, false)
+                .submit(null, finisher, starter);
+
+        assertEquals(0, store.attempts.size());
+        assertEquals(0L, store.lastClaimed());
+        assertEquals("no unattended boot start after failed commit", 0, starter.calls);
         assertEquals(1, finisher.calls);
     }
 
