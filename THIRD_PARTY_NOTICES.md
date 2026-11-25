@@ -12,7 +12,8 @@ Components bundled with, linked against, or built by this project, and their lic
 | splicehelper / `jni/*.c`, `*.S` | payload sources | GPL-2.0-only | this repository (upstream DFRoot + GZIF modifications) |
 | libcxx/shellcode headers (app/src/main/jni/include.inc) | payload sources | BSD-3-Clause (Odzhan, Copyright (c) 2018 Odzhan) for include.inc; GPL-2.0-only for the rest | this repository + Odzhan |
 | Gradle / Android Gradle Plugin / Gradle wrapper | build | Apache-2.0 | gradle.org / Google Maven |
-| `GPL-3.0.txt` | licence text conveyed with signed release assets | verbatim GNU GPLv3 (official text) | https://www.gnu.org/licenses/gpl-3.0.txt |
+| `GPL-3.0.txt` | licence text conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv3 (official text) | https://www.gnu.org/licenses/gpl-3.0.txt |
+| `LICENSE` | repository's own GPL-2.0-only licence, conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv2 | this repository |
 | `aes256.c/h`, `libcxx.h` etc. under `app/src/main/jni/` | payload sources | see file headers (GPL-2.0-only unless marked otherwise) | this repository |
 
 Notes
@@ -36,7 +37,7 @@ Notes
   full GPLv3 obligations, including conveying a copy of the licence and the
   complete corresponding source offer in `NOTICE`, **not merely** the
   aggregation statement. The verbatim official licence text is shipped as
-  `GPL-3.0.txt` in signed release assets.
+  `GPL-3.0.txt` in both signed release assets and unsigned CI artifacts.
 - No component in this repository is GPL-2.0-**and-later** vs GPL-2.0-only
   ambiguous: upstream DFRoot is GPL-2.0-**only** (LICENSE §2 text, no "or
   later" grant), and this fork remains so. The GPL-3.0-or-later loaders are
@@ -50,7 +51,7 @@ Notes
 
 `app/src/main/jni/include.inc` is a shellcode header by Odzhan, licensed
 BSD-3-Clause (not GPL-2.0-only). Because this `THIRD_PARTY_NOTICES.md` is
-conveyed as a signed release asset alongside the APK, the BSD clause-2 notice
+conveyed as a release/CI artifact alongside the APK, the BSD clause-2 notice
 must be reproduced here verbatim. The notice below is copied exactly from
 `app/src/main/jni/include.inc` lines 2–28 (including the leading indentation and
 the closing `*/`):

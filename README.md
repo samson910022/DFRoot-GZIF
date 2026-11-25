@@ -163,8 +163,11 @@ Then: `./gradlew :app:assembleRelease` →
   signing on those events. Only a **push of a `v*` tag** runs `build-release` in
   the protected `release` environment, where the `KEYSTORE*` secrets exist,
   builds and verifies a **signed Release**, and publishes it (with
-  `GPL-3.0.txt`, `NOTICE` and `THIRD_PARTY_NOTICES.md`) as a GitHub Release.
-  Branch/PR builds never see secrets and never publish.
+  `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`) as a GitHub
+  Release. Branch/PR builds never see secrets and never publish a GitHub Release.
+  Branch/PR/manual unsigned APKs are nevertheless public Actions artifacts (the
+  repository is public): the `DFRoot` artifact also carries `GPL-3.0.txt`,
+  `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` alongside the APKs.
 - The `KEYSTORE` value — the protected CI secret, or the environment value read
   by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
   (produce it with `base64 -w0 keystore.jks`). It is decoded and the resulting

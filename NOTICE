@@ -64,8 +64,11 @@ source offer and the aggregation statement below, they carry the full GPLv3
 obligations (GPL-3.0 §5/§6): a copy of the licence must accompany the
 distribution and the complete corresponding source must be offered. The
 verbatim official licence text is therefore conveyed in this repository as
-`GPL-3.0.txt` (https://www.gnu.org/licenses/gpl-3.0.txt) and included in the
-signed release assets alongside this NOTICE. Nothing in this file should be
+`GPL-3.0.txt` (https://www.gnu.org/licenses/gpl-3.0.txt) and included in both
+the signed release assets and the publicly downloadable unsigned CI artifact
+alongside this NOTICE. This repository's own GPL-2.0-only `LICENSE` accompanies
+both bundles, and the GPLv3 §6 complete-source offer applies to the unsigned CI
+APKs too. Nothing in this file should be
 read as saying the loaders have "no other obligations": the aggregation
 statement only explains why bundling the executables does not relicense the
 GPL-2.0-only DFRoot application source, or vice versa.

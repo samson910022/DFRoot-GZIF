@@ -7,6 +7,7 @@
 
 > [!IMPORTANT]
 > This document describes an **experimental, volatile, per-boot root exploit** for a shipping Samsung firmware. It is for the device owner's own research. It is not a distribution, not stable, and not persistent across reboot. Read §10 (Safety & limitations) before using anything in it.
+> "It is not a distribution" refers to this technique note, not to the built APKs: built APKs, including unsigned CI ones, are publicly downloadable and carry the notice/licence bundle (`GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`).
 
 ---
 

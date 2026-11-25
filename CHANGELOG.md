@@ -22,7 +22,9 @@ sources unchanged).
   `release` environment, where the four `KEYSTORE*` secrets are available.
   PR/branch/manual runs build a **debug-keystore-signed Debug + unsigned
   Release** pair with no secrets, with no release signing on those events, and
-  never publish. Ancestry check precedes any secret reference; the signed APK
+  never publish a GitHub Release; their unsigned APKs are uploaded as a public,
+  downloadable Actions artifact carrying the same notice/licence bundle.
+  Ancestry check precedes any secret reference; the signed APK
   is `apksigner`-verified, checksummed and uploaded with 1-day retention; the
   publish job only downloads, verifies and publishes. Action references are
   hardened/pinned to full 40-hex SHAs and permissions are least-privilege; the
@@ -48,9 +50,10 @@ sources unchanged).
   `THIRD_PARTY_NOTICES.md` now state the full GPL-3.0-or-later obligations for
   the bundled userspace loaders (correcting the "no other obligations"
   overstatement) while retaining the provenance and complete-source offer.
-  Signed release artifacts now include `GPL-3.0.txt`, `NOTICE` and
-  `THIRD_PARTY_NOTICES.md` alongside the APK and its checksum, with the upload
-  and publish allowlists tightened to those exact files.
+  Both `GPL-3.0.txt` and the repository's own GPL-2.0 `LICENSE`, plus `NOTICE`
+  and `THIRD_PARTY_NOTICES.md`, accompany the signed release assets **and** the
+  publicly downloadable unsigned CI APK artifact, with the upload and publish
+  allowlists tightened to those exact files.
 - Documentation corrections in `README.md`, `PORTING-GZIF.md`, `NOTICE` and
   `THIRD_PARTY_NOTICES.md`: 9.9.2 / 9.5.0-effective, signing/debug behavior,
   CI KO hash, digest-pinned DDK image, environment-only Make credentials,
@@ -61,8 +64,9 @@ sources unchanged).
 - Regression coverage: workflow policy/contract tests, make contract tests,
   signing material/permission tests and signed/unsigned release smoke tests all
   pass; new tests assert that the license and notice assets are packaged,
-  uploaded and published, while still rejecting `secrets/`, `.jks`,
-  `signing.properties` and `..` artifact entries.
+  uploaded and published — including a byte pin for `LICENSE` and
+  equality-locked upload/publish allowlists — while still rejecting `secrets/`,
+  `.jks`, `signing.properties` and `..` artifact entries.
 
 ### Cross-PR integration note
 
@@ -75,9 +79,12 @@ hardened head and refresh every shared file they touch. In particular:
 - PR #4 must update its Gradle reference from **9.7.1** to **9.9.2** and refresh
   the referenced PR #1 head to the current hardened commit.
 
-GPLv3 licence text is conveyed as release assets alongside the APK — the signed
-release bundle is the unit of conveyance, not the APK alone. Unsigned CI Release
-artifacts are internal CI outputs, not third-party conveyance.
+Both licence texts, `NOTICE` and `THIRD_PARTY_NOTICES.md` accompany the signed
+release assets **and** the publicly downloadable unsigned CI APK artifact: the
+repository is public, so Actions artifacts are not private, and the unsigned
+APKs are treated as conveyance with the same notices and source offer rather
+than as "internal, not third-party" outputs. The signed release bundle is not
+the only unit of conveyance.
 
 ## 4.8-gzif (2026-11-17)
 
