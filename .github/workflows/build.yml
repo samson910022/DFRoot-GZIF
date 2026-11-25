@@ -181,6 +181,10 @@ jobs:
           path: |
             app/build/outputs/apk/debug/DFRoot_*.apk
             app/build/outputs/apk/release/DFRoot_*.apk
+            GPL-3.0.txt
+            LICENSE
+            NOTICE
+            THIRD_PARTY_NOTICES.md
           if-no-files-found: error
           overwrite: true
 
@@ -281,7 +285,7 @@ jobs:
           apk=${apks[0]##*/}
           mkdir -p release
           cp -- "${apks[0]}" "release/$apk"
-          cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/
+          cp -- GPL-3.0.txt LICENSE NOTICE THIRD_PARTY_NOTICES.md release/
           (
             cd release
             sha256sum -- "$apk" > "$apk.sha256"
@@ -294,6 +298,7 @@ jobs:
           path: |
             release/DFRoot_*.apk
             release/DFRoot_*.apk.sha256
+            release/LICENSE
             release/GPL-3.0.txt
             release/NOTICE
             release/THIRD_PARTY_NOTICES.md
@@ -366,6 +371,7 @@ jobs:
           files: |
             dist/DFRoot_*.apk
             dist/DFRoot_*.apk.sha256
+            dist/LICENSE
             dist/GPL-3.0.txt
             dist/NOTICE
             dist/THIRD_PARTY_NOTICES.md

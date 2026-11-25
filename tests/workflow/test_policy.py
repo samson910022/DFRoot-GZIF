@@ -118,7 +118,7 @@ PACKAGE_SIGNED_SCRIPT = (
     "apk=${apks[0]##*/}\n"
     "mkdir -p release\n"
     'cp -- "${apks[0]}" "release/$apk"\n'
-    "cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/\n"
+    "cp -- GPL-3.0.txt LICENSE NOTICE THIRD_PARTY_NOTICES.md release/\n"
     "(\n"
     "  cd release\n"
     '  sha256sum -- "$apk" > "$apk.sha256"\n'
@@ -224,16 +224,26 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
 # appending an extra file (e.g. signing.properties) is a hard failure.
 CI_UPLOAD_PATH = (
     "app/build/outputs/apk/debug/DFRoot_*.apk\n"
-    "app/build/outputs/apk/release/DFRoot_*.apk"
+    "app/build/outputs/apk/release/DFRoot_*.apk\n"
+    "GPL-3.0.txt\n"
+    "LICENSE\n"
+    "NOTICE\n"
+    "THIRD_PARTY_NOTICES.md"
 )
-# Licence/notices are conveyed as release assets alongside the signed APK.
-LICENSE_ASSETS = ("GPL-3.0.txt", "NOTICE", "THIRD_PARTY_NOTICES.md")
+# Licence/notices accompany both the unsigned CI artifact and the signed
+# release assets; the repository's own GPL-2.0 LICENSE is one of them.
+LICENSE_ASSETS = ("GPL-3.0.txt", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 # Byte-exact pin of the verbatim official text from gnu.org; any edit to the
 # conveyed licence (or a truncated/substituted copy) is a policy violation.
 GPL_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+# Byte-exact pin of the repository's verbatim GPL-2.0 LICENSE.  The unsigned CI
+# artifact is downloadable by anyone from this public repository, so this file
+# is conveyed too and must not be silently edited or replaced.
+LICENSE_SHA256 = "81d2e2140695d3a3c76c1fa48b8fc34abfee067f6197812c3e842612be5c3ff6"
 RELEASE_UPLOAD_PATH = (
     "release/DFRoot_*.apk\n"
     "release/DFRoot_*.apk.sha256\n"
+    "release/LICENSE\n"
     "release/GPL-3.0.txt\n"
     "release/NOTICE\n"
     "release/THIRD_PARTY_NOTICES.md"
@@ -241,6 +251,7 @@ RELEASE_UPLOAD_PATH = (
 PUBLISH_FILES = (
     "dist/DFRoot_*.apk\n"
     "dist/DFRoot_*.apk.sha256\n"
+    "dist/LICENSE\n"
     "dist/GPL-3.0.txt\n"
     "dist/NOTICE\n"
     "dist/THIRD_PARTY_NOTICES.md"
@@ -870,7 +881,7 @@ def write_dist(root: Path, names: list[str]) -> Path:
 
 
 def write_license_assets(root: Path) -> dict[str, bytes]:
-    """Create the three licence/notice source files at the checkout root."""
+    """Create the four licence/notice source files at the checkout root."""
     contents = {name: f"{name} fixture content\n".encode() for name in LICENSE_ASSETS}
     for name, data in contents.items():
         (root / name).write_bytes(data)
@@ -1039,6 +1050,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn(b"GNU GENERAL PUBLIC LICENSE", data)
         self.assertIn(b"Version 3, 29 June 2007", data)
 
+    def test_repository_license_text_is_sha256_pinned(self) -> None:
+        """LICENSE must remain the repository's verbatim GPL-2.0 text."""
+        data = (ROOT / "LICENSE").read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), LICENSE_SHA256)
+        self.assertIn(b"GNU GENERAL PUBLIC LICENSE", data)
+        self.assertIn(b"Version 2, June 1991", data)
+
+    def test_unsigned_ci_artifact_conveys_all_notices(self) -> None:
+        """The public unsigned CI artifact carries every licence/notice file."""
+        ci_entries = CI_UPLOAD_PATH.splitlines()
+        for asset in LICENSE_ASSETS:
+            with self.subTest(asset=asset):
+                self.assertIn(asset, ci_entries)
+                self.assertTrue((ROOT / asset).is_file(), f"missing source asset {asset}")
+                self.assertGreater((ROOT / asset).stat().st_size, 0)
+        assert_safe_artifact_entries("path", CI_UPLOAD_PATH)
+
     def test_license_and_notice_assets_are_exact_release_allowlist(self) -> None:
         """Each licence asset is packaged, uploaded and published by name."""
         for asset in LICENSE_ASSETS:
@@ -1049,13 +1077,16 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertTrue((ROOT / asset).is_file(), f"missing source asset {asset}")
                 self.assertGreater((ROOT / asset).stat().st_size, 0)
         # The allowlists remain closed: no asset outside the exact set is added.
+        # The signed allowlists list LICENSE before GPL-3.0.txt while the CI path
+        # lists it after, so compare the asset sets rather than their order; the
+        # full strings are equality-locked against the workflow elsewhere.
         self.assertEqual(
-            [line.removeprefix("release/") for line in RELEASE_UPLOAD_PATH.splitlines()][2:],
-            list(LICENSE_ASSETS),
+            sorted(line.removeprefix("release/") for line in RELEASE_UPLOAD_PATH.splitlines()[2:]),
+            sorted(LICENSE_ASSETS),
         )
         self.assertEqual(
-            [line.removeprefix("dist/") for line in PUBLISH_FILES.splitlines()][2:],
-            list(LICENSE_ASSETS),
+            sorted(line.removeprefix("dist/") for line in PUBLISH_FILES.splitlines()[2:]),
+            sorted(LICENSE_ASSETS),
         )
 
     def test_ddk_stays_digest_pinned_non_privileged_and_uploads_one_ko(self) -> None:
@@ -1494,16 +1525,24 @@ class MutationDetectionTests(unittest.TestCase):
             assert_safe_artifact_entries("files", PUBLISH_FILES + "\n../keystore.jks")
 
     def test_removing_a_license_asset_is_rejected(self) -> None:
-        """Dropping a licence asset from packaging/upload/publish is a violation."""
-        for old in ("            release/GPL-3.0.txt\n", "            dist/NOTICE\n"):
-            with self.subTest(removal=old):
+        """Dropping any licence asset from any of the three allowlists is a violation."""
+        removals = {
+            "release/LICENSE": "            release/LICENSE\n",
+            "dist/LICENSE": "            dist/LICENSE\n",
+            "CI LICENSE": "            LICENSE\n",
+            "release/GPL-3.0.txt": "            release/GPL-3.0.txt\n",
+            "dist/NOTICE": "            dist/NOTICE\n",
+            "CI NOTICE": "            NOTICE\n",
+        }
+        for label, old in removals.items():
+            with self.subTest(removal=label):
                 mutated = self.mutate(old, "")
                 with self.assertRaisesRegex(AssertionError, "must be exactly"):
                     assert_exact_artifact_inputs(mutated)
                 with self.assertRaises(AssertionError):
                     validate_workflow(mutated)
         package_mutation = self.mutate(
-            "          cp -- GPL-3.0.txt NOTICE THIRD_PARTY_NOTICES.md release/\n", ""
+            "          cp -- GPL-3.0.txt LICENSE NOTICE THIRD_PARTY_NOTICES.md release/\n", ""
         )
         with self.assertRaisesRegex(AssertionError, "run script must be exactly"):
             assert_exact_release_run_scripts(package_mutation)
@@ -1765,7 +1804,7 @@ class BehavioralScriptTests(unittest.TestCase):
             self.assertEqual(stale.read_text(encoding="utf-8"), expected)
 
     def test_package_script_conveys_license_and_notice_assets(self) -> None:
-        """The signed release package must include all three licence files."""
+        """The signed release package must include all four licence files."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_release_apks(root, ["DFRoot_signed.apk"])
