@@ -1002,8 +1002,7 @@ documentation/notices/hygiene edits introduce no runtime behavior change.
 ## 19. Fourth repair round (R4, 2026-11-26) — consolidated record
 
 This section records the fourth repair round on `fix/app-correctness-safety`
-(committed local HEAD `186fc8d`; R4.9 docs phase left uncommitted for the main
-agent). **§5/§11/§12/§14 remain the 2026-11-17 historical hardware ledger;
+(final local HEAD `74d35f5`). **§5/§11/§12/§14 remain the 2026-11-17 historical hardware ledger;
 §15–§18 remain prior repair-round records.** R4 closes Re-review 3 findings
 **R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**.
 Every phase was host-verified only; no device/ADB, payload, privileged
@@ -1019,7 +1018,7 @@ container, cold boot, soft reboot, APK assembly, dependency or binary change.
 | R4.6 `15bb5cc` | R2-18 | Main-thread outcome reports enqueued off the durable lock; 95 focused tests; one Required fix loop RESOLVED. |
 | R4.7 `a51f74e` | R2-20 | Per-start lifetime and owner token; 158 focused tests; two Required interleavings fixed and re-review RESOLVED. |
 | R4.8 `186fc8d` | R2-21 | Duplicate starts rejected before WakeLock/work; admission worker lifetime defined; 74 focused tests + 3 repetitions; one Required flake fixed. |
-| R4.9 (docs, uncommitted) | R2-22 | Honest soft-reboot wording, `engineFinished`/app-data-reset Javadoc limits, docs consolidated; 50 focused `ResultMessagesTest` tests, 0 failures/errors/skips. No behavior change or retry/clear control. |
+| R4.9 `74d35f5` | R2-22 | Honest soft-reboot wording, `engineFinished`/app-data-reset Javadoc limits, docs consolidated; 50 focused `ResultMessagesTest` tests, 0 failures/errors/skips. No behavior change or retry/clear control. |
 
 Gates still open (not claims): Direct Boot FGS eligibility, real soft-reboot
 safety (unattended OFF; manual experimental/unvalidated), `/dev` marker-root

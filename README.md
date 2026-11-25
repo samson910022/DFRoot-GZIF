@@ -273,7 +273,7 @@ gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`
-(committed local HEAD `186fc8d`). It closes the Re-review 3 findings **R2-12,
+(final local HEAD `74d35f5`). It closes the Re-review 3 findings **R2-12,
 R2-13, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22** on top of
 the R3 round recorded below. All R4 work was host-verified only; no device,
 hardware, ADB, payload, privileged-container, cold-boot, soft-reboot or
@@ -291,7 +291,7 @@ this section are current.
 | R4.6 `15bb5cc` | R2-18 | Main-thread failure/cancellation outcome reports are enqueued on the admission worker instead of taking the coordinator's durable-lock monitor; notification/status reads stay volatile-snapshot-only. Narrow guarantee only — a worker may still wait on storage. 95 focused tests, 0 failures; one Required destruction-guard issue fixed and re-review RESOLVED. |
 | R4.7 `a51f74e` | R2-20 | Per-start lifetime resolves each start exactly once; foreground removal cannot suppress `stopSelf` for later-resolved starts. A per-service owner token is invalidated before destruction cancels local work and denied under the admission lock and before engine start; engine-started work is never cancelled. 158 focused tests in the touched classes, 0 failures; two Required interleavings fixed and re-review RESOLVED. |
 | R4.8 `186fc8d` | R2-21 | Duplicate starts are rejected before any WakeLock or admission work while a request is `PENDING`/`CLAIMED`, with a correlated `REJECTED`; the single-thread admission worker is shut down in `onDestroy()` after outcome reports are queued and recreated on the next `onCreate()`. 74 focused tests + 3 determinism repetitions, 0 failures; one Required flake fixed and re-review RESOLVED. Optional residuals: idle worker thread between starts and benign correlated duplicates (recorded). |
-| R4.9 (docs phase, uncommitted for the main agent) | R2-22 | Honest messaging/docs only: `SOFT_REBOOT_PENDING` no longer claims "root active"; `RunCoordinator` Javadoc states that `engineFinished` only proves the Java call ended and that app-data reset is not safe recovery; no functional/control-flow change (message text only), no retry/clear control. Focused `ResultMessagesTest`: 50 tests, 0 failures/errors/skips. |
+| R4.9 `74d35f5` | R2-22 | Honest messaging/docs only: `SOFT_REBOOT_PENDING` no longer claims "root active"; `RunCoordinator` Javadoc states that `engineFinished` only proves the Java call ended and that app-data reset is not safe recovery; no functional/control-flow change (message text only), no retry/clear control. Focused `ResultMessagesTest`: 50 tests, 0 failures/errors/skips. |
 
 The result contract above is authoritative: marker conflict → **rc7** (never
 rc1); publication acknowledgement requires a matching `dfroot_confirm_`
@@ -309,10 +309,11 @@ Direct Boot FGS eligibility; real soft-reboot safety; `/dev` marker-root trust;
 sticky-bit `/data/local/tmp` owner (`shell`); AES key in argv out of scope;
 no owner-facing recovery UI (ordinary users stay intentionally locked out and
 app-data reset is not safe recovery); `BOOT_COUNT` is diagnostic only; the
-R4.4 second-recheck test gap, R4.5 duplicate correlated rejection, R4.8 idle
-worker thread and benign duplicates, and cross-instance preference uncertainty.
-A fresh full suite/CI run and the four final comprehensive reviews are the
-main agent's gates — CI green is not claimed locally.
+R4.4 second-recheck test gap, R4.5 duplicate correlated rejection, and R4.8
+idle worker thread and benign duplicates. The four final comprehensive reviews
+were APPROVE (one REQUEST CHANGES for stale docs tags only, corrected). A fresh
+remote CI green run after push remains the POST-PUSH gate — CI green is not
+claimed locally.
 
 ## Third repair round — R3 consolidated summary (2026-11-25)
 

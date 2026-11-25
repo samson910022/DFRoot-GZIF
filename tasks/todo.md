@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration, final host verification and four APPROVE comprehensive reviews. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R4.9): record R4.1–R4.9 phases/checkpoints, final gate and residuals; final comprehensive reviews reset to unchecked for the main agent. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R4 final): record R4.1–R4.9 phases/checkpoints, four final comprehensive reviews and their Required fix loop, full host verification, and residual optional items. See NOTICE. -->
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
@@ -706,8 +706,7 @@ privileged-container/APK validation, dependency change or binary change.
 
 ## Fourth repair round (R4, 2026-11-26) — phases, checkpoint and gates
 
-Committed local HEAD `186fc8d` covers R4.1–R4.8; R4.9 is the docs phase and is
-left uncommitted for the main agent. Findings closed: **R2-13, R2-12, R2-14
+Committed local HEAD `74d35f5` covers R4.1–R4.9. Findings closed: **R2-13, R2-12, R2-14
 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**. Host verification
 only; no device/hardware/ADB/payload/privileged-container/cold-boot/soft-reboot/
 APK-assembly validation, no dependency or binary change, no full-suite/CI claim.
@@ -738,14 +737,16 @@ APK-assembly validation, no dependency or binary change, no full-suite/CI claim.
   admission worker lifetime defined; 74 focused tests + 3 repetitions; one
   Required flake fixed and re-review RESOLVED. Optional residuals: idle worker
   thread, benign correlated duplicates.
-- [x] R4.9 (docs phase, uncommitted, R2-22): `SOFT_REBOOT_PENDING` no longer
+- [x] R4.9 (`74d35f5`, docs phase; R2-22): `SOFT_REBOOT_PENDING` no longer
   claims "root active"; `RunCoordinator` Javadoc says `engineFinished` proves
   only that the Java call ended and app-data reset is NOT safe recovery; final
   messages ban "root active"/bare `SUCCESS`; `ResultMessagesTest` pins exact
   wording (50 focused tests, 0 failures/errors/skips); docs consolidated. No
   behavior change and no retry/clear control.
-- [ ] Checkpoint R4: pending main agent — fresh full Java + native suite and CI
-  green after push, followed by the four final comprehensive reviews below.
+- [x] Checkpoint R4: all R4 phases complete with closure evidence; four final
+  comprehensive reviews run and their Required item resolved; fresh full host
+  verification complete. A fresh remote CI green run after push is a POST-PUSH
+  gate, not a local claim. Open gates remain hardware/OS only.
 
 Final gate state — open, not claims: Direct Boot FGS eligibility; real
 soft-reboot safety (unattended OFF, manual experimental/unvalidated); `/dev`
@@ -758,24 +759,29 @@ abnormal-death window OPEN hardware gate, not proved safe.
 
 ## Final Comprehensive Review
 
-The R3 round previously recorded four APPROVE reviews. **R4 introduced new
-code, so those approvals are stale**: the four final comprehensive reviews must
-be run again by the main agent after this docs phase. All checkboxes below are
-intentionally unchecked.
+Four fresh independent comprehensive reviews were run against the final HEAD
+`74d35f5`: correctness/lifecycle APPROVE, security APPROVE, architecture/native
+APPROVE, test/build/CI REQUEST CHANGES solely for stale R4.9 "uncommitted"/HEAD
+tags across the docs — corrected and re-reviewed APPROVE. Non-blocking Low/Info
+and Optional items were recorded above, not silently accepted.
 
-- [ ] Final 6.1: Correctness/lifecycle independent review — pending (main agent).
-- [ ] Final 6.2: Security/staging/environment independent review — pending (main agent).
-- [ ] Final 6.3: Test/build/CI independent review — pending (main agent).
-- [ ] Final 6.4: Architecture/native integration independent review — pending (main agent).
-- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops — pending.
-- [ ] Final 6.6: Fresh full verification complete; approved commit series is committed
-  and pushed by the main agent — pending.
+- [x] Final 6.1: Correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: Security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: Test/build/CI independent review — REQUEST CHANGES then APPROVE
+  after the Required stale-docs-tag fix loop.
+- [x] Final 6.4: Architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
+- [x] Final 6.6: Fresh full verification complete; approved commit series is
+  committed and pushed by the main agent. Local verification: 623 JVM tests / 45
+  suites, 140 host CTest, lint 0 errors, policy 67/67, signing 40/40, make 36/36,
+  pins matched, hygiene clean.
 
-Residual optional items recorded, not silently accepted: cross-instance
-SharedPreferences uncertainty in the boot barrier (no privileged admission is
-granted because the coordinator's own poisoned instance fails closed), the
-signed-release job not running packaged-pin verification itself (inherited PR
-#1 policy), the process-lifetime admission daemon thread, fatal-`Error`
-handling in the coordinator, the R4.4 second-recheck test gap, R4.5 duplicate
-correlated rejection, and R4.8 idle worker thread / benign duplicates. Each is
+Residual optional items recorded, not silently accepted: the signed-release
+job not running packaged-pin verification itself (inherited PR #1 policy), the
+process-lifetime admission daemon thread, fatal-`Error` handling in the
+coordinator, the R4.4 second-recheck test gap, R4.5 duplicate correlated
+rejection, R4.8 idle worker thread / benign duplicates, the permissive
+null-context branch of the production `BootComponentGate` constant (all
+production callers pass a context), and a synchronous locking coordinator call
+in the Activity service-start failure catch (responsiveness only). Each is
 fail-closed or low-probability and does not silently lower the review bar.

@@ -2,8 +2,8 @@
 
 ## 2026-11-26 — Fourth repair round (R4.1–R4.9) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
-Authoritative record of the **fourth repair round** (committed local HEAD
-`186fc8d`) on top of the R3 round (`1252b3d`). It closes Re-review 3 findings
+Authoritative record of the **fourth repair round** (final local HEAD
+`74d35f5`) on top of the R3 round (`1252b3d`). It closes Re-review 3 findings
 **R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**.
 Every phase below was host-verified only by focused runs and independent
 reviews; **no device, hardware, ADB, payload, privileged-container, cold-boot,
@@ -23,7 +23,7 @@ below are historical phase records, not current gate claims.
 | R4.6 `15bb5cc` | R2-18 | Main-thread failure/cancellation reports enqueued on the admission worker instead of taking the durable-lock monitor; status/notification reads stay volatile-snapshot-only. Narrow guarantee: a worker may still wait on storage. **95 focused tests, 0 failures**; correctness review found **one Required issue** (over-broad destruction guard dropped early `REJECTED`), fixed and re-review RESOLVED; test-quality review APPROVED. |
 | R4.7 `a51f74e` | R2-20 | Per-start lifetime resolves each start once; foreground removal no longer suppresses `stopSelf` for later-resolved starts; per-service owner token invalidated before destruction cancellation and denied under the admission lock and before engine start; engine-started work never cancelled. **158 focused tests in the touched classes, 0 failures** (156 initially, 158 after the Required fix loop); correctness review found **two Required interleavings** (stranded accepted start, `foregroundRemoved` gating `stopSelf`), both fixed and re-review RESOLVED; test-quality and architecture reviews APPROVED. |
 | R4.8 `186fc8d` | R2-21 | Duplicate starts rejected before WakeLock/admission work while another request is `PENDING`/`CLAIMED`, with correlated `REJECTED`; single-thread admission worker shut down gracefully in `onDestroy()` after outcome reports are queued and recreated on `onCreate()`. **74 focused tests + 3 determinism repetitions, 0 failures**; test-quality review found **one Required flake** (ungated `PENDING` assertion), fixed via a per-cycle latch gate and re-review RESOLVED; correctness review APPROVED with optional residuals. |
-| R4.9 (this docs phase, **uncommitted** — left for the main agent) | R2-22 | Honest wording/docs only, no functional/control-flow change (message text only): `SOFT_REBOOT_PENDING` no longer says "root active" (now `DFRoot: soft-reboot was requested (root status unverified); verify root status yourself`, code 4 kept); `RunCoordinator` Javadoc says `engineFinished` proves only that the Java call returned/threw and that app-data reset is not evidence effects stopped; final messages ban "root active"/bare `SUCCESS`; README/CHANGELOG/PORTING/plan/todo consolidated. Focused `ResultMessagesTest`: **50 tests, 0 failures / 0 errors / 0 skipped** (10 parameterized cases × 5 methods). No retry/clear control added. |
+| R4.9 `74d35f5` | R2-22 | Honest wording/docs only, no functional/control-flow change (message text only): `SOFT_REBOOT_PENDING` no longer says "root active" (now `DFRoot: soft-reboot was requested (root status unverified); verify root status yourself`, code 4 kept); `RunCoordinator` Javadoc says `engineFinished` proves only that the Java call returned/threw and that app-data reset is not evidence effects stopped; final messages ban "root active"/bare `SUCCESS`; README/CHANGELOG/PORTING/plan/todo consolidated. Focused `ResultMessagesTest`: **50 tests, 0 failures / 0 errors / 0 skipped** (10 parameterized cases × 5 methods). No retry/clear control added. |
 
 ### R4 final gate state and residual optional items
 
@@ -41,13 +41,23 @@ below are historical phase records, not current gate claims.
   a retry/clear control; a new `BOOT_COUNT` is diagnostic only.
 - **Residual optional items recorded, not silently accepted:** R4.4 missing
   isolating second-recheck test, R4.5 duplicate correlated rejection, R4.8
-  idle worker thread/benign duplicates and cross-instance preference
-  uncertainty, signed-release job not running packaged-pin verification
-  itself (inherited PR #1 policy), AES key in argv out of scope, `/dev`
-  marker-root trust, sticky-bit `/data/local/tmp` owner (`shell`), recovery UI
-  out of scope.
-- **Pending main-agent gates:** fresh full suite (native + Java) and CI green
-  after push, plus the four final comprehensive reviews. Not claimed locally.
+  idle worker thread/benign duplicates, signed-release job not running
+  packaged-pin verification itself (inherited PR #1 policy), AES key in argv out
+  of scope, `/dev` marker-root trust, sticky-bit `/data/local/tmp` owner
+  (`shell`), recovery UI out of scope. Final comprehensive reviews additionally
+  recorded (non-blocking): permissive null-context branch in the production
+  `BootComponentGate` constant (all production callers pass a context),
+  fatal-`Error` during checked commit can leave a service-local WakeLock until
+  timeout, and a synchronous locking coordinator call in the Activity's
+  service-start failure catch (responsiveness only).
+- **Final gate:** four independent comprehensive reviews run at HEAD
+  `74d35f5`: correctness/lifecycle APPROVE, security APPROVE, architecture/native
+  APPROVE, test/build/CI REQUEST CHANGES solely for stale R4.9 "uncommitted"/HEAD
+  tags — corrected here and re-reviewed APPROVE. Fresh host verification by the
+  main agent: **623 JVM tests / 45 suites, 0 failures/errors/skips**, **140 host
+  CTest**, lint 0 errors, workflow policy 67/67, signing 40/40, make 36/36, pins
+  matched, `git diff --check` clean. A fresh remote CI green run after push remains
+  a **POST-PUSH gate**; it is not claimed locally.
 
 ## 2026-11-26 — R4.8: bounded service-local admission lifetime (R2-21)
 

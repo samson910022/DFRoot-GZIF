@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R4.9): record the R4.1–R4.9 phases, final gate state and residual optional items; final comprehensive reviews stay unchecked for the main agent. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R4 final): record the R4.1–R4.9 phases, four final comprehensive reviews and their Required fix loop, full host verification, and residual optional items. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -295,7 +295,7 @@ assembly.
 
 ## Fourth repair round (R4.1–R4.9) — phases, gates and residuals (2026-11-26)
 
-Committed local HEAD `186fc8d` (R4.1–R4.8). R4 closes Re-review 3 findings
+Committed local HEAD `74d35f5` (R4.1–R4.9). R4 closes Re-review 3 findings
 **R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**
 on top of the R3 round recorded below. All phase evidence below is host-only;
 no device/ADB/payload/privileged-container/cold-boot/soft-reboot/APK-assembly
@@ -326,7 +326,7 @@ validation, no full-suite/CI green claim, and no dependency or binary change.
   admission worker gets a defined lifetime; 74 focused tests + 3 repetitions;
   one Required flake fixed and re-review RESOLVED. Optional residuals: idle
   worker thread and benign correlated duplicates.
-- [x] R4.9 (docs phase, **uncommitted**, left for the main agent; R2-22):
+- [x] R4.9 (`74d35f5`, docs phase; R2-22):
   honest soft-reboot wording (`SOFT_REBOOT_PENDING` no longer claims "root
   active"), `RunCoordinator` Javadoc limits for `engineFinished` and app-data
   reset, pinned message tests (50 focused tests, 0 failures/errors/skips), and
@@ -406,18 +406,22 @@ Remaining release gates (not satisfied locally, not claimed as done):
 
 ## Final Gate
 
-After Phase 6 (R4 final state — all four reviews are for the main agent, after
-this docs phase; they are deliberately unchecked):
+Four independent final reviewers ran against HEAD `74d35f5`:
+correctness/lifecycle APPROVE, security APPROVE, architecture/native APPROVE,
+test/build/CI REQUEST CHANGES for stale R4.9 docs tags only — corrected and
+re-reviewed APPROVE. Fresh full verification (non-privileged host only):
+623 JVM tests / 45 suites, 140 host CTest, lint 0 errors, policy 67/67,
+signing 40/40, make 36/36, pins matched, hygiene clean. The approved commit
+series is pushed by the main agent; Focused R4 runs are not a substitute for the
+fresh full-suite result recorded here.
 
-- [ ] Final 6.1: correctness/lifecycle independent review — pending.
-- [ ] Final 6.2: security/staging/environment independent review — pending.
-- [ ] Final 6.3: test/build/CI independent review — pending.
-- [ ] Final 6.4: architecture/native integration independent review — pending.
-- Run four independent final reviewers across correctness/lifecycle, security, test/build, and architecture/native integration.
-- Any finding enters fix → review loop.
-- When all reviewers approve, run fresh full verification (Java + native + CI)
-  and push the approved commit series. Focused test runs in R4 are not a
-  full-suite result.
+- [x] Final 6.1: correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: test/build/CI independent review — REQUEST CHANGES then APPROVE
+  after the Required stale-docs-tag fix.
+- [x] Final 6.4: architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: Required/Critical findings resolved through fix → review loops.
+- [x] Final 6.6: Full host verification complete; commit series pushed.
 - Keep the PR draft unless the user explicitly asks to mark it ready; pushing does not imply hardware validation or merge approval.
 
 ## Risks and Mitigations
