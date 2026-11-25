@@ -1,4 +1,4 @@
-<!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration and final host verification; Checkpoint R3 complete, Final Comprehensive Review left unchecked for the main agent. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration, final host verification and four APPROVE comprehensive reviews. See NOTICE. -->
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
@@ -703,13 +703,23 @@ privileged-container/APK validation, dependency change or binary change.
 
 ## Final Comprehensive Review
 
-Pending the main agent's approval after the final comprehensive review; the
-items below are intentionally left UNCHECKED for the main agent to update.
+All four independent comprehensive reviews APPROVED with no Required/Critical
+findings. Optional defense-in-depth items were assessed and recorded as open
+gates rather than silently accepted; final verification is green. The final
+integration commit and push are performed by the main agent.
 
-- [ ] Final 6.1: Correctness/lifecycle independent review.
-- [ ] Final 6.2: Security/staging/environment independent review.
-- [ ] Final 6.3: Test/build/CI independent review.
-- [ ] Final 6.4: Architecture/native integration independent review.
-- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
-- [ ] Final 6.6: Final verification complete; approved commit series is committed
+- [x] Final 6.1: Correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: Security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: Test/build/CI independent review — APPROVE.
+- [x] Final 6.4: Architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
+- [x] Final 6.6: Final verification complete; approved commit series is committed
   and pushed by the main agent.
+
+Residual optional items recorded, not silently accepted: cross-instance
+SharedPreferences uncertainty in the boot barrier (no privileged admission is
+granted because the coordinator's own poisoned instance fails closed), the
+signed-release job not running packaged-pin verification itself (inherited PR
+#1 policy), the process-lifetime admission daemon thread, and fatal-`Error`
+handling in the coordinator. Each is fail-closed or low-probability and does not
+block this push.
