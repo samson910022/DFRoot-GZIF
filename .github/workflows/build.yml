@@ -162,6 +162,9 @@ jobs:
         run: |
           set -euo pipefail
           cmake -P tests/cmake/packaged_ko_test.cmake
+          # Same step, same single marker: the named/ALL/raw/cached target
+          # graph is exercised by a harmless host fixture harness.
+          cmake -P tests/cmake/packaging_target_graph_test.cmake
           echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"
 
       # Host-only fixture test of the APK extraction -> verify plumbing. This
@@ -171,6 +174,9 @@ jobs:
         run: |
           set -euo pipefail
           cmake -P tests/cmake/apk_packaging_gate_test.cmake
+          # Harmless host content gate: libbootstrap.so must be staged at the
+          # exact ABI path. Same step and same single marker (7/7 stays intact).
+          cmake -P tests/cmake/apk_content_gate_test.cmake
           echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"
 
       # Pins/sizes are read from CMakeLists.txt so the standalone checks and
@@ -331,13 +337,20 @@ jobs:
             echo "Expected exactly one debug APK" >&2
             exit 1
           fi
+          # Required native content: ExploitRunner stages libbootstrap.so from
+          # nativeLibraryDir at runtime. This host-only zip assertion catches a
+          # Gradle named-target list that omits `bootstrap`.
+          if ! python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); n = "lib/arm64-v8a/libbootstrap.so"; sys.exit(0 if n in z.namelist() and z.getinfo(n).file_size > 0 else 1)' "${debug[0]}"; then
+            echo "::error::Debug APK is missing lib/arm64-v8a/libbootstrap.so"
+            exit 1
+          fi
 
       - name: Report UNVERIFIED CI artifact scope
         run: |
           {
             echo "## CI artifact scope"
             echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."
-            echo "Host suites (49 status, 23/15/3 CMake, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."
+            echo "Host suites (49 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload UNVERIFIED CI APKs
@@ -523,6 +536,13 @@ jobs:
             apk_sha=$(sha256sum "$apk" | awk '{print $1}')
             if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
               echo "::error::Staged APK $name differs from the packaged release APK"
+              exit 1
+            fi
+            # Required native content: the APK must carry the bootstrap
+            # library that ExploitRunner stages at runtime. Host-only zip
+            # assertion, not a device claim.
+            if ! unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libbootstrap.so'; then
+              echo "::error::APK $name is missing lib/arm64-v8a/libbootstrap.so"
               exit 1
             fi
             EXTRACT="$RUNNER_TEMP/apk-extract-$i"
@@ -738,7 +758,48 @@ jobs:
             bad=1
           fi
 
-          # 5. One evidence row per APK in the gate index (i.e. per upload).
+          # 5. EVERY packaged-KO manifest in the native caches must be verified
+          # and pinned, with so_sha256 equal to the SHA-256 of the verified
+          # libdfroot.so whose path the manifest records. No first-match selection, so a stray
+          # unverified cached artifact cannot hide in the set.
+          packaged_manifests=0
+          while IFS= read -r -d '' pman; do
+            packaged_manifests=$((packaged_manifests + 1))
+            if ! grep -q '^status: verified$' "$pman"; then
+              echo "::error::Packaged-KO manifest is not verified: $pman"
+              bad=1
+            fi
+            pkg_ko_hash=$(field sha256 "$pman")
+            if ! in_pins "$pkg_ko_hash"; then
+              echo "::error::Packaged-KO hash '$pkg_ko_hash' is not a reviewed pin ($pman)"
+              bad=1
+            fi
+            verified_so=$(field verified_so "$pman")
+            case "$verified_so" in
+              */app/build/intermediates/*/libdfroot.so) ;;
+              *)
+                echo "::error::Manifest does not name the verified packaged .so: $pman"
+                bad=1
+                ;;
+            esac
+            if [ ! -f "$verified_so" ]; then
+              echo "::error::Verified libdfroot.so missing for manifest: $pman"
+              bad=1
+            else
+              verified_so_sha=$(sha256sum "$verified_so" | awk '{print $1}')
+              man_so_sha=$(field so_sha256 "$pman")
+              if [ "$man_so_sha" != "$verified_so_sha" ]; then
+                echo "::error::Manifest so_sha256 '$man_so_sha' does not match verified libdfroot.so '$verified_so_sha' ($pman)"
+                bad=1
+              fi
+            fi
+          done < <(find app/.cxx -type f -name 'dfroot-packaged-ko.manifest' -print0 2>/dev/null)
+          if [ "$packaged_manifests" -eq 0 ]; then
+            echo "::error::No dfroot-packaged-ko.manifest found under app/.cxx"
+            bad=1
+          fi
+
+          # 6. One evidence row per APK in the gate index (i.e. per upload).
           if [ ! -s "$INDEX" ]; then
             echo "::error::APK gate index is empty; no verified artifact to document"
             bad=1

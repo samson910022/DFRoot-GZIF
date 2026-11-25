@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -334,6 +335,13 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         '    echo "::error::Staged APK $name differs from the packaged release APK"\n'
         '    exit 1\n'
         '  fi\n'
+        '  # Required native content: the APK must carry the bootstrap\n'
+        '  # library that ExploitRunner stages at runtime. Host-only zip\n'
+        '  # assertion, not a device claim.\n'
+        '  if ! unzip -Z1 "$apk" | grep -qx \'lib/arm64-v8a/libbootstrap.so\'; then\n'
+        '    echo "::error::APK $name is missing lib/arm64-v8a/libbootstrap.so"\n'
+        '    exit 1\n'
+        '  fi\n'
         '  EXTRACT="$RUNNER_TEMP/apk-extract-$i"\n'
         '  rm -rf "$EXTRACT"\n'
         '  mkdir -p "$EXTRACT"\n'
@@ -536,7 +544,48 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         '  bad=1\n'
         'fi\n'
         '\n'
-        '# 5. One evidence row per APK in the gate index (i.e. per upload).\n'
+        '# 5. EVERY packaged-KO manifest in the native caches must be verified\n'
+        '# and pinned, with so_sha256 equal to the SHA-256 of the verified\n'
+        '# libdfroot.so whose path the manifest records. No first-match selection, so a stray\n'
+        '# unverified cached artifact cannot hide in the set.\n'
+        'packaged_manifests=0\n'
+        "while IFS= read -r -d '' pman; do\n"
+        '  packaged_manifests=$((packaged_manifests + 1))\n'
+        "  if ! grep -q '^status: verified$' \"$pman\"; then\n"
+        '    echo "::error::Packaged-KO manifest is not verified: $pman"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  pkg_ko_hash=$(field sha256 "$pman")\n'
+        '  if ! in_pins "$pkg_ko_hash"; then\n'
+        '    echo "::error::Packaged-KO hash \'$pkg_ko_hash\' is not a reviewed pin ($pman)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  verified_so=$(field verified_so "$pman")\n'
+        '  case "$verified_so" in\n'
+        '    */app/build/intermediates/*/libdfroot.so) ;;\n'
+        '    *)\n'
+        '      echo "::error::Manifest does not name the verified packaged .so: $pman"\n'
+        '      bad=1\n'
+        '      ;;\n'
+        '  esac\n'
+        '  if [ ! -f "$verified_so" ]; then\n'
+        '    echo "::error::Verified libdfroot.so missing for manifest: $pman"\n'
+        '    bad=1\n'
+        '  else\n'
+        "    verified_so_sha=$(sha256sum \"$verified_so\" | awk '{print $1}')\n"
+        '    man_so_sha=$(field so_sha256 "$pman")\n'
+        '    if [ "$man_so_sha" != "$verified_so_sha" ]; then\n'
+        '      echo "::error::Manifest so_sha256 \'$man_so_sha\' does not match verified libdfroot.so \'$verified_so_sha\' ($pman)"\n'
+        '      bad=1\n'
+        '    fi\n'
+        '  fi\n'
+        "done < <(find app/.cxx -type f -name 'dfroot-packaged-ko.manifest' -print0 2>/dev/null)\n"
+        'if [ "$packaged_manifests" -eq 0 ]; then\n'
+        '  echo "::error::No dfroot-packaged-ko.manifest found under app/.cxx"\n'
+        '  bad=1\n'
+        'fi\n'
+        '\n'
+        '# 6. One evidence row per APK in the gate index (i.e. per upload).\n'
         'if [ ! -s "$INDEX" ]; then\n'
         '  echo "::error::APK gate index is empty; no verified artifact to document"\n'
         '  bad=1\n'
@@ -675,11 +724,17 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
     'Packaged-KO byte-gate tests (CMake, host-only)': (
         'set -euo pipefail\n'
         'cmake -P tests/cmake/packaged_ko_test.cmake\n'
+        '# Same step, same single marker: the named/ALL/raw/cached target\n'
+        '# graph is exercised by a harmless host fixture harness.\n'
+        'cmake -P tests/cmake/packaging_target_graph_test.cmake\n'
         'echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"'
     ),
     'APK packaging gate fixture tests (CMake, host-only)': (
         'set -euo pipefail\n'
         'cmake -P tests/cmake/apk_packaging_gate_test.cmake\n'
+        '# Harmless host content gate: libbootstrap.so must be staged at the\n'
+        '# exact ABI path. Same step and same single marker (7/7 stays intact).\n'
+        'cmake -P tests/cmake/apk_content_gate_test.cmake\n'
         'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'
     ),
     'Extract reviewed KO pins and sizes': (
@@ -812,13 +867,20 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         'if [[ ${#debug[@]} -ne 1 ]]; then\n'
         '  echo "Expected exactly one debug APK" >&2\n'
         '  exit 1\n'
+        'fi\n'
+        '# Required native content: ExploitRunner stages libbootstrap.so from\n'
+        '# nativeLibraryDir at runtime. This host-only zip assertion catches a\n'
+        '# Gradle named-target list that omits `bootstrap`.\n'
+        'if ! python3 -c \'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); n = "lib/arm64-v8a/libbootstrap.so"; sys.exit(0 if n in z.namelist() and z.getinfo(n).file_size > 0 else 1)\' "${debug[0]}"; then\n'
+        '  echo "::error::Debug APK is missing lib/arm64-v8a/libbootstrap.so"\n'
+        '  exit 1\n'
         'fi'
     ),
     'Report UNVERIFIED CI artifact scope': (
         '{\n'
         '  echo "## CI artifact scope"\n'
         '  echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."\n'
-        '  echo "Host suites (49 status, 23/15/3 CMake, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
+        '  echo "Host suites (49 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }
@@ -1532,6 +1594,27 @@ def assert_pr3_gates(text: str) -> None:
         script = run_script(named_step(ci, name))
         if f'echo "{value}" > "$RUNNER_TEMP/{marker}"' not in script:
             raise AssertionError(f"build-dfroot/{name} must write {marker}")
+    # The target-graph harness shares the packaged-KO step and its one marker;
+    # it must never become an eighth suite/marker.
+    packaged_host = run_script(named_step(ci, PACKAGED_KO_TEST_STEP))
+    for fragment in ("tests/cmake/packaged_ko_test.cmake",
+                     "tests/cmake/packaging_target_graph_test.cmake",
+                     'echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"'):
+        if fragment not in packaged_host:
+            raise AssertionError(f"packaged-KO host step is missing {fragment!r}")
+    apk_host = run_script(named_step(ci, APK_FIXTURE_TEST_STEP))
+    for fragment in ("tests/cmake/apk_packaging_gate_test.cmake",
+                     "tests/cmake/apk_content_gate_test.cmake",
+                     'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'):
+        if fragment not in apk_host:
+            raise AssertionError(f"APK host step is missing {fragment!r}")
+    # The real debug APK produced by AGP must contain the required bootstrap
+    # library; a green Gradle exit code alone cannot prove its native contents.
+    counter = run_script(named_step(ci, APK_COUNTER_COMMAND))
+    for fragment in ("zipfile.ZipFile", "lib/arm64-v8a/libbootstrap.so",
+                     'echo "::error::Debug APK is missing lib/arm64-v8a/libbootstrap.so"'):
+        if fragment not in counter:
+            raise AssertionError(f"debug APK counter is missing {fragment!r}")
     all_markers = run_script(named_step(ci, ALL_MARKERS_STEP))
     if len(HOST_SUITE_MARKERS) != 7:
         raise AssertionError("internal: expected exactly seven host suite markers")
@@ -1638,6 +1721,8 @@ def assert_pr3_gates(text: str) -> None:
         "unzip -q \"$apk\" 'lib/arm64-v8a/libdfroot.so' -d \"$EXTRACT\"",
         '-P app/src/main/jni/verify_packaged_ko.cmake',
         'rm -f "$PMAN" "${PMAN}.dfroot_ko.dump"',
+        "unzip -Z1 \"$apk\" | grep -qx 'lib/arm64-v8a/libbootstrap.so'",
+        "::error::APK $name is missing lib/arm64-v8a/libbootstrap.so",
         "^status: verified$",
         '"$man_so_sha" != "$so_sha"',
         '>> "$INDEX"',
@@ -1652,7 +1737,19 @@ def assert_pr3_gates(text: str) -> None:
         if fragment not in identity:
             raise AssertionError(f"provenance identity gate is missing {fragment!r}")
     evidence = run_script(named_step(release, RELEASE_EVIDENCE_STEP))
-    for fragment in ('>> "$EVIDENCE"', '"$rows" -ne "$staged_count"', '"release/$name"', "marker-release-evidence"):
+    for fragment in (
+        '>> "$EVIDENCE"',
+        '"$rows" -ne "$staged_count"',
+        '"release/$name"',
+        "marker-release-evidence",
+        "dfroot-packaged-ko.manifest",
+        "^status: verified$",
+        "field so_sha256",
+        'verified_so=$(field verified_so "$pman")',
+        '*/app/build/intermediates/*/libdfroot.so)',
+        "packaged_manifests",
+        "in_pins \"$pkg_ko_hash\"",
+    ):
         if fragment not in evidence:
             raise AssertionError(f"release evidence gate is missing {fragment!r}")
 
@@ -1781,11 +1878,15 @@ def write_release_apks(root: Path, names: list[str]) -> Path:
     return base
 
 
-def write_debug_apks(root: Path, names: list[str]) -> Path:
+def write_debug_apks(root: Path, names: list[str], with_bootstrap: bool = True) -> Path:
+    """Harmless ZIP fixtures whose native lib set mirrors a real debug APK."""
     base = root / "app" / "build" / "outputs" / "apk" / "debug"
     base.mkdir(parents=True, exist_ok=True)
     for name in names:
-        (base / name).write_bytes(f"DEBUG:{name}\n".encode())
+        with zipfile.ZipFile(base / name, "w") as zf:
+            zf.writestr("classes.dex", f"DEBUG:{name}\n".encode())
+            if with_bootstrap:
+                zf.writestr("lib/arm64-v8a/libbootstrap.so", b"harmless bootstrap fixture\n")
     return base
 
 
@@ -3022,6 +3123,13 @@ class BehavioralScriptTests(unittest.TestCase):
             write_release_apks(root, ["DFRoot_r.apk"])
             result = run_in_dir(self.counter_script, root)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        with self.subTest(fixture="missing libbootstrap.so"), tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_debug_apks(root, ["DFRoot_d.apk"], with_bootstrap=False)
+            result = run_in_dir(self.counter_script, root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("missing lib/arm64-v8a/libbootstrap.so", result.stdout + result.stderr)
 
         with self.subTest(fixture="zero debug"), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

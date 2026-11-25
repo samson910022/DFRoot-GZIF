@@ -115,6 +115,18 @@ android {
                     // release build. Debug may use the local skip policy only
                     // with an explicit reason and no automation marker.
                     arguments += "-DDFROOT_ANDROID_VARIANT=debug"
+                    // AGP must build the VERIFIED artifact chain, not merely
+                    // the raw linker output in its staging directory. This
+                    // CMake target walks raw link -> verify_packaged_ko.cmake
+                    // -> verified copy at the package path, so a green named
+                    // build proves the byte gate ran (ALL membership alone
+                    // could not). `bootstrap` is a SEPARATE required native
+                    // artifact staged by ExploitRunner at runtime; it is not
+                    // in dfroot_packaged's dependency graph, so AGP's exact
+                    // named-target list must include it explicitly. Never
+                    // drop either name: a bare ALL/default build would let
+                    // AGP package the raw unverified/libdfroot.so instead.
+                    targets("dfroot_packaged", "bootstrap")
                 }
             }
         }
@@ -128,6 +140,10 @@ android {
                     // Release is authoritative: the skip guard in CMakeLists
                     // and verify_ko_sha256.cmake rejects it unconditionally.
                     arguments += "-DDFROOT_ANDROID_VARIANT=release"
+                    // Same named verified-artifact set as Debug (see above):
+                    // the verified dfroot copy AND the separately linked
+                    // libbootstrap.so required at runtime.
+                    targets("dfroot_packaged", "bootstrap")
                 }
             }
         }

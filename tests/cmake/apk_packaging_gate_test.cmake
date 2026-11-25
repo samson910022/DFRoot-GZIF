@@ -15,6 +15,10 @@
 #   2  tampered APK: packaged-byte mismatch fails and invalidates a poisoned
 #      stale manifest/dump at the same output path
 #   3  section-missing APK: section-not-found fails with no manifest
+#
+# Every case also snapshots the extracted .so (hash, size and full bytes)
+# immediately before and after the real verifier runs, proving that the
+# packaged-byte gate never mutates the artifact extracted from the APK.
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -90,8 +94,16 @@ function(extract_so apk out_so)
     endif()
 endfunction()
 
+function(snapshot_so so out_var)
+    file(SHA256 "${so}" snap_hash)
+    file(SIZE "${so}" snap_size)
+    file(READ "${so}" snap_bytes HEX)
+    set(${out_var} "${snap_hash}|${snap_size}|${snap_bytes}" PARENT_SCOPE)
+endfunction()
+
 # run_verifier(<rc_var> <out_var> <err_var> <so> <manifest> <pins> <size>)
 function(run_verifier rc_var out_var err_var so manifest pins size)
+    snapshot_so("${so}" extracted_before)
     execute_process(
         COMMAND "${CMAKE_COMMAND}"
                 "-DPACKAGED_SO=${so}"
@@ -102,6 +114,12 @@ function(run_verifier rc_var out_var err_var so manifest pins size)
                 "-DDFROOT_SOURCE_DIR=${TEST_DIR}/../.."
                 -P "${VERIFY_SCRIPT}"
         RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    snapshot_so("${so}" extracted_after)
+    if(NOT extracted_before STREQUAL extracted_after)
+        message(FATAL_ERROR
+            "FAIL: verification mutated the extracted APK .so: ${so}\n"
+            "stdout:\n${out}\nstderr:\n${err}")
+    endif()
     set(${rc_var} "${rc}" PARENT_SCOPE)
     set(${out_var} "${out}" PARENT_SCOPE)
     set(${err_var} "${err}" PARENT_SCOPE)
@@ -153,6 +171,11 @@ if(rc EQUAL 0)
 else()
     report_case("01 fixture APK verifies" "success" FALSE "${out}" "${err}")
 endif()
+file(SHA256 "${EXTRACTED_GOOD}" H_EXTRACTED_AFTER)
+if(NOT H_EXTRACTED_AFTER STREQUAL H_FIXTURE_SO)
+    message(FATAL_ERROR
+        "FAIL: case 1 verification changed the extracted .so: ${H_EXTRACTED_AFTER} != ${H_FIXTURE_SO}")
+endif()
 file(READ "${GOOD_MANIFEST}" manifest_text)
 if(NOT manifest_text MATCHES "status: verified" OR
    NOT manifest_text MATCHES "sha256: ${H_GOOD}" OR
@@ -168,6 +191,7 @@ endif()
 #    invalidated, and the mismatching bytes must fail.
 set(EXTRACTED_TAMPER "${WORK}/extracted-tampered/lib/arm64-v8a/libdfroot.so")
 extract_so("${TAMPER_APK}" "${EXTRACTED_TAMPER}")
+file(SHA256 "${EXTRACTED_TAMPER}" H_EXTRACTED_BEFORE_TAMPER)
 set(TAMPER_MANIFEST "${WORK}/tampered.manifest")
 file(WRITE "${TAMPER_MANIFEST}" "status: verified\nsha256: ${H_GOOD}\n")
 file(WRITE "${TAMPER_MANIFEST}.dfroot_ko.dump" "poisoned stale section dump")
@@ -175,6 +199,10 @@ expect_failure("02 tampered APK mismatch rejected" "${RE_MISMATCH}"
     "${EXTRACTED_TAMPER}" "${TAMPER_MANIFEST}" "${H_GOOD}" 256)
 if(EXISTS "${TAMPER_MANIFEST}")
     message(FATAL_ERROR "FAIL: case 2 left a verified manifest after a mismatch")
+endif()
+file(SHA256 "${EXTRACTED_TAMPER}" H_TAMPER_AFTER)
+if(NOT H_TAMPER_AFTER STREQUAL H_EXTRACTED_BEFORE_TAMPER)
+    message(FATAL_ERROR "FAIL: case 2 verification changed the extracted .so")
 endif()
 # The poisoned dump was invalidated at entry; any dump left by the failed run
 # must be freshly extracted bytes (256-byte fixture section), never the stale
@@ -190,11 +218,16 @@ endif()
 # 3. Section-missing APK: no section, no manifest.
 set(EXTRACTED_NOSEC "${WORK}/extracted-nosection/lib/arm64-v8a/libdfroot.so")
 extract_so("${NOSEC_APK}" "${EXTRACTED_NOSEC}")
+file(SHA256 "${EXTRACTED_NOSEC}" H_EXTRACTED_BEFORE_NOSEC)
 set(NOSEC_MANIFEST "${WORK}/nosection.manifest")
 expect_failure("03 section-missing APK rejected" "${RE_SECTION}"
     "${EXTRACTED_NOSEC}" "${NOSEC_MANIFEST}" "${H_GOOD}" 256)
 if(EXISTS "${NOSEC_MANIFEST}")
     message(FATAL_ERROR "FAIL: case 3 wrote a manifest after section-not-found")
+endif()
+file(SHA256 "${EXTRACTED_NOSEC}" H_NOSEC_AFTER)
+if(NOT H_NOSEC_AFTER STREQUAL H_EXTRACTED_BEFORE_NOSEC)
+    message(FATAL_ERROR "FAIL: case 3 verification changed the extracted .so")
 endif()
 
 message(STATUS "apk_packaging_gate_test: all cases passed")

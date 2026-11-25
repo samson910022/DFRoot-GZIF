@@ -66,6 +66,15 @@ if(NOT CMAKE_OBJCOPY OR "${CMAKE_OBJCOPY}" STREQUAL "")
         "never skip the packaged-byte verification.")
 endif()
 set(PACKAGED_KO_VERIFY_SCRIPT "${JNI_DIR}/verify_packaged_ko.cmake")
+# Two-stage artifact chain (see the packaged-KO section below): the linker
+# writes an UNVERIFIED .so into a staging directory; only the verified copy at
+# the path AGP packages (CMAKE_LIBRARY_OUTPUT_DIRECTORY) is distributable.
+# The manifest lives in this CMake build dir (under app/.cxx, where CI finds
+# every one) and records the verified copy's path so CI can bind each manifest
+# to the exact libdfroot.so AGP packaged.
+set(PACKAGED_KO_STAGING_DIR "${CMAKE_CURRENT_BINARY_DIR}/unverified")
+set(PACKAGED_KO_RAW_SO "${PACKAGED_KO_STAGING_DIR}/libdfroot.so")
+set(PACKAGED_KO_VERIFIED_SO "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libdfroot.so")
 set(PACKAGED_KO_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.manifest")
 # Accepted byte counts of the two reviewed artifacts: the local make output
 # (13504 B, WITH .note.gnu.build-id) and the CI artifact (13384 B, build-id
@@ -238,7 +247,8 @@ target_compile_definitions(dfroot PRIVATE DFROOT_SPLICEHELPER_PATH=\"${SPLICEHEL
 set_target_properties(dfroot PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+    # Raw link output is UNVERIFIED and stays out of AGP's packaging directory.
+    RUNTIME_OUTPUT_DIRECTORY "${PACKAGED_KO_STAGING_DIR}")
 
 set_source_files_properties(exp.c PROPERTIES
     OBJECT_DEPENDS "${KO_FILES};${SPLICEHELPER};${KO_VERIFY_STAMP}")
@@ -246,14 +256,18 @@ set_source_files_properties(exp.c PROPERTIES
 target_link_libraries(dfroot log)
 target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 
-# Final packaged-byte gate: dump the dedicated .dfroot_ko section from the
-# LINKED .so and compare it with the SAME reviewed pins (and expected sizes)
-# used for the source KO. A POST_BUILD hook only ran when the link target was
-# relinked, so it is replaced by an ALWAYS-RUN custom target that touches a real
-# force file: the manifest rule re-runs on EVERY build, even when libdfroot.so
-# is up to date. The rule depends on the dfroot target so the .so exists first.
-# No skip option: failure fails the build and leaves no manifest. CI repeats
-# this gate on the bytes extracted from EVERY APK it uploads.
+# Final packaged-byte gate as a NON-CYCLIC two-stage artifact chain:
+#   1. the raw link target `dfroot` emits an UNVERIFIED libdfroot.so into the
+#      staging directory (never into AGP's packaging directory);
+#   2. a custom command verifies that staged .so with verify_packaged_ko.cmake
+#      and only then copies the identical bytes to the package path; a force
+#      file touched by an always-running target re-runs the check on EVERY
+#      build, even when the link itself is up to date;
+#   3. the ALL target `dfroot_packaged` depends on the VERIFIED artifact, and
+#      app/build.gradle.kts names that target in externalNativeBuild so AGP's
+#      own build invocation traverses the same chain.
+# No skip option: failure fails the build and leaves no verified copy/manifest.
+# CI repeats this gate on the bytes extracted from EVERY APK it uploads.
 set(PACKAGED_KO_FORCE_FILE "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.verify.force")
 add_custom_target(dfroot_packaged_ko_force
     COMMAND "${CMAKE_COMMAND}" -E touch "${PACKAGED_KO_FORCE_FILE}"
@@ -261,24 +275,29 @@ add_custom_target(dfroot_packaged_ko_force
     COMMENT "Scheduling packaged-KO byte re-check"
 )
 add_custom_command(
-    OUTPUT "${PACKAGED_KO_MANIFEST}"
+    OUTPUT "${PACKAGED_KO_VERIFIED_SO}"
     COMMAND "${CMAKE_COMMAND}"
-            "-DPACKAGED_SO=$<TARGET_FILE:dfroot>"
+            "-DPACKAGED_SO=${PACKAGED_KO_RAW_SO}"
             "-DKO_OBJCOPY=${CMAKE_OBJCOPY}"
             "-DKO_EXPECTED_SHA256S=${KO_EXPECTED_SHA256S}"
             "-DKO_EXPECTED_SIZE=${KO_EXPECTED_SIZES}"
             "-DKO_MANIFEST=${PACKAGED_KO_MANIFEST}"
+            "-DPACKAGED_VERIFIED_SO=${PACKAGED_KO_VERIFIED_SO}"
             "-DDFROOT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../.."
             -P "${PACKAGED_KO_VERIFY_SCRIPT}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${PACKAGED_KO_RAW_SO}" "${PACKAGED_KO_VERIFIED_SO}"
     DEPENDS dfroot
             "${PACKAGED_KO_VERIFY_SCRIPT}"
             "${CMAKE_CURRENT_LIST_FILE}"   # re-verify if the pin itself is edited
             "${PACKAGED_KO_FORCE_FILE}"
             dfroot_packaged_ko_force       # target-level ordering: force runs first
+    BYPRODUCTS "${PACKAGED_KO_MANIFEST}"
     COMMENT "Verifying packaged .dfroot_ko bytes in libdfroot.so"
     VERBATIM
 )
-add_custom_target(dfroot_packaged_ko_check ALL DEPENDS "${PACKAGED_KO_MANIFEST}")
+add_custom_target(dfroot_packaged ALL DEPENDS "${PACKAGED_KO_VERIFIED_SO}")
 
 add_executable(bootstrap bootstrap.c status_protocol.c final_status_publish.c proc_scan_policy.c)
 set_target_properties(bootstrap PROPERTIES
@@ -286,3 +305,10 @@ set_target_properties(bootstrap PROPERTIES
     SUFFIX ".so"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
 target_link_options(bootstrap PRIVATE -Wl,-z,max-page-size=16384)
+# libbootstrap.so is a SEPARATE native artifact: ExploitRunner stages it from
+# nativeLibraryDir at runtime, and it is not otherwise in dfroot_packaged's
+# dependency graph. app/build.gradle.kts names both targets for AGP; this
+# dependency is belt-and-braces so the packaged target cannot be built without
+# the runtime-required bootstrap library. No cycle: bootstrap has no dependency
+# on the dfroot link or verification chain.
+add_dependencies(dfroot_packaged bootstrap)
