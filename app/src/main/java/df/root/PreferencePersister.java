@@ -1,5 +1,5 @@
-// Modified 2026-11-25 (DFRoot GZIF round-3 PR #3 phase 3): failed writes now
-// quarantine memory/disk divergence through PreferenceIntegrity. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): write-ahead marker
+// brackets every commit; a marker fault aborts before touching the editor. See NOTICE.
 package df.root;
 
 import android.content.SharedPreferences;
@@ -16,9 +16,11 @@ import android.util.Log;
  * can revert the corresponding control.
  *
  * commit() can fail AFTER mutating the in-memory map, leaving memory and the
- * on-disk XML divergent. Every failure therefore marks its key ambiguous in
- * PreferenceIntegrity (blocking launch/boot); only a later successful write of
- * the same key restores consistency. The public API is unchanged.
+ * on-disk XML divergent. A durable PENDING marker is therefore published
+ * BEFORE the commit; if that cannot be persisted, the write is abandoned (no
+ * privileged operation, no commit) and boot is disabled synchronously. Only a
+ * later successful write of the same key restores consistency. The public API
+ * is unchanged.
  */
 public final class PreferencePersister {
 
@@ -43,9 +45,14 @@ public final class PreferencePersister {
     }
 
     public boolean putString(String key, String value) {
+        if (!PreferenceIntegrity.beginWrite(key)) {
+            report(key, "write-ahead integrity marker could not be persisted");
+            PreferenceIntegrity.markAmbiguous(key);
+            return false; // no commit: neither memory nor disk is touched
+        }
         try {
             boolean committed = prefs.edit().putString(key, value).commit();
-            if (committed) PreferenceIntegrity.markConsistent(key);
+            if (committed) PreferenceIntegrity.finishWriteSuccess(key);
             else {
                 report(key, "putString commit() returned false");
                 PreferenceIntegrity.markAmbiguous(key);
@@ -59,9 +66,14 @@ public final class PreferencePersister {
     }
 
     public boolean remove(String key) {
+        if (!PreferenceIntegrity.beginWrite(key)) {
+            report(key, "write-ahead integrity marker could not be persisted");
+            PreferenceIntegrity.markAmbiguous(key);
+            return false;
+        }
         try {
             boolean committed = prefs.edit().remove(key).commit();
-            if (committed) PreferenceIntegrity.markConsistent(key);
+            if (committed) PreferenceIntegrity.finishWriteSuccess(key);
             else {
                 report(key, "remove commit() returned false");
                 PreferenceIntegrity.markAmbiguous(key);
@@ -75,9 +87,14 @@ public final class PreferencePersister {
     }
 
     public boolean putBoolean(String key, boolean value) {
+        if (!PreferenceIntegrity.beginWrite(key)) {
+            report(key, "write-ahead integrity marker could not be persisted");
+            PreferenceIntegrity.markAmbiguous(key);
+            return false;
+        }
         try {
             boolean committed = prefs.edit().putBoolean(key, value).commit();
-            if (committed) PreferenceIntegrity.markConsistent(key);
+            if (committed) PreferenceIntegrity.finishWriteSuccess(key);
             else {
                 report(key, "putBoolean commit() returned false");
                 PreferenceIntegrity.markAmbiguous(key);

@@ -1,9 +1,8 @@
-// Modified 2026-11-25 (DFRoot GZIF round-3 PR #3 phase 3): preference-integrity
-// launch gate, marker-failure boot gate and truthful StatusRc messages. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): durable gate owns
+// boot-disable; the activity listener is UI-only and lifecycle-scoped. See NOTICE.
 package df.root;
 
 import android.app.Activity;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -44,10 +43,14 @@ public class MainActivity extends Activity implements IReporter {
     private TextView outputView;
     private Spinner spinnerSuManager;
     private Context mDeCtx;
+    private Context mAppContext;
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private final Executor mExec = Executors.newSingleThreadExecutor();
     private int mValidSuManagerPos = 0;
     private PreferencePersister mPrefsPersister;
+    // Held in a field so onDestroy() can remove it: a static/anonymous listener
+    // would retain this Activity across every screen recreation.
+    private PreferenceIntegrity.Listener mIntegrityListener;
     // A programmatic setSelection() fires onItemSelected again; suppress the
     // write (and any further revert) while restoring the previous choice.
     private boolean mRestoringSpinnerSelection;
@@ -60,6 +63,7 @@ public class MainActivity extends Activity implements IReporter {
     public void report(String msg) {
         Log.i(TAG, msg.trim());
         mMain.post(() -> {
+            if (isFinishing() || isDestroyed() || outputView == null || outputScroll == null) return;
             outputView.append(msg);
             outputScroll.post(() -> outputScroll.fullScroll(View.FOCUS_DOWN));
         });
@@ -68,6 +72,7 @@ public class MainActivity extends Activity implements IReporter {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mAppContext = getApplicationContext();
         mDeCtx = createDeviceProtectedStorageContext();
         PreferenceIntegrity.init(mDeCtx);
         PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
@@ -94,15 +99,16 @@ public class MainActivity extends Activity implements IReporter {
         spinnerSuManager.setAdapter(new SuManagerAdapter(this, entries));
 
         SharedPreferences prefs = mDeCtx.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
+        final Context app = mAppContext;
         mPrefsPersister = new PreferencePersister(prefs, (key, detail) -> {
             Log.e(TAG, "Preference write failed for " + key + ": " + detail);
-            // Posted: PreferencePersister marks the key ambiguous right after
-            // this callback returns, so the gate state is settled by then.
+            // The durable gate already disabled boot at the failure boundary;
+            // this callback is only a user-facing revert/toast.
             mMain.post(() -> {
-                Toast.makeText(this,
+                if (isFinishing() || isDestroyed() || outputView == null) return;
+                Toast.makeText(app,
                         "Could not save selection - reverting; LAUNCH ROOT is blocked " +
                         "until the same setting saves successfully", Toast.LENGTH_LONG).show();
-                disableBootReceiverForFailedMarker();
             });
         });
         String saved = prefs.getString(ExploitRunner.PREF_SU_MANAGER, null);
@@ -147,11 +153,13 @@ public class MainActivity extends Activity implements IReporter {
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
-        // A later successful save of the same key clears the quarantine.
-        PreferenceIntegrity.addListener(() -> mMain.post(() -> {
+        // UI-only: reflect the latch on the next frame. Boot-disable is a
+        // durable operation owned by PreferenceIntegrity at the failure boundary.
+        mIntegrityListener = () -> mMain.post(() -> {
+            if (isFinishing() || isDestroyed() || btnRun == null) return;
             updateRunButton();
-            disableBootReceiverForFailedMarker();
-        }));
+        });
+        PreferenceIntegrity.addListener(mIntegrityListener);
         updateRunButton();
 
         btnRun.setOnClickListener(v -> {
@@ -176,27 +184,21 @@ public class MainActivity extends Activity implements IReporter {
         return super.onOptionsItemSelected(item);
     }
 
+    @Override
+    protected void onDestroy() {
+        // No callback may outlive the screen and retain it after recreation.
+        if (mIntegrityListener != null) {
+            PreferenceIntegrity.removeListener(mIntegrityListener);
+            mIntegrityListener = null;
+        }
+        super.onDestroy();
+    }
+
     private void updateRunButton() {
+        if (btnRun == null || isFinishing() || isDestroyed()) return;
         btnRun.setEnabled(mValidSuManagerPos >= 1
                 && !new File("/dev/df").exists()
                 && !PreferenceIntegrity.isQuarantined());
-    }
-
-    /**
-     * If a quarantine could not be persisted durably, the boot-time gate cannot
-     * be trusted: disable BootReceiver so a stale preference cannot be acted on
-     * after reboot. A healthy (non-quarantined) app leaves Start on Boot alone.
-     */
-    private void disableBootReceiverForFailedMarker() {
-        if (!PreferenceIntegrity.isQuarantined()
-                || PreferenceIntegrity.durableMarkerActive()) return;
-        ComponentName receiver = new ComponentName(this, BootReceiver.class);
-        if (getPackageManager().getComponentEnabledSetting(receiver)
-                != PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
-            getPackageManager().setComponentEnabledSetting(receiver,
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-                    PackageManager.DONT_KILL_APP);
-        }
     }
 
     /** Revert the spinner without re-persisting the old selection. */
@@ -221,7 +223,11 @@ public class MainActivity extends Activity implements IReporter {
              * root was verified or a reboot was confirmed: only an on-device
              * oracle can prove either. */
             String msg = StatusRc.name(rc);
-            mMain.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+            mMain.post(() -> {
+                if (mAppContext != null && !isFinishing() && !isDestroyed()) {
+                    Toast.makeText(mAppContext, msg, Toast.LENGTH_LONG).show();
+                }
+            });
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");

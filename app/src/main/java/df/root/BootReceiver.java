@@ -1,5 +1,6 @@
-// Modified 2026-11-25 (DFRoot GZIF round-3 PR #3 phase 3): skip boot launch when
-// SharedPreferences integrity is quarantined. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): defense-in-depth
+// quarantine check; the component is expected to be durably disabled already.
+// See NOTICE.
 package df.root;
 
 import android.content.BroadcastReceiver;
@@ -28,8 +29,11 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         final Context deCtx = context.createDeviceProtectedStorageContext();
         PreferenceIntegrity.init(deCtx);
         if (PreferenceIntegrity.isQuarantined()) {
-            // Memory and the prefs XML may disagree; the native bootstrap
-            // reads the XML, so no boot-time launch is safe.
+            // Defense in depth only. On a healthy failure path the component
+            // was already durably disabled by the shared gate at the failure
+            // boundary; if this receiver still runs, that is an anomaly. This
+            // check is NEVER an oracle that the state is safe -- it can only
+            // skip a launch, never authorize one.
             Log.i(TAG, "boot: preferences quarantined, skipping launch");
             return;
         }
