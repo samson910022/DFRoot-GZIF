@@ -27,25 +27,32 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > [!WARNING]
 > **Validation boundary.** run6/run8 happened on 2026-11-17 against the
 > **historical implementation** (old multi-marker protocol, then-current KO
-> pins, old preference path); no hardware run validates the current head of
+> pins, old preference path); no hardware run validates the rebased head of
 > `fix/native-exploit-robustness`. That head is **host-tested only and
 > UNVALIDATED on device**; a successful build does not certify safe privileged
-> execution. PR CI is green on host suites only and is **non-publishing**: no
-> APK is uploaded and no release claim is made. Publishing (non-PR) events add
-> real KO/APK gates before upload: every distributable APK gets its own
-> packaged-byte manifest with `so_sha256` binding, provenance identity is
-> checked for every record, and a distributable-evidence choke point gates the
-> upload. Provenance manifests are informational evidence, **not** an
-> attestation or an independent reproducible-build proof.
+> execution.
+> PR/branch/manual CI runs execute the host suites as required gates and upload
+> a debug-keystore-signed APK as an explicitly **UNVERIFIED** Actions artifact
+> with `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`: no
+> signing secrets, no signed APK, no GitHub Release and no release claim. Only
+> a `v*` tag push takes the protected `build-release` path, where the signed
+> APK is `apksigner`-verified and checksummed, then every distributable APK is
+> packaged-byte-verified with its own manifest and `so_sha256` binding, every
+> provenance record gets a required identity check, and release evidence is
+> asserted at a single pre-upload choke point before `publish` can run.
+> Provenance manifests are informational evidence, **not** an attestation or
+> an independent reproducible-build proof.
 > Host suites: 49 status + 13 proc-scan + 26 ELF + 16/14/10 device-version
 > cases, CMake 23/15/3 cases, JVM **28 tests** (4/5/8/11 in LaunchGate /
 > ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
 > XML assertion, and **7/7** suite markers.
-> Do not publish with obsolete KO pins: the pins remain unchanged and the gate
-> is fail-closed until a reviewed re-pin; no tag was created. Gradle passes the
-> Android variant (`release` / `debug`) as the authoritative native policy
-> signal, and the KO is linked into a dedicated `.dfroot_ko` section whose final
-> bytes in `libdfroot.so` are SHA-256-checked against the same pins.
+> **KO pins:** the byte gate rejects unknown bytes but still accepts the two
+> known obsolete pins. Release is withheld by **policy** — a reviewed re-pin,
+> the OPEN P1-08 staging gate and device validation — not by the hash gate
+> alone; passing the gate is not device validation. Gradle passes the Android
+> variant (`release` / `debug`) as the authoritative native policy signal, and
+> the KO is linked into a dedicated `.dfroot_ko` section whose final bytes in
+> `libdfroot.so` are SHA-256-checked against the same pins.
 > The app uses a single atomically published nonce-bound `/dev/dffinal` outcome
 > (truthful rc 0–9 plus the additive 64 recovery bit), separate app-owned
 > `dfbootfail` / `dfrecover` channels, a write-ahead durable preference marker,
@@ -55,6 +62,12 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > can be swapped by a `shell`-uid process and needs a loader rebuild;
 > documenting it is not a fix. See `CHANGELOG.md` round-4 (2026-11-25) and
 > `PORTING-GZIF.md` §16–17 for the test/lifecycle/failure-path detail.
+
+> [!NOTE]
+> **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
+> the base and PR #3 was rebased onto that head. run6/run8 and all earlier CI
+> runs predate the rebase: they are historical and do not validate the rebased
+> head. No tag was created by us.
 
 ## FAQ
 
@@ -134,36 +147,90 @@ The exploit uses this primitive to patch shellcode into `libc++.so` in the kerne
 make
 ```
 
+The top-level `make` performs **one** DDK build for the single KMI this fork
+ships (`android13-5.15`). It uses the exact digest-pinned image that CI uses,
+read from `.github/workflows/build.yml` by `scripts/ddk-image.sh` (no floating
+tags, no caller-supplied image). Podman runs it with `--network=none`,
+`--cap-drop=ALL` and `no-new-privileges`, mounting only `lkm/` and the KO output
+directory. `SIGN_PASS` and `SIGN_ALIAS` must be **exported in the environment**;
+the Makefile rejects them as `make` command-line assignments (which would leak
+into shell history, process listings and echoed output).
+
+Toolchain: Gradle wrapper **9.9.2** (distribution SHA-256 pinned in
+`gradle/wrapper/gradle-wrapper.properties`), AGP **9.5.0** declared once in
+`gradle/libs.versions.toml` and consumed through the version-catalog alias
+(there is no root `build.gradle.kts` AGP version pin), JDK 21 (toolchain-pinned),
+SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
+
 ### Building this fork (DFRoot GZIF)
 
 The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 `app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
 
-- build it with the top-level `make` (podman + DDK images; chains all eight
-  KMIs — long), or
+- build it with the top-level `make` (one podman build, digest-pinned
+  `android13-5.15` DDK image — long), or
 - build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
   the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
   for GZIF, or
-- fetch the prebuilt `dfroot-android13-5.15.ko` (sha256 `94f8be98…`) from CI
-  artifacts (`.github/workflows/build.yml`) and place it at
-  `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
+- fetch the CI-built `dfroot-android13-5.15.ko` from the
+  `df-lkm-android13-5.15` artifact of `.github/workflows/build.yml`; its
+  sha256 is
+  `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`.
+  Place it at `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
 
-Then: JDK 21 (toolchain-pinned) · SDK 36 · NDK r28c (`28.2.13676358`) ·
-CMake 3.22.1 · `./gradlew :app:assembleRelease` →
+The CI/release artifact is 13,384 B and is **not byte-identical** to the locally
+`make`-built KO (13,504 B, sha256 `94f8be98…`): CI strips `.note.gnu.build-id`
+(and other notes/sections) with `llvm-objcopy --strip-unneeded`, so the size,
+bytes and hash differ even though both are built from the same source. The full
+hash above identifies the CI/release artifact.
+
+Then: `./gradlew :app:assembleRelease` →
 `app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
 `adb install -r` → enable adb → open **DFRoot GZIF** → LAUNCH ROOT.
 
 The native build requires `CMAKE_OBJCOPY` (configure fails without it): a
 POST_BUILD step dumps the dedicated `.dfroot_ko` section from `libdfroot.so`
 and verifies the **packaged bytes** against the same KO pins and expected
-sizes. There is no skip option for this gate. Release/tag CI repeats it
-against the APK's `lib/arm64-v8a/libdfroot.so` before publishing, so a tag
-is blocked until the reviewed KO is re-pinned (see `CHANGELOG.md`).
+sizes. There is no skip option for this gate. Tag CI repeats it against the
+APK's `lib/arm64-v8a/libdfroot.so` before publishing. The gate rejects unknown
+bytes but **accepts the two known obsolete pins**: a release is withheld by
+policy (reviewed re-pin, OPEN P1-08 and device validation), not by the hash
+gate alone; passing it is not device validation (see `CHANGELOG.md`).
 
-Signing: `signing.properties` at the repo root (gitignored) with
-`KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`.
-Do **not** commit it. Local `make` now requires explicit `SIGN_PASS`/`SIGN_ALIAS`
-(no default credentials); CI uses the `KEYSTORE` secrets.
+### Signing variants and CI events
+
+- **Debug** is always signed with the standard Android debug keystore
+  (`signingConfigs.getByName("debug")`), independently of `signing.properties`,
+  and is installable for development.
+- **Release** requires a gitignored root `signing.properties` with
+  `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (or the
+  top-level `make`, which generates a local keystore from the exported
+  `SIGN_PASS` / `SIGN_ALIAS`). Without complete, real signing material the
+  release variant and every release task are **disabled/fail closed**; a
+  harmless placeholder keeps configuration, `assembleDebug` and unit tests
+  working, and no unsigned or dummy-signed release APK is emitted. **Do not
+  commit** `signing.properties`.
+- **CI event matrix** (`.github/workflows/build.yml`): pull requests, pushes to
+  `master`/`main`, and manual `workflow_dispatch` runs execute all host policy
+  and suite gates with **no secrets**, build a debug-keystore-signed Debug APK,
+  and upload it as a public downloadable **`DFRoot-UNVERIFIED-CI`** Actions
+  artifact carrying `GPL-3.0.txt`, `LICENSE`, `NOTICE` and
+  `THIRD_PARTY_NOTICES.md`. It is explicitly UNVERIFIED: no signed APK, no
+  signing secrets, no GitHub Release and no release claim. Only a push of a
+  `v*` tag runs `build-release` in the protected `release` environment, where
+  the four `KEYSTORE*` secrets exist: the signed APK is `apksigner`-verified,
+  checksummed, packaged-byte- and provenance-evidence-gated before upload, then
+  `publish` emits the GitHub Release with the same licence/notice bundle.
+- The `KEYSTORE` value — the protected CI secret, or the environment value read
+  by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
+  (produce it with `base64 -w0 keystore.jks`); it is decoded and the JKS
+  validated before any signing material is published. A raw JKS is rejected.
+
+> [!WARNING]
+> **The release signing key is new.** Android refuses to overwrite-update an
+> installed application with an APK signed by a different key: uninstall any
+> existing DFRoot GZIF installation before installing a signed release build.
+> The UNVERIFIED CI Debug artifacts cannot update a signed install either.
 
 ## Credits
 

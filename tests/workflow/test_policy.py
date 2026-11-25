@@ -61,6 +61,50 @@ TEST_CI_COMMANDS = {
 APK_COUNTER_COMMAND = "Verify APK counts"
 ANCESTRY_STEP = "Verify tag is on master"
 CLEANUP_STEP = "Clean up signing material"
+# PR #3 gate step names.  These are exact allowlist entries, not descriptive
+# prose: renaming or reordering any of them fails the policy suite.
+HOST_STATUS_STEP = "Host status-protocol tests"
+KO_POLICY_TEST_STEP = "KO hash policy tests (CMake, host-only)"
+PACKAGED_KO_TEST_STEP = "Packaged-KO byte-gate tests (CMake, host-only)"
+APK_FIXTURE_TEST_STEP = "APK packaging gate fixture tests (CMake, host-only)"
+EXTRACT_PINS_STEP = "Extract reviewed KO pins and sizes"
+KO_CI_POLICY_STEP = "KO hash policy (CI enforced, skip rejected)"
+JVM_TEST_STEP = "Java preference-persistence unit tests"
+JUNIT_STEP = "Assert JUnit XML (28 tests, 0 failures)"
+ALL_MARKERS_STEP = "Assert all test suites reached"
+DEBUG_BUILD_STEP = "Build debug APK (UNVERIFIED CI artifact)"
+CI_CACHE_ASSERT_STEP = "Assert KO hash check enabled in every CMakeCache"
+CI_SCOPE_STEP = "Report UNVERIFIED CI artifact scope"
+CI_UPLOAD_STEP = "Upload UNVERIFIED CI APKs"
+PACKAGED_KO_GATE_STEP = "Verify packaged KO bytes in every distributable APK"
+PROVENANCE_IDENTITY_STEP = "Verify build-provenance identity for every record"
+RELEASE_EVIDENCE_STEP = "Verify release evidence for every uploaded APK"
+UPLOAD_CHOKE_STEP = "Assert distributable evidence before upload"
+RELEASE_UPLOAD_STEP = "Upload signed release"
+PROVENANCE_GENERATE_STEP = "Generate APK provenance manifest (informational)"
+PROVENANCE_UPLOAD_STEP = "Upload APK provenance manifest (informational)"
+# The seven host suites that must each write a marker before the build may
+# continue.  A green Gradle exit code alone is not enough to prove a suite ran.
+HOST_SUITE_MARKERS = (
+    "marker-native",
+    "marker-ko-policy",
+    "marker-packaged-ko",
+    "marker-apk-packaging-fixture",
+    "marker-ko-ci-policy",
+    "marker-jvm",
+    "marker-junit",
+)
+# Marker written by each required build-release gate; the pre-upload choke
+# point refuses to publish unless every one exists and the index is populated.
+RELEASE_GATE_MARKERS = (
+    "marker-apk-gate",
+    "marker-provenance-identity",
+    "marker-release-evidence",
+)
+RELEASE_GATE_INDEX = "apk-gate-index.tsv"
+CI_ARTIFACT_NAME = "DFRoot-UNVERIFIED-CI"
+RELEASE_ARTIFACT_NAME = "DFRoot-release"
+PROVENANCE_ARTIFACT_NAME = "DFRoot-provenance"
 # Exact, ordered run-script contract for build-release.  Dict insertion order
 # is the required order of the run steps.  Every value is the full, exact script
 # text (no trailing newline, 2-space shell indentation), compared with equality
@@ -167,14 +211,618 @@ VERIFY_CHECKSUM_SCRIPT = (
     '  sha256sum --check "$checksum"\n'
     ")"
 )
+
+# Exact, ordered run-script contract for build-release (PR #1 + PR #3 gates).
+# Every value is the full, exact script text (no trailing newline, 2-space shell
+# indentation), compared with equality by assert_exact_release_run_scripts.
 RELEASE_RUN_SCRIPTS: dict[str, str] = {
-    ANCESTRY_STEP: ANCESTRY_SCRIPT,
-    "Write signing material": "java scripts/WriteSigningProperties.java ci .",
-    "Build signed release APK": BUILD_SIGNED_SCRIPT,
-    "Verify signed release APK": VERIFY_SIGNED_SCRIPT,
-    "Package signed release APK": PACKAGE_SIGNED_SCRIPT,
-    CLEANUP_STEP: CLEANUP_SCRIPT,
+    'Verify tag is on master': (
+        'set -euo pipefail\n'
+        'if ! git merge-base --is-ancestor HEAD origin/master; then\n'
+        '  echo "Release tag HEAD must be an ancestor of origin/master" >&2\n'
+        '  exit 1\n'
+        'fi'
+    ),
+    'Write signing material': (
+        'java scripts/WriteSigningProperties.java ci .'
+    ),
+    'Build signed release APK': (
+        'set -euo pipefail\n'
+        'for attempt in 1 2 3; do\n'
+        '  if ./gradlew :app:assembleRelease --no-daemon --console=plain; then\n'
+        '    break\n'
+        '  fi\n'
+        '  if [[ $attempt -eq 3 ]]; then\n'
+        '    echo "Gradle build failed after 3 attempts" >&2\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  echo "Gradle build failed (attempt $attempt), retrying in 30s..." >&2\n'
+        '  sleep 30\n'
+        'done'
+    ),
+    'Verify signed release APK': (
+        'set -euo pipefail\n'
+        'shopt -s nullglob\n'
+        'apks=(app/build/outputs/apk/release/DFRoot_*.apk)\n'
+        'if [[ ${#apks[@]} -ne 1 ]]; then\n'
+        '  echo "Expected exactly one release APK, found ${#apks[@]}" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}\n'
+        'apksigner=\n'
+        'if [[ -d $sdk/build-tools ]]; then\n'
+        '  apksigner=$(find "$sdk/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print | sort -V | tail -n 1)\n'
+        'fi\n'
+        'if [[ -z $apksigner || ! -x $apksigner ]]; then\n'
+        '  echo "apksigner was not found in the Android SDK" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        '"$apksigner" verify --verbose --print-certs "${apks[0]}"'
+    ),
+    'Package signed release APK': (
+        'set -euo pipefail\n'
+        'shopt -s nullglob\n'
+        'apks=(app/build/outputs/apk/release/DFRoot_*.apk)\n'
+        'if [[ ${#apks[@]} -ne 1 ]]; then\n'
+        '  echo "Expected exactly one release APK, found ${#apks[@]}" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'apk=${apks[0]##*/}\n'
+        'mkdir -p release\n'
+        'cp -- "${apks[0]}" "release/$apk"\n'
+        'cp -- GPL-3.0.txt LICENSE NOTICE THIRD_PARTY_NOTICES.md release/\n'
+        '(\n'
+        '  cd release\n'
+        '  sha256sum -- "$apk" > "$apk.sha256"\n'
+        ')'
+    ),
+    'Extract reviewed KO pins and sizes': (
+        'set -euo pipefail\n'
+        "sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \\\n"
+        '  | grep -oE \'[0-9a-f]{64}\' | paste -sd\';\' - > "$RUNNER_TEMP/ko-pins.txt"\n'
+        "sed -n '/set(KO_EXPECTED_SIZES/,/^)/p' app/src/main/jni/CMakeLists.txt \\\n"
+        '  | grep -oE \'[0-9]+\' | paste -sd\';\' - > "$RUNNER_TEMP/ko-sizes.txt"\n'
+        'test -s "$RUNNER_TEMP/ko-pins.txt"\n'
+        'test -s "$RUNNER_TEMP/ko-sizes.txt"\n'
+        'echo "reviewed pins: $(cat "$RUNNER_TEMP/ko-pins.txt")"\n'
+        'echo "reviewed sizes: $(cat "$RUNNER_TEMP/ko-sizes.txt")"'
+    ),
+    'Verify packaged KO bytes in every distributable APK': (
+        'set -euo pipefail\n'
+        'STAGE="$RUNNER_TEMP/dfroot-release-apks"\n'
+        'INDEX="$RUNNER_TEMP/apk-gate-index.tsv"\n'
+        'rm -rf "$STAGE"\n'
+        'mkdir -p "$STAGE"\n'
+        ': > "$INDEX"\n'
+        'shopt -s nullglob\n'
+        'APK_SOURCE=(release/DFRoot_*.apk)\n'
+        'if [ "${#APK_SOURCE[@]}" -eq 0 ]; then\n'
+        '  echo "::error::No packaged release APK found; refusing to publish unverified artifacts"\n'
+        '  exit 1\n'
+        'fi\n'
+        'cp -- "${APK_SOURCE[@]}" "$STAGE/"\n'
+        'STAGED=("$STAGE"/DFRoot_*.apk)\n'
+        'if [ "${#STAGED[@]}" -ne "${#APK_SOURCE[@]}" ]; then\n'
+        '  echo "::error::Staged APK count does not match the packaged release APK set"\n'
+        '  exit 1\n'
+        'fi\n'
+        '\n'
+        "# Prefer the NDK's llvm-objcopy: host binutils may not understand\n"
+        '# AArch64 objects. Fall back to an llvm-objcopy/objcopy on PATH.\n'
+        'OBJCOPY=""\n'
+        'for candidate in \\\n'
+        '    "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy" \\\n'
+        '    "${ANDROID_HOME:-}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy; do\n'
+        '  if [ -x "$candidate" ]; then OBJCOPY="$candidate"; break; fi\n'
+        'done\n'
+        'if [ -z "$OBJCOPY" ]; then\n'
+        '  OBJCOPY="$(command -v llvm-objcopy || command -v objcopy || true)"\n'
+        'fi\n'
+        'if [ -z "$OBJCOPY" ]; then\n'
+        '  echo "::error::No objcopy/llvm-objcopy available for the packaged-KO gate"\n'
+        '  exit 1\n'
+        'fi\n'
+        '\n'
+        'PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")\n'
+        'SIZES=$(cat "$RUNNER_TEMP/ko-sizes.txt")\n'
+        'i=0\n'
+        'for apk in "${STAGED[@]}"; do\n'
+        '  i=$((i + 1))\n'
+        '  name=$(basename "$apk")\n'
+        '  apk_sha=$(sha256sum "$apk" | awk \'{print $1}\')\n'
+        '  if [ "$(sha256sum "release/$name" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Staged APK $name differs from the packaged release APK"\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  EXTRACT="$RUNNER_TEMP/apk-extract-$i"\n'
+        '  rm -rf "$EXTRACT"\n'
+        '  mkdir -p "$EXTRACT"\n'
+        '  unzip -q "$apk" \'lib/arm64-v8a/libdfroot.so\' -d "$EXTRACT"\n'
+        '  SO="$EXTRACT/lib/arm64-v8a/libdfroot.so"\n'
+        '  test -f "$SO"\n'
+        '  so_sha=$(sha256sum "$SO" | awk \'{print $1}\')\n'
+        '\n'
+        '  PMAN="$RUNNER_TEMP/dfroot-packaged-$i.manifest"\n'
+        '  # The verifier invalidates its outputs at entry; repeat here so a\n'
+        '  # reused runner-temp path can never carry stale verified evidence.\n'
+        '  rm -f "$PMAN" "${PMAN}.dfroot_ko.dump"\n'
+        '  cmake -DPACKAGED_SO="$SO" -DKO_OBJCOPY="$OBJCOPY" \\\n'
+        '      "-DKO_EXPECTED_SHA256S=$PINS" "-DKO_EXPECTED_SIZE=$SIZES" \\\n'
+        '      -DKO_MANIFEST="$PMAN" \\\n'
+        '      -DDFROOT_SOURCE_DIR="$GITHUB_WORKSPACE" \\\n'
+        '      -P app/src/main/jni/verify_packaged_ko.cmake\n'
+        '  grep -q \'^status: verified$\' "$PMAN"\n'
+        '  man_so_sha=$(sed -n \'s/^so_sha256: //p\' "$PMAN")\n'
+        '  if [ "$man_so_sha" != "$so_sha" ]; then\n'
+        '    echo "::error::Manifest so_sha256 for $name does not match the extracted .so"\n'
+        '    exit 1\n'
+        '  fi\n'
+        "  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \\\n"
+        '      "$name" "$apk_sha" "$so_sha" "$PMAN" "$man_so_sha" >> "$INDEX"\n'
+        '  echo "verified APK: $name ($apk_sha)"\n'
+        'done\n'
+        'if [ ! -s "$INDEX" ]; then\n'
+        '  echo "::error::APK gate index is empty; refusing to publish"\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "apk-gate-ok" > "$RUNNER_TEMP/marker-apk-gate"'
+    ),
+    'Verify build-provenance identity for every record': (
+        'set -euo pipefail\n'
+        'bad=0\n'
+        'records=0\n'
+        'field() {\n'
+        '  awk -v key="$1" \'index($0, key ": ") == 1 {\n'
+        '    print substr($0, length(key) + 3); exit }\' "$2"\n'
+        '}\n'
+        'sha_of_recorded() {\n'
+        '  case "$1" in\n'
+        '    /*) path="$1" ;;\n'
+        '    *)  path="$GITHUB_WORKSPACE/$1" ;;\n'
+        '  esac\n'
+        '  if [ -f "$path" ]; then\n'
+        '    sha256sum "$path" | awk \'{print $1}\'\n'
+        '  else\n'
+        '    echo "unavailable"\n'
+        '  fi\n'
+        '}\n'
+        "while IFS= read -r -d '' rec; do\n"
+        '  records=$((records + 1))\n'
+        '  rec_head=$(field git_head "$rec")\n'
+        '  if [ "$rec_head" != "$GITHUB_SHA" ]; then\n'
+        '    echo "::error::Provenance git_head \'$rec_head\' != GITHUB_SHA \'$GITHUB_SHA\' ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  rec_variant=$(field android_variant "$rec")\n'
+        '  if [ "${rec_variant,,}" != "release" ]; then\n'
+        '    echo "::error::Provenance android_variant is not release: \'$rec_variant\' ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  rec_ko=$(field ko_sha256 "$rec")\n'
+        '  if ! tr \';\' \'\\n\' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$rec_ko"; then\n'
+        '    echo "::error::Provenance ko_sha256 \'$rec_ko\' is not a reviewed pin ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  rec_ko_man=$(field ko_verify_manifest "$rec")\n'
+        '  rec_ko_man_sha=$(field ko_manifest_sha256 "$rec")\n'
+        '  if [ "$(sha_of_recorded "$rec_ko_man")" != "$rec_ko_man_sha" ]; then\n'
+        '    echo "::error::Provenance ko_manifest digest mismatch ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  rec_helper=$(field splicehelper_binary "$rec")\n'
+        '  rec_helper_sha=$(field splicehelper_sha256 "$rec")\n'
+        '  if [ "$(sha_of_recorded "$rec_helper")" != "$rec_helper_sha" ]; then\n'
+        '    echo "::error::Provenance splicehelper binary hash mismatch ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  rec_helper_src=$(field splicehelper_source "$rec")\n'
+        '  rec_helper_src_sha=$(field splicehelper_source_sha256 "$rec")\n'
+        '  if [ "$(sha_of_recorded "$rec_helper_src")" != "$rec_helper_src_sha" ]; then\n'
+        '    echo "::error::Provenance splicehelper source hash mismatch ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  for compiler_field in compiler_id compiler_version compiler_target \\\n'
+        '                        compiler_sysroot compiler_c_flags compiler_asm_flags; do\n'
+        '    if ! grep -q "^${compiler_field}: " "$rec"; then\n'
+        '      echo "::error::Provenance missing ${compiler_field} ($rec)"\n'
+        '      bad=1\n'
+        '    elif [ -z "$(field "$compiler_field" "$rec")" ]; then\n'
+        '      echo "::error::Provenance empty ${compiler_field} ($rec)"\n'
+        '      bad=1\n'
+        '    fi\n'
+        '  done\n'
+        "done < <(find app/.cxx -type f -name 'dfroot-build-provenance.txt' -print0 2>/dev/null)\n"
+        'if [ "$records" -eq 0 ]; then\n'
+        '  echo "::error::No dfroot-build-provenance.txt found; refusing to publish"\n'
+        '  bad=1\n'
+        'fi\n'
+        'if [ "$bad" -ne 0 ]; then\n'
+        '  echo "::error::Build-provenance identity checks failed; blocking upload/release"\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "Verified $records provenance record(s)"\n'
+        'echo "provenance-identity-ok" > "$RUNNER_TEMP/marker-provenance-identity"'
+    ),
+    'Assert KO hash check enabled in every CMakeCache': (
+        'set -euo pipefail\n'
+        'caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)\n'
+        'if [ -z "$caches" ]; then\n'
+        '  echo "::error::No CMakeCache.txt found under app/.cxx"\n'
+        '  exit 1\n'
+        'fi\n'
+        'bad=0\n'
+        'while IFS= read -r cache; do\n'
+        '  if ! grep -qs \'^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$\' "$cache"; then\n'
+        '    echo "::error::DFROOT_SKIP_KO_HASH_CHECK is not OFF in $cache"\n'
+        '    bad=1\n'
+        '  fi\n'
+        'done <<< "$caches"\n'
+        'if [ "$bad" -ne 0 ]; then\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF confirmed in all CMakeCache files"'
+    ),
+    'Verify release evidence for every uploaded APK': (
+        'set -euo pipefail\n'
+        'bad=0\n'
+        'EVIDENCE="$RUNNER_TEMP/release-evidence.tsv"\n'
+        'INDEX="$RUNNER_TEMP/apk-gate-index.tsv"\n'
+        'STAGE="$RUNNER_TEMP/dfroot-release-apks"\n'
+        ': > "$EVIDENCE"\n'
+        'field() {\n'
+        '  awk -v key="$1" \'index($0, key ": ") == 1 {\n'
+        '    print substr($0, length(key) + 3); exit }\' "$2"\n'
+        '}\n'
+        'in_pins() {\n'
+        '  tr \';\' \'\\n\' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$1"\n'
+        '}\n'
+        '\n'
+        '# 1. checked-out source is exactly the publishing commit.\n'
+        'HEAD_SHA=$(git rev-parse HEAD)\n'
+        'if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then\n'
+        '  echo "::error::git HEAD $HEAD_SHA != GITHUB_SHA $GITHUB_SHA"\n'
+        '  bad=1\n'
+        'fi\n'
+        '\n'
+        '# 2. every native cache has the KO hash gate enabled (skip OFF).\n'
+        'caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)\n'
+        'if [ -z "$caches" ]; then\n'
+        '  echo "::error::No CMakeCache.txt found under app/.cxx"\n'
+        '  bad=1\n'
+        'fi\n'
+        'while IFS= read -r cache; do\n'
+        '  [ -n "$cache" ] || continue\n'
+        '  if ! grep -qs \'^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$\' "$cache"; then\n'
+        '    echo "::error::DFROOT_SKIP_KO_HASH_CHECK not OFF in $cache"\n'
+        '    bad=1\n'
+        '  fi\n'
+        'done <<< "$caches"\n'
+        '\n'
+        '# 3. ALL source-KO manifests are verified and pinned; no first-match\n'
+        '# selection, so a stray unverified cache cannot hide in the set.\n'
+        'source_manifests=0\n'
+        'source_hashes=""\n'
+        "while IFS= read -r -d '' koman; do\n"
+        '  source_manifests=$((source_manifests + 1))\n'
+        '  if ! grep -q \'^status: verified$\' "$koman"; then\n'
+        '    echo "::error::KO gate manifest is not verified: $koman"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  ko_hash=$(field sha256 "$koman")\n'
+        '  if ! in_pins "$ko_hash"; then\n'
+        '    echo "::error::KO manifest hash \'$ko_hash\' is not in the reviewed pins ($koman)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  source_hashes="$source_hashes $ko_hash"\n'
+        "done < <(find app/.cxx -type f -name 'dfroot-ko.sha256.manifest' -print0 2>/dev/null)\n"
+        'if [ "$source_manifests" -eq 0 ]; then\n'
+        '  echo "::error::No dfroot-ko.sha256.manifest found"\n'
+        '  bad=1\n'
+        'fi\n'
+        '\n'
+        '# 4. ALL provenance records are present; identity was checked in the\n'
+        '# dedicated required step above. No -print -quit selection here.\n'
+        'provenance_records=0\n'
+        "while IFS= read -r -d '' rec; do\n"
+        '  provenance_records=$((provenance_records + 1))\n'
+        '  rec_ko=$(field ko_sha256 "$rec")\n'
+        '  if ! in_pins "$rec_ko"; then\n'
+        '    echo "::error::Provenance ko_sha256 \'$rec_ko\' is not pinned ($rec)"\n'
+        '    bad=1\n'
+        '  fi\n'
+        "done < <(find app/.cxx -type f -name 'dfroot-build-provenance.txt' -print0 2>/dev/null)\n"
+        'if [ "$provenance_records" -eq 0 ]; then\n'
+        '  echo "::error::No dfroot-build-provenance.txt found"\n'
+        '  bad=1\n'
+        'fi\n'
+        '\n'
+        '# 5. One evidence row per APK in the gate index (i.e. per upload).\n'
+        'if [ ! -s "$INDEX" ]; then\n'
+        '  echo "::error::APK gate index is empty; no verified artifact to document"\n'
+        '  bad=1\n'
+        'fi\n'
+        'rows=0\n'
+        "while IFS=$'\\t' read -r name apk_sha so_sha pman man_so_sha; do\n"
+        '  rows=$((rows + 1))\n'
+        '  staged="$STAGE/$name"\n'
+        '  if [ ! -f "$staged" ]; then\n'
+        '    echo "::error::Staged APK missing: $staged"\n'
+        '    bad=1\n'
+        '    continue\n'
+        '  fi\n'
+        '  if [ "$(sha256sum "$staged" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Staged APK hash changed after the gate: $name"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  # The packaged release APK is the exact file the upload step uses.\n'
+        '  if [ "$(sha256sum "release/$name" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Packaged release APK hash changed after the gate: $name"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if [ ! -f "$pman" ] || ! grep -q \'^status: verified$\' "$pman"; then\n'
+        '    echo "::error::Packaged-KO manifest for $name is missing or not verified"\n'
+        '    bad=1\n'
+        '    continue\n'
+        '  fi\n'
+        '  pkg_hash=$(field sha256 "$pman")\n'
+        '  if ! in_pins "$pkg_hash"; then\n'
+        '    echo "::error::Packaged KO hash \'$pkg_hash\' for $name is not a reviewed pin"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if [ "$man_so_sha" != "$so_sha" ]; then\n'
+        '    echo "::error::Manifest so_sha256 for $name does not match the extracted .so"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  case " $source_hashes " in\n'
+        '    *" $pkg_hash "*) ;;\n'
+        '    *)\n'
+        '      echo "::error::Packaged KO hash for $name matches no verified source-KO manifest"\n'
+        '      bad=1\n'
+        '      ;;\n'
+        '  esac\n'
+        "  printf 'apk: %s\\tapk_sha256: %s\\tso_sha256: %s\\tpackaged_ko_sha256: %s\\tprovenance_records: %s\\tgit_sha: %s\\n' \\\n"
+        '      "$name" "$apk_sha" "$so_sha" "$pkg_hash" "$provenance_records" "$HEAD_SHA" >> "$EVIDENCE"\n'
+        'done < "$INDEX"\n'
+        'if [ "$rows" -eq 0 ]; then\n'
+        '  echo "::error::No APK evidence rows produced"\n'
+        '  bad=1\n'
+        'fi\n'
+        'staged_count=$(find "$STAGE" -maxdepth 1 -type f -name \'DFRoot_*.apk\' 2>/dev/null | wc -l)\n'
+        'if [ "$rows" -ne "$staged_count" ]; then\n'
+        '  echo "::error::Evidence rows ($rows) != staged APK count ($staged_count)"\n'
+        '  bad=1\n'
+        'fi\n'
+        'cat "$EVIDENCE"\n'
+        '\n'
+        'if [ "$bad" -ne 0 ]; then\n'
+        '  echo "::error::Release evidence checks failed; blocking upload/release"\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "release-evidence-ok" > "$RUNNER_TEMP/marker-release-evidence"'
+    ),
+    'Assert distributable evidence before upload': (
+        'set -euo pipefail\n'
+        'missing=0\n'
+        'for marker in marker-apk-gate marker-provenance-identity \\\n'
+        '              marker-release-evidence; do\n'
+        '  if [ ! -s "$RUNNER_TEMP/$marker" ]; then\n'
+        '    echo "::error::Distributable evidence marker missing: $marker"\n'
+        '    missing=1\n'
+        '  fi\n'
+        'done\n'
+        'if [ ! -s "$RUNNER_TEMP/apk-gate-index.tsv" ]; then\n'
+        '  echo "::error::APK gate index is empty or missing"\n'
+        '  missing=1\n'
+        'fi\n'
+        'if [ "$missing" -ne 0 ]; then exit 1; fi\n'
+        'echo "distributable-evidence-ok" > "$RUNNER_TEMP/marker-distributable-evidence"\n'
+        'echo "All distributable evidence gates reached (3/3 markers + nonempty index)"'
+    ),
+    'Generate APK provenance manifest (informational)': (
+        'set -uo pipefail\n'
+        'OUT="$RUNNER_TEMP/dfroot-apk-provenance.txt"\n'
+        'hash_one() {\n'
+        '  if [ -f "$1" ]; then\n'
+        '    sha256sum "$1" || echo "unavailable (sha256sum failed): $1"\n'
+        '  else\n'
+        '    echo "unavailable (missing): $1"\n'
+        '  fi\n'
+        '}\n'
+        '{\n'
+        '  echo "# DFRoot APK provenance (informational audit bundle; not an attestation, not an independent reproducible-build proof, not a release gate)"\n'
+        '  echo "git_sha: $GITHUB_SHA"\n'
+        '  echo "generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"\n'
+        '  echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo unavailable)"\n'
+        '  echo "java: $(java -version 2>&1 | head -1 || echo unavailable)"\n'
+        '  echo "clang: $(clang --version 2>/dev/null | head -1 || echo unavailable)"\n'
+        '  if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -f "$ANDROID_NDK_HOME/source.properties" ]; then\n'
+        '    grep \'^Pkg.Revision=\' "$ANDROID_NDK_HOME/source.properties" || true\n'
+        '  else\n'
+        '    echo "ndk: unavailable (ANDROID_NDK_HOME not set)"\n'
+        '  fi\n'
+        '  echo "--- artifacts (staged, gate-verified) ---"\n'
+        '  for apk in "$RUNNER_TEMP"/dfroot-release-apks/DFRoot_*.apk; do hash_one "$apk"; done\n'
+        '  hash_one app/src/main/jni/ko/dfroot-android13-5.15.ko\n'
+        '  hash_one app/src/main/jniLibs/arm64-v8a/libksud.so\n'
+        '  hash_one app/src/main/jniLibs/arm64-v8a/libksudnext.so\n'
+        '  find app/.cxx -type f -name splicehelper -print0 2>/dev/null |\n'
+        '    while IFS= read -r -d \'\' f; do hash_one "$f"; done\n'
+        '  echo "--- KO gate manifest ---"\n'
+        "  find app/.cxx -type f -name 'dfroot-ko.sha256.manifest' -print0 2>/dev/null |\n"
+        '    while IFS= read -r -d \'\' f; do echo "file: $f"; cat "$f"; done\n'
+        '} > "$OUT"\n'
+        'cat "$OUT"'
+    ),
+    'Clean up signing material': (
+        'rm -f -- signing.properties keystore.jks .keystore.jks-*.tmp .signing.properties-*.tmp'
+    ),
 }
+
+# Exact, ordered run-script contract for build-dfroot's host gates and
+# debug-only build.  The JUnit step's pinned Python heredoc is the only
+# heredoc the strict parser permits, and only because its text is locked here.
+DFROOT_RUN_SCRIPTS: dict[str, str] = {
+    'Host status-protocol tests': (
+        'set -euo pipefail\n'
+        'make -C tests/native test\n'
+        'echo "native-ok" > "$RUNNER_TEMP/marker-native"'
+    ),
+    'KO hash policy tests (CMake, host-only)': (
+        'set -euo pipefail\n'
+        'cmake -P tests/cmake/ko_hash_policy_test.cmake\n'
+        'echo "ko-policy-ok" > "$RUNNER_TEMP/marker-ko-policy"'
+    ),
+    'Packaged-KO byte-gate tests (CMake, host-only)': (
+        'set -euo pipefail\n'
+        'cmake -P tests/cmake/packaged_ko_test.cmake\n'
+        'echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"'
+    ),
+    'APK packaging gate fixture tests (CMake, host-only)': (
+        'set -euo pipefail\n'
+        'cmake -P tests/cmake/apk_packaging_gate_test.cmake\n'
+        'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'
+    ),
+    'Extract reviewed KO pins and sizes': (
+        'set -euo pipefail\n'
+        "sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \\\n"
+        '  | grep -oE \'[0-9a-f]{64}\' | paste -sd\';\' - > "$RUNNER_TEMP/ko-pins.txt"\n'
+        "sed -n '/set(KO_EXPECTED_SIZES/,/^)/p' app/src/main/jni/CMakeLists.txt \\\n"
+        '  | grep -oE \'[0-9]+\' | paste -sd\';\' - > "$RUNNER_TEMP/ko-sizes.txt"\n'
+        'test -s "$RUNNER_TEMP/ko-pins.txt"\n'
+        'test -s "$RUNNER_TEMP/ko-sizes.txt"\n'
+        'echo "reviewed pins: $(cat "$RUNNER_TEMP/ko-pins.txt")"\n'
+        'echo "reviewed sizes: $(cat "$RUNNER_TEMP/ko-sizes.txt")"'
+    ),
+    'KO hash policy (CI enforced, skip rejected)': (
+        'set -euo pipefail\n'
+        'SCRIPT=app/src/main/jni/verify_ko_sha256.cmake\n'
+        'KO=app/src/main/jni/ko/dfroot-android13-5.15.ko\n'
+        'STAMP="$RUNNER_TEMP/dfroot-ko.sha256.verified"\n'
+        'MANIFEST="$RUNNER_TEMP/dfroot-ko.sha256.manifest"\n'
+        'PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")\n'
+        'test -n "$PINS"\n'
+        'CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \\\n'
+        '    -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \\\n'
+        '    -DDFROOT_BUILD_TYPE=Release -DDFROOT_ANDROID_VARIANT=release -P "$SCRIPT"\n'
+        'if CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \\\n'
+        '       -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \\\n'
+        '       -DDFROOT_BUILD_TYPE=Debug -DDFROOT_SKIP=ON \\\n'
+        '       -DDFROOT_SKIP_REASON=\'negative CI policy check\' -P "$SCRIPT"; then\n'
+        '  echo "::error::KO hash skip unexpectedly passed under CI=true"\n'
+        '  exit 1\n'
+        'fi\n'
+        '# Variant authority: with no automation marker and a stale Debug\n'
+        '# build type, an Android release variant must still reject skip.\n'
+        'if env -u CI -u GITHUB_ACTIONS -u DFROOT_RELEASE \\\n'
+        '       cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \\\n'
+        '       -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \\\n'
+        '       -DDFROOT_BUILD_TYPE=Debug -DDFROOT_ANDROID_VARIANT=release \\\n'
+        "       -DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON='negative variant policy check' \\\n"
+        '       -P "$SCRIPT"; then\n'
+        '  echo "::error::KO hash skip unexpectedly passed for release variant"\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "KO hash policy OK: verified under CI, skip rejected, release variant authoritative"\n'
+        'echo "ko-ci-policy-ok" > "$RUNNER_TEMP/marker-ko-ci-policy"'
+    ),
+    'Java preference-persistence unit tests': (
+        'set -euo pipefail\n'
+        './gradlew :app:testDebugUnitTest\n'
+        'echo "jvm-ok" > "$RUNNER_TEMP/marker-jvm"'
+    ),
+    'Assert JUnit XML (28 tests, 0 failures)': (
+        'set -euo pipefail\n'
+        "python3 - <<'PY'\n"
+        'import glob\n'
+        'import xml.etree.ElementTree as ET\n'
+        '\n'
+        'files = sorted(glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"))\n'
+        'if not files:\n'
+        '    raise SystemExit("::error::No JUnit XML found for testDebugUnitTest")\n'
+        'tests = failures = errors = skipped = 0\n'
+        'for path in files:\n'
+        '    root = ET.parse(path).getroot()\n'
+        '    tests += int(root.get("tests", 0))\n'
+        '    failures += int(root.get("failures", 0))\n'
+        '    errors += int(root.get("errors", 0))\n'
+        '    skipped += int(root.get("skipped", 0))\n'
+        '    print("report %s: tests=%s failures=%s errors=%s skipped=%s" %\n'
+        '          (path, root.get("tests"), root.get("failures"),\n'
+        '           root.get("errors"), root.get("skipped")))\n'
+        'print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %\n'
+        '      (tests, failures, errors, skipped))\n'
+        'if tests != 28 or failures != 0 or errors != 0 or skipped != 0:\n'
+        '    raise SystemExit("::error::JUnit XML assertion failed: expected 28 tests, 0 failures/errors/skips")\n'
+        'PY\n'
+        'echo "junit-ok" > "$RUNNER_TEMP/marker-junit"'
+    ),
+    'Assert all test suites reached': (
+        'set -euo pipefail\n'
+        'missing=0\n'
+        'for marker in marker-native marker-ko-policy marker-packaged-ko \\\n'
+        '              marker-apk-packaging-fixture marker-ko-ci-policy \\\n'
+        '              marker-jvm marker-junit; do\n'
+        '  if [ ! -s "$RUNNER_TEMP/$marker" ]; then\n'
+        '    echo "::error::Test suite marker missing: $marker"\n'
+        '    missing=1\n'
+        '  fi\n'
+        'done\n'
+        'if [ "$missing" -ne 0 ]; then exit 1; fi\n'
+        'echo "All native/CMake/JVM suites reached (7/7 markers)"'
+    ),
+    'Build debug APK (UNVERIFIED CI artifact)': (
+        'set -euo pipefail\n'
+        'for attempt in 1 2 3; do\n'
+        '  if ./gradlew :app:assembleDebug --no-daemon --console=plain; then\n'
+        '    break\n'
+        '  fi\n'
+        '  if [[ $attempt -eq 3 ]]; then\n'
+        '    echo "Gradle build failed after 3 attempts" >&2\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  echo "Gradle build failed (attempt $attempt), retrying in 30s..." >&2\n'
+        '  sleep 30\n'
+        'done'
+    ),
+    'Assert KO hash check enabled in every CMakeCache': (
+        'set -euo pipefail\n'
+        '# Check ALL configured caches, not just one: a stray cached config\n'
+        '# with DFROOT_SKIP_KO_HASH_CHECK=ON must fail the build too.\n'
+        'caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)\n'
+        'if [ -z "$caches" ]; then\n'
+        '  echo "::error::No CMakeCache.txt found under app/.cxx"\n'
+        '  exit 1\n'
+        'fi\n'
+        'bad=0\n'
+        'while IFS= read -r cache; do\n'
+        '  if ! grep -qs \'^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$\' "$cache"; then\n'
+        '    echo "::error::DFROOT_SKIP_KO_HASH_CHECK is not OFF in $cache"\n'
+        '    bad=1\n'
+        '  fi\n'
+        'done <<< "$caches"\n'
+        'if [ "$bad" -ne 0 ]; then\n'
+        '  exit 1\n'
+        'fi\n'
+        'echo "DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF confirmed in all CMakeCache files"'
+    ),
+    'Verify APK counts': (
+        'set -euo pipefail\n'
+        'shopt -s nullglob\n'
+        'debug=(app/build/outputs/apk/debug/DFRoot_*.apk)\n'
+        'if [[ ${#debug[@]} -ne 1 ]]; then\n'
+        '  echo "Expected exactly one debug APK" >&2\n'
+        '  exit 1\n'
+        'fi'
+    ),
+    'Report UNVERIFIED CI artifact scope': (
+        '{\n'
+        '  echo "## CI artifact scope"\n'
+        '  echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."\n'
+        '  echo "Host suites (49 status, 23/15/3 CMake, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
+        '} >> "$GITHUB_STEP_SUMMARY"'
+    ),
+}
+
 # Exact ordered step-name contract for every job.  An extra (or reordered, or
 # renamed) step is a policy violation, not a harmless addition.
 JOB_STEP_NAMES: dict[str, list[str]] = {
@@ -197,9 +845,20 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Set up Java 21",
         "Download DF LKM (android13-5.15)",
         "Set up Gradle",
-        "Build debug and release APKs",
+        HOST_STATUS_STEP,
+        KO_POLICY_TEST_STEP,
+        PACKAGED_KO_TEST_STEP,
+        APK_FIXTURE_TEST_STEP,
+        EXTRACT_PINS_STEP,
+        KO_CI_POLICY_STEP,
+        JVM_TEST_STEP,
+        JUNIT_STEP,
+        ALL_MARKERS_STEP,
+        DEBUG_BUILD_STEP,
+        CI_CACHE_ASSERT_STEP,
         APK_COUNTER_COMMAND,
-        "Upload DFRoot APKs",
+        CI_SCOPE_STEP,
+        CI_UPLOAD_STEP,
     ],
     "build-release": [
         "Check out release history",
@@ -211,7 +870,15 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Build signed release APK",
         "Verify signed release APK",
         "Package signed release APK",
-        "Upload signed release",
+        EXTRACT_PINS_STEP,
+        PACKAGED_KO_GATE_STEP,
+        PROVENANCE_IDENTITY_STEP,
+        CI_CACHE_ASSERT_STEP,
+        RELEASE_EVIDENCE_STEP,
+        UPLOAD_CHOKE_STEP,
+        RELEASE_UPLOAD_STEP,
+        PROVENANCE_GENERATE_STEP,
+        PROVENANCE_UPLOAD_STEP,
         CLEANUP_STEP,
     ],
     "publish": [
@@ -256,6 +923,14 @@ PUBLISH_FILES = (
     "dist/NOTICE\n"
     "dist/THIRD_PARTY_NOTICES.md"
 )
+# The fourth upload is informational provenance, never a release asset.  It is
+# a single generated file under runner.temp, not an APK or signing material.
+PROVENANCE_UPLOAD_PATH = "${{ runner.temp }}/dfroot-apk-provenance.txt"
+UPLOAD_ARTIFACT_NAMES = {
+    "build-lkms": ("df-lkm-${{ matrix.kmi }}",),
+    "build-dfroot": (CI_ARTIFACT_NAME,),
+    "build-release": (RELEASE_ARTIFACT_NAME, PROVENANCE_ARTIFACT_NAME),
+}
 LKM_UPLOAD_PATH = "out/dfroot-${{ matrix.kmi }}.ko"
 FORBIDDEN_ARTIFACT_TOKENS = ("keystore", "signing", ".jks", "..")
 EXPR_RE = re.compile(r"\$\{\{.*?\}\}")
@@ -376,11 +1051,22 @@ def strict_violations(text: str) -> list[str]:
             violations.append(f"line {number}: YAML tag")
 
     # Here-docs in run scripts can hide no-op commands from line-based checks.
+    # Bash here-*strings* (`<<<`) are not here-docs and are used to feed loops,
+    # so they are explicitly excluded.  The single here-doc in the workflow is
+    # the JUnit XML assertion: its entire script is equality-locked in
+    # DFROOT_RUN_SCRIPTS, so a command cannot be hidden inside it.  Any *other*
+    # here-doc (e.g. a `cat <<'NOOP'` spoof injected into a required step) is
+    # still a hard error.
+    heredoc_re = re.compile(r"(?<!<)<<(?!<)")
     for _indent, start, end, key in block_scalar_spans(text):
         if key != "run":
             continue
+        body_lines = [line[_indent + 2:] if line.strip() else "" for line in lines[start + 1:end]]
+        body = "\n".join(body_lines).strip()
+        if body == DFROOT_RUN_SCRIPTS[JUNIT_STEP]:
+            continue
         for index in range(start + 1, end):
-            if "<<" in lines[index]:
+            if heredoc_re.search(lines[index]):
                 violations.append(f"line {index + 1}: heredoc in run script")
     return violations
 
@@ -638,6 +1324,14 @@ def assert_no_secrets_bypass(text: str) -> None:
     remaining = text
     for expression in sorted(ALLOWED_SECRETS):
         remaining = remaining.replace(expression, "")
+    # The CI scope report is a verbatim-equality-locked script whose user-facing
+    # text says "no signing secrets".  Remove that exact pinned text only: any
+    # *other* secrets token (including an inline comment or a compact
+    # `${{secrets.X}}`) is still a hard error.
+    pinned_scope = "\n".join(
+        "          " + line if line else "" for line in DFROOT_RUN_SCRIPTS[CI_SCOPE_STEP].splitlines()
+    )
+    remaining = remaining.replace(pinned_scope, "")
     stray = re.findall(r"\bsecrets\b", remaining, re.IGNORECASE)
     if stray:
         raise AssertionError(f"unexpected secrets context token(s): {stray}")
@@ -677,8 +1371,34 @@ def assert_required_steps_unskippable(text: str) -> None:
     jobs = job_blocks(active)
     required = {
         "test-ci": list(TEST_CI_COMMANDS),
-        "build-dfroot": [APK_COUNTER_COMMAND],
-        "build-release": [ANCESTRY_STEP, "Verify signed release APK", "Package signed release APK"],
+        "build-dfroot": [
+            HOST_STATUS_STEP,
+            KO_POLICY_TEST_STEP,
+            PACKAGED_KO_TEST_STEP,
+            APK_FIXTURE_TEST_STEP,
+            EXTRACT_PINS_STEP,
+            KO_CI_POLICY_STEP,
+            JVM_TEST_STEP,
+            JUNIT_STEP,
+            ALL_MARKERS_STEP,
+            DEBUG_BUILD_STEP,
+            CI_CACHE_ASSERT_STEP,
+            APK_COUNTER_COMMAND,
+            CI_SCOPE_STEP,
+        ],
+        "build-release": [
+            ANCESTRY_STEP,
+            "Write signing material",
+            "Build signed release APK",
+            "Verify signed release APK",
+            "Package signed release APK",
+            EXTRACT_PINS_STEP,
+            PACKAGED_KO_GATE_STEP,
+            PROVENANCE_IDENTITY_STEP,
+            CI_CACHE_ASSERT_STEP,
+            RELEASE_EVIDENCE_STEP,
+            UPLOAD_CHOKE_STEP,
+        ],
         "publish": ["Verify release checksum"],
     }
     for job_name, names in required.items():
@@ -714,11 +1434,14 @@ def assert_exact_command_lines(text: str) -> None:
     for command in (
         "shopt -s nullglob",
         "debug=(app/build/outputs/apk/debug/DFRoot_*.apk)",
-        "release=(app/build/outputs/apk/release/DFRoot_*.apk)",
-        "if [[ ${#debug[@]} -ne 1 || ${#release[@]} -ne 1 ]]; then",
+        "if [[ ${#debug[@]} -ne 1 ]]; then",
     ):
         if command not in counter:
             raise AssertionError(f"missing exact active APK count command line: {command}")
+    if any("release=" in line for line in counter):
+        raise AssertionError("the PR CI APK counter must not count a release APK")
+    if not any("Expected exactly one debug APK" in line for line in counter):
+        raise AssertionError("missing exact APK counter failure message")
 
 
 def assert_exact_step_names(text: str) -> None:
@@ -765,6 +1488,188 @@ def assert_exact_release_run_scripts(text: str) -> None:
             )
 
 
+def assert_exact_dfroot_run_scripts(text: str) -> None:
+    """Lock every build-dfroot host-gate/debug run script to its exact text."""
+    job = job_blocks(strip_yaml_comments(text))["build-dfroot"]
+    run_steps = [step for step in steps(job) if step_property(step, "run") is not None]
+    actual_names = [step_property(step, "name") for step in run_steps]
+    expected_names = list(DFROOT_RUN_SCRIPTS)
+    if actual_names != expected_names:
+        raise AssertionError(
+            f"build-dfroot run steps must be exactly {expected_names!r}, got {actual_names!r}"
+        )
+    for name, step in zip(expected_names, run_steps):
+        if run_script(step) != DFROOT_RUN_SCRIPTS[name]:
+            raise AssertionError(
+                f"build-dfroot/{name} run script must be exactly "
+                f"{DFROOT_RUN_SCRIPTS[name]!r}, got {run_script(step)!r}"
+            )
+
+
+def assert_pr3_gates(text: str) -> None:
+    """Focused assertions for the integrated PR #3 gates.
+
+    The exact script locks above are the primary defence; these checks state
+    the security intent explicitly (markers, skip rejection, per-APK evidence,
+    choke point, no release claim on PR events) so that a re-ordering or a
+    removed gate is caught with a readable failure even before equality checks.
+    """
+    jobs = job_blocks(strip_yaml_comments(text))
+    ci, release = jobs["build-dfroot"], jobs["build-release"]
+    ci_steps, release_steps = steps(ci), steps(release)
+
+    # 1. Each of the seven host suites writes its own marker.
+    marker_steps = {
+        HOST_STATUS_STEP: ("native-ok", "marker-native"),
+        KO_POLICY_TEST_STEP: ("ko-policy-ok", "marker-ko-policy"),
+        PACKAGED_KO_TEST_STEP: ("packaged-ko-ok", "marker-packaged-ko"),
+        APK_FIXTURE_TEST_STEP: ("apk-packaging-fixture-ok", "marker-apk-packaging-fixture"),
+        KO_CI_POLICY_STEP: ("ko-ci-policy-ok", "marker-ko-ci-policy"),
+        JVM_TEST_STEP: ("jvm-ok", "marker-jvm"),
+        JUNIT_STEP: ("junit-ok", "marker-junit"),
+    }
+    for name, (value, marker) in marker_steps.items():
+        script = run_script(named_step(ci, name))
+        if f'echo "{value}" > "$RUNNER_TEMP/{marker}"' not in script:
+            raise AssertionError(f"build-dfroot/{name} must write {marker}")
+    all_markers = run_script(named_step(ci, ALL_MARKERS_STEP))
+    if len(HOST_SUITE_MARKERS) != 7:
+        raise AssertionError("internal: expected exactly seven host suite markers")
+    if '-s "$RUNNER_TEMP/$marker"' not in all_markers:
+        raise AssertionError("all-suites gate must check each marker with -s")
+    for marker in HOST_SUITE_MARKERS:
+        if marker not in all_markers:
+            raise AssertionError(f"all-suites gate does not list {marker}")
+    if "7/7 markers" not in all_markers:
+        raise AssertionError("all-suites gate must state the 7/7 marker result")
+
+    # 2. The JUnit assertion is strict: 28 tests, 0 failures/errors/skips.
+    junit = run_script(named_step(ci, JUNIT_STEP))
+    if junit != DFROOT_RUN_SCRIPTS[JUNIT_STEP]:
+        raise AssertionError("JUnit XML assertion script is not the pinned script")
+    for fragment in (
+        "TEST-*.xml",
+        "if not files:",
+        "tests != 28",
+        "failures != 0",
+        "errors != 0",
+        "skipped != 0",
+        "raise SystemExit",
+    ):
+        if fragment not in junit:
+            raise AssertionError(f"JUnit XML assertion is missing {fragment!r}")
+
+    # 3. CI-enforced KO policy: a positive verified run plus negative skip
+    # checks that must fail under CI and for the release variant.
+    ko_policy = run_script(named_step(ci, KO_CI_POLICY_STEP))
+    for fragment in (
+        "CI=true cmake -DKO_FILE=",
+        "if CI=true cmake",
+        "-DDFROOT_SKIP=ON",
+        "exit 1",
+        "DFROOT_ANDROID_VARIANT=release",
+        "marker-ko-ci-policy",
+    ):
+        if fragment not in ko_policy:
+            raise AssertionError(f"CI KO policy gate is missing {fragment!r}")
+    # No skip path in any gate: the only DFROOT_SKIP=ON uses are negative tests
+    # inside `if ...; then` branches that exit non-zero.
+    if ko_policy.count("-DDFROOT_SKIP=ON") != 2:
+        raise AssertionError("CI KO policy must contain exactly two negative skip probes")
+    for job_name, job in (("build-dfroot", ci), ("build-release", release)):
+        cache_assert = run_script(named_step(job, CI_CACHE_ASSERT_STEP))
+        if "find app/.cxx -type f -name CMakeCache.txt" not in cache_assert:
+            raise AssertionError(f"{job_name} cache assertion must inspect every CMakeCache")
+        if "'^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$'" not in cache_assert:
+            raise AssertionError(f"{job_name} cache assertion must require skip=OFF")
+        if 'if [ -z "$caches" ]' not in cache_assert or "exit 1" not in cache_assert:
+            raise AssertionError(f"{job_name} cache assertion must fail closed on no caches")
+        for step in steps(job):
+            if job_name == "build-dfroot" and step_property(step, "name") == KO_CI_POLICY_STEP:
+                continue  # the only skip uses here are the two negative probes
+            if "-DDFROOT_SKIP=ON" in run_script(step):
+                raise AssertionError(
+                    f"{job_name}/{step_property(step, 'name')} must not enable KO skip"
+                )
+
+    # 4. The PR CI job uploads only the explicitly UNVERIFIED debug artifact.
+    if "WriteSigningProperties" in ci or ":app:assembleRelease" in ci:
+        raise AssertionError("PR CI must not build a release variant or write signing material")
+    release_action = "softprops/action-gh-release@" + ACTION_PINS["softprops/action-gh-release"][0]
+    if any(step_property(step, "uses") == release_action for step in ci_steps):
+        raise AssertionError("PR CI must never publish a release")
+    ci_uploads = action_steps(ci, "actions/upload-artifact")
+    if len(ci_uploads) != 1 or mapping(ci_uploads[0], "with", 8).get("name") != CI_ARTIFACT_NAME:
+        raise AssertionError(f"PR CI must upload exactly one {CI_ARTIFACT_NAME} artifact")
+    scope = run_script(named_step(ci, CI_SCOPE_STEP))
+    if scope != DFROOT_RUN_SCRIPTS[CI_SCOPE_STEP]:
+        raise AssertionError("CI scope report is not the pinned 'no release claim' text")
+    for fragment in ("GITHUB_STEP_SUMMARY", "UNVERIFIED", "no release claim"):
+        if fragment not in scope:
+            raise AssertionError(f"CI scope report is missing {fragment!r}")
+
+    # 5. build-release gates run in order, before any APK upload.
+    ordered = [
+        "Package signed release APK",
+        EXTRACT_PINS_STEP,
+        PACKAGED_KO_GATE_STEP,
+        PROVENANCE_IDENTITY_STEP,
+        CI_CACHE_ASSERT_STEP,
+        RELEASE_EVIDENCE_STEP,
+        UPLOAD_CHOKE_STEP,
+        RELEASE_UPLOAD_STEP,
+        PROVENANCE_GENERATE_STEP,
+        PROVENANCE_UPLOAD_STEP,
+    ]
+    indices = [next(i for i, step in enumerate(release_steps) if step_property(step, "name") == name) for name in ordered]
+    if indices != sorted(indices):
+        raise AssertionError("build-release gates/upload are not in the required order")
+    choke_index = indices[6]
+    for upload in action_steps(release, "actions/upload-artifact"):
+        if release_steps.index(upload) <= choke_index:
+            raise AssertionError("no artifact may be uploaded before the evidence choke point")
+
+    # 6. Packaged verifier is invoked for every staged APK, with manifest/SO
+    # binding and stale-evidence invalidation.
+    packaged = run_script(named_step(release, PACKAGED_KO_GATE_STEP))
+    for fragment in (
+        'APK_SOURCE=(release/DFRoot_*.apk)',
+        'for apk in "${STAGED[@]}"',
+        "unzip -q \"$apk\" 'lib/arm64-v8a/libdfroot.so' -d \"$EXTRACT\"",
+        '-P app/src/main/jni/verify_packaged_ko.cmake',
+        'rm -f "$PMAN" "${PMAN}.dfroot_ko.dump"',
+        "^status: verified$",
+        '"$man_so_sha" != "$so_sha"',
+        '>> "$INDEX"',
+        'echo "apk-gate-ok" > "$RUNNER_TEMP/marker-apk-gate"',
+    ):
+        if fragment not in packaged:
+            raise AssertionError(f"packaged-KO gate is missing {fragment!r}")
+
+    # 7. Provenance identity and per-APK release evidence.
+    identity = run_script(named_step(release, PROVENANCE_IDENTITY_STEP))
+    for fragment in ("git_head", "GITHUB_SHA", "android_variant", "ko_sha256", "marker-provenance-identity"):
+        if fragment not in identity:
+            raise AssertionError(f"provenance identity gate is missing {fragment!r}")
+    evidence = run_script(named_step(release, RELEASE_EVIDENCE_STEP))
+    for fragment in ('>> "$EVIDENCE"', '"$rows" -ne "$staged_count"', '"release/$name"', "marker-release-evidence"):
+        if fragment not in evidence:
+            raise AssertionError(f"release evidence gate is missing {fragment!r}")
+
+    # 8. The choke point checks every marker and the populated index before
+    # the release upload becomes reachable.
+    choke = run_script(named_step(release, UPLOAD_CHOKE_STEP))
+    if '-s "$RUNNER_TEMP/$marker"' not in choke:
+        raise AssertionError("choke point must check each marker with -s")
+    for marker in RELEASE_GATE_MARKERS:
+        if marker not in choke:
+            raise AssertionError(f"choke point does not require {marker}")
+    if f'RUNNER_TEMP/{RELEASE_GATE_INDEX}' not in choke:
+        raise AssertionError("choke point does not require a populated APK gate index")
+    if "exit 1" not in choke:
+        raise AssertionError("choke point must fail closed when evidence is missing")
+
+
 def assert_release_scripts_do_not_reference_signing_files(text: str) -> None:
     """Only the cleanup step may mention the private signing files at all."""
     job = job_blocks(strip_yaml_comments(text))["build-release"]
@@ -799,18 +1704,31 @@ def assert_safe_artifact_entries(field: str, value: str | None) -> None:
 def assert_exact_artifact_inputs(text: str) -> None:
     """Upload paths and the release publish files are exact, closed allowlists."""
     jobs = job_blocks(strip_yaml_comments(text))
-    for job_name, expected in (
-        ("build-lkms", LKM_UPLOAD_PATH),
-        ("build-dfroot", CI_UPLOAD_PATH),
-        ("build-release", RELEASE_UPLOAD_PATH),
-    ):
+    expected_uploads = {
+        "build-lkms": {UPLOAD_ARTIFACT_NAMES["build-lkms"][0]: LKM_UPLOAD_PATH},
+        "build-dfroot": {CI_ARTIFACT_NAME: CI_UPLOAD_PATH},
+        "build-release": {
+            RELEASE_ARTIFACT_NAME: RELEASE_UPLOAD_PATH,
+            PROVENANCE_ARTIFACT_NAME: PROVENANCE_UPLOAD_PATH,
+        },
+    }
+    for job_name, expected_by_name in expected_uploads.items():
         uploads = action_steps(jobs[job_name], "actions/upload-artifact")
-        if len(uploads) != 1:
-            raise AssertionError(f"{job_name} must have exactly one upload-artifact step")
-        path = mapping(uploads[0], "with", 8).get("path")
-        assert_safe_artifact_entries("path", path)
-        if path != expected:
-            raise AssertionError(f"{job_name} upload path must be exactly {expected!r}, got {path!r}")
+        actual_names = tuple(mapping(upload, "with", 8).get("name") for upload in uploads)
+        if actual_names != UPLOAD_ARTIFACT_NAMES[job_name]:
+            raise AssertionError(
+                f"{job_name} upload artifact names must be exactly "
+                f"{UPLOAD_ARTIFACT_NAMES[job_name]!r}, got {actual_names!r}"
+            )
+        for upload in uploads:
+            name = mapping(upload, "with", 8).get("name")
+            path = mapping(upload, "with", 8).get("path")
+            assert_safe_artifact_entries("path", path)
+            if path != expected_by_name[name]:
+                raise AssertionError(
+                    f"{job_name}/{name} upload path must be exactly "
+                    f"{expected_by_name[name]!r}, got {path!r}"
+                )
     releases = action_steps(jobs["publish"], "softprops/action-gh-release")
     if len(releases) != 1:
         raise AssertionError("publish must have exactly one gh-release step")
@@ -827,6 +1745,8 @@ def validate_workflow(text: str) -> None:
     assert_exact_test_ci_commands(text)
     assert_exact_step_names(text)
     assert_exact_release_run_scripts(text)
+    assert_exact_dfroot_run_scripts(text)
+    assert_pr3_gates(text)
     assert_required_steps_unskippable(text)
     assert_exact_command_lines(text)
     assert_release_scripts_do_not_reference_signing_files(text)
@@ -1102,7 +2022,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(inputs.get("if-no-files-found"), "error")
         self.assertEqual(inputs.get("overwrite"), "true")
 
-    def test_ci_build_is_read_only_builds_both_variants_and_counts_apks(self) -> None:
+    def test_ci_build_is_read_only_builds_debug_only_and_counts_it(self) -> None:
         job = self.jobs["build-dfroot"]
         self.assertEqual(property_value(job, "name", 4), "CI DFRoot APKs")
         self.assertEqual(property_value(job, "needs", 4), "build-lkms")
@@ -1113,9 +2033,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(len(download), 1)
         self.assertEqual(mapping(download[0], "with", 8).get("name"), "df-lkm-android13-5.15")
         builds = [run_script(step) for step in steps(job) if "./gradlew" in run_script(step)]
-        self.assertEqual(len(builds), 1)
-        self.assertIn(":app:assembleDebug", builds[0])
-        self.assertIn(":app:assembleRelease", builds[0])
+        self.assertEqual(len(builds), 2)  # JVM unit tests + debug-only APK build
+        self.assertIn(":app:testDebugUnitTest", builds[0])
+        self.assertIn("./gradlew :app:assembleDebug", builds[1])
+        self.assertNotIn(":app:assembleRelease", "\n".join(builds))
         self.assertNotIn("WriteSigningProperties", job)
 
         job_steps = steps(job)
@@ -1125,8 +2046,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertLess(job_steps.index(counter), job_steps.index(upload[0]))
         self.assertIn("shopt -s nullglob", run_script(counter))
         self.assertIn("${#debug[@]} -ne 1", run_script(counter))
-        self.assertIn("${#release[@]} -ne 1", run_script(counter))
+        self.assertNotIn("release=", run_script(counter))
         inputs = mapping(upload[0], "with", 8)
+        self.assertEqual(inputs.get("name"), CI_ARTIFACT_NAME)
         self.assertEqual(inputs.get("path"), CI_UPLOAD_PATH)
         self.assertEqual(inputs.get("if-no-files-found"), "error")
         self.assertEqual(inputs.get("overwrite"), "true")
@@ -1172,10 +2094,14 @@ class WorkflowPolicyTests(unittest.TestCase):
         package = run_script(named_step(job, "Package signed release APK"))
         self.assertIn("cp --", package)
         self.assertIn("release/", package)
-        upload = action_steps(job, "actions/upload-artifact")
-        self.assertEqual(len(upload), 1)
-        inputs = mapping(upload[0], "with", 8)
-        self.assertEqual(inputs.get("name"), "DFRoot-release")
+        uploads = action_steps(job, "actions/upload-artifact")
+        self.assertEqual(len(uploads), 2)
+        release_upload = [
+            step for step in uploads
+            if mapping(step, "with", 8).get("name") == RELEASE_ARTIFACT_NAME
+        ]
+        self.assertEqual(len(release_upload), 1)
+        inputs = mapping(release_upload[0], "with", 8)
         self.assertEqual(inputs.get("path"), RELEASE_UPLOAD_PATH)
         self.assertEqual(inputs.get("retention-days"), "1")
         cleanup = steps(job)[-1]
@@ -1230,14 +2156,20 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertIn(line, active_script_lines(publisher))
 
-    def test_every_upload_fails_closed_and_overwrites(self) -> None:
+    def test_every_upload_fails_closed_and_names_are_exact(self) -> None:
         uploads = [step for job in self.jobs.values() for step in action_steps(job, "actions/upload-artifact")]
-        self.assertEqual(len(uploads), 3)
+        self.assertEqual(len(uploads), 4)
+        self.assertEqual(
+            sorted(mapping(upload, "with", 8).get("name") for upload in uploads),
+            sorted(name for names in UPLOAD_ARTIFACT_NAMES.values() for name in names),
+        )
         for upload in uploads:
             with self.subTest(artifact=mapping(upload, "with", 8).get("name")):
                 inputs = mapping(upload, "with", 8)
                 self.assertEqual(inputs.get("if-no-files-found"), "error")
-                self.assertEqual(inputs.get("overwrite"), "true")
+                self.assertNotIn("signing", str(inputs).lower())
+                if mapping(upload, "with", 8).get("name") != PROVENANCE_ARTIFACT_NAME:
+                    self.assertEqual(inputs.get("overwrite"), "true")
 
     def test_gradle_builds_retry_and_jobs_have_timeouts(self) -> None:
         for name, job in self.jobs.items():
@@ -1245,11 +2177,18 @@ class WorkflowPolicyTests(unittest.TestCase):
                 timeout = property_value(job, "timeout-minutes", 4)
                 self.assertIsNotNone(timeout)
                 self.assertGreater(int(timeout or 0), 0)
-        for name in ("build-dfroot", "build-release"):
-            scripts = [run_script(step) for step in steps(self.jobs[name]) if "./gradlew" in run_script(step)]
-            self.assertEqual(len(scripts), 1)
-            self.assertIn("for attempt in 1 2 3", scripts[0])
-            self.assertIn("sleep 30", scripts[0])
+        for name, build_step in (
+            ("build-dfroot", DEBUG_BUILD_STEP),
+            ("build-release", "Build signed release APK"),
+        ):
+            script = run_script(named_step(self.jobs[name], build_step))
+            self.assertIn("for attempt in 1 2 3", script)
+            self.assertIn("sleep 30", script)
+            self.assertIn("exit 1", script)
+        self.assertIn(
+            "./gradlew :app:testDebugUnitTest",
+            run_script(named_step(self.jobs["build-dfroot"], JVM_TEST_STEP)),
+        )
 
 
 class MutationDetectionTests(unittest.TestCase):
@@ -1738,6 +2677,97 @@ class MutationDetectionTests(unittest.TestCase):
                 with self.assertRaises(AssertionError):
                     validate_workflow(mutated)
 
+    def test_junit_count_weakening_is_rejected(self) -> None:
+        for old, new in (
+            ("if tests != 28 or", "if tests != 27 or"),
+            ("failures != 0 or errors != 0 or skipped != 0:", "failures != 0:"),
+            ("if not files:", "if False:"),
+        ):
+            with self.subTest(mutation=old):
+                mutated = self.mutate(old, new)
+                with self.assertRaises(AssertionError):
+                    assert_pr3_gates(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_host_suite_marker_gate_weakening_is_rejected(self) -> None:
+        cases = {
+            "one suite removed": (
+                "for marker in marker-native marker-ko-policy marker-packaged-ko \\\n",
+                "for marker in marker-native marker-ko-policy \\\n",
+            ),
+            "existence test weakened": ('if [ ! -s "$RUNNER_TEMP/$marker" ]; then', 'if [ -e "$RUNNER_TEMP/$marker" ]; then'),
+            "marker echo removed": ('echo "junit-ok" > "$RUNNER_TEMP/marker-junit"\n', ""),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaises(AssertionError):
+                    assert_pr3_gates(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_packaged_verifier_removal_is_rejected(self) -> None:
+        cases = {
+            "verifier invocation removed": (
+                "      -P app/src/main/jni/verify_packaged_ko.cmake\n", ""
+            ),
+            "stale manifest not invalidated": (
+                '          rm -f "$PMAN" "${PMAN}.dfroot_ko.dump"\n', ""
+            ),
+            "per-APK loop removed": ('          for apk in "${STAGED[@]}"; do\n', "          :\n"),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaises(AssertionError):
+                    assert_pr3_gates(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_upload_choke_point_weakening_is_rejected(self) -> None:
+        anchor = "      - name: Assert distributable evidence before upload\n"
+        cases = {
+            "skippable": anchor + "        if: false\n",
+            "tolerated": anchor + "        continue-on-error: true\n",
+            "removed": "",
+        }
+        for label, replacement in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(anchor, replacement)
+                with self.assertRaises(AssertionError):
+                    assert_required_steps_unskippable(mutated) if label != "removed" else assert_exact_step_names(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+        noop = self.mutate('          if [ "$missing" -ne 0 ]; then exit 1; fi\n          echo "distributable-evidence-ok"', '          echo "distributable-evidence-ok"')
+        with self.assertRaisesRegex(AssertionError, "run script must be exactly"):
+            assert_exact_release_run_scripts(noop)
+        with self.assertRaises(AssertionError):
+            validate_workflow(noop)
+
+    def test_pr_ci_cannot_be_turned_into_a_release_claim(self) -> None:
+        cases = {
+            "release artifact name": (
+                "          name: DFRoot-UNVERIFIED-CI\n",
+                "          name: DFRoot-release\n",
+            ),
+            "release claim in summary": (
+                '          echo "## CI artifact scope"\n',
+                '          echo "## CI artifact scope: signed release"\n',
+            ),
+            "assembleRelease in PR CI": (
+                "          if ./gradlew :app:assembleDebug --no-daemon --console=plain; then\n",
+                "          if ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --console=plain; then\n",
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaises(AssertionError):
+                    assert_pr3_gates(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
     def test_comment_stripping_is_block_scalar_aware(self) -> None:
         sample = (
             "jobs:\n"
@@ -1776,6 +2806,10 @@ class BehavioralScriptTests(unittest.TestCase):
         cls.publisher_script = run_script(named_step(jobs["publish"], "Verify release checksum"))
         cls.verify_script = run_script(named_step(jobs["build-release"], "Verify signed release APK"))
         cls.counter_script = run_script(named_step(jobs["build-dfroot"], APK_COUNTER_COMMAND))
+        cls.all_markers_script = run_script(named_step(jobs["build-dfroot"], ALL_MARKERS_STEP))
+        cls.junit_script = run_script(named_step(jobs["build-dfroot"], JUNIT_STEP))
+        cls.cache_assert_script = run_script(named_step(jobs["build-release"], CI_CACHE_ASSERT_STEP))
+        cls.choke_script = run_script(named_step(jobs["build-release"], UPLOAD_CHOKE_STEP))
 
     def test_package_script_requires_exactly_one_release_apk(self) -> None:
         for label, names in (("zero", []), ("multiple", ["DFRoot_a.apk", "DFRoot_b.apk"])):
@@ -1979,10 +3013,12 @@ class BehavioralScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("apksigner was not found", result.stderr)
 
-    def test_preupload_apk_counter_requires_exactly_one_of_each_variant(self) -> None:
-        with self.subTest(fixture="one and one"), tempfile.TemporaryDirectory() as tmp:
+    def test_preupload_apk_counter_requires_exactly_one_debug_apk(self) -> None:
+        with self.subTest(fixture="one debug"), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_debug_apks(root, ["DFRoot_d.apk"])
+            # A stray release APK is deliberately ignored: PR CI publishes no
+            # release variant and must not be tricked into counting one.
             write_release_apks(root, ["DFRoot_r.apk"])
             result = run_in_dir(self.counter_script, root)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1992,15 +3028,126 @@ class BehavioralScriptTests(unittest.TestCase):
             write_release_apks(root, ["DFRoot_r.apk"])
             result = run_in_dir(self.counter_script, root)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Expected exactly one debug APK and one release APK", result.stderr)
+            self.assertIn("Expected exactly one debug APK", result.stderr)
 
-        with self.subTest(fixture="multiple release"), tempfile.TemporaryDirectory() as tmp:
+        with self.subTest(fixture="multiple debug"), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_debug_apks(root, ["DFRoot_d.apk"])
-            write_release_apks(root, ["DFRoot_r.apk", "DFRoot_r2.apk"])
+            write_debug_apks(root, ["DFRoot_d.apk", "DFRoot_d2.apk"])
             result = run_in_dir(self.counter_script, root)
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Expected exactly one debug APK and one release APK", result.stderr)
+            self.assertIn("Expected exactly one debug APK", result.stderr)
+
+    def test_all_suites_marker_gate_fails_if_any_suite_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            for marker in HOST_SUITE_MARKERS:
+                (runner_temp / marker).write_text("ok\n", encoding="utf-8")
+            result = run_in_dir(self.all_markers_script, root, {"RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("7/7 markers", result.stdout)
+
+            for missing in HOST_SUITE_MARKERS:
+                with self.subTest(missing=missing):
+                    (runner_temp / missing).unlink()
+                    result = run_in_dir(self.all_markers_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"Test suite marker missing: {missing}", result.stdout + result.stderr)
+                    (runner_temp / missing).write_text("ok\n", encoding="utf-8")
+
+            with self.subTest(missing="empty marker"):
+                (runner_temp / HOST_SUITE_MARKERS[0]).write_text("", encoding="utf-8")
+                result = run_in_dir(self.all_markers_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"Test suite marker missing: {HOST_SUITE_MARKERS[0]}", result.stdout + result.stderr)
+
+    def test_junit_xml_gate_accepts_only_28_clean_tests(self) -> None:
+        def write_report(root: Path, tests: int, failures: int = 0, errors: int = 0, skipped: int = 0) -> None:
+            report = root / "app/build/test-results/testDebugUnitTest/TEST-Preferences.xml"
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(
+                f'<testsuite name="Preferences" tests="{tests}" failures="{failures}" '
+                f'errors="{errors}" skipped="{skipped}"></testsuite>\n',
+                encoding="utf-8",
+            )
+
+        cases = (
+            ("28 clean", (28, 0, 0, 0), True, ""),
+            ("27 tests", (27, 0, 0, 0), False, "JUnit XML assertion failed"),
+            ("one failure", (28, 1, 0, 0), False, "JUnit XML assertion failed"),
+            ("one error", (28, 0, 1, 0), False, "JUnit XML assertion failed"),
+            ("one skip", (28, 0, 0, 1), False, "JUnit XML assertion failed"),
+        )
+        for label, counts, passes, message in cases:
+            with self.subTest(fixture=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                runner_temp = root / "runner-temp"
+                runner_temp.mkdir()
+                write_report(root, *counts)
+                result = run_in_dir(self.junit_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                if passes:
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("TOTAL tests=28 failures=0 errors=0 skipped=0", result.stdout)
+                    self.assertTrue((runner_temp / "marker-junit").is_file())
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stdout + result.stderr)
+                    self.assertFalse((runner_temp / "marker-junit").exists())
+
+        with self.subTest(fixture="no XML"), tempfile.TemporaryDirectory() as tmp:
+            runner_temp = Path(tmp) / "runner-temp"
+            runner_temp.mkdir()
+            result = run_in_dir(self.junit_script, Path(tmp), {"RUNNER_TEMP": str(runner_temp)})
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("No JUnit XML found", result.stdout + result.stderr)
+
+    def test_cache_assertion_gate_rejects_skip_on_in_any_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache_dir = root / "app/.cxx/arm64"
+            cache_dir.mkdir(parents=True)
+            cache = cache_dir / "CMakeCache.txt"
+            cache.write_text("DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF\n", encoding="utf-8")
+            result = run_in_dir(self.cache_assert_script, root)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            cache.write_text("DFROOT_SKIP_KO_HASH_CHECK:BOOL=ON\n", encoding="utf-8")
+            result = run_in_dir(self.cache_assert_script, root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("DFROOT_SKIP_KO_HASH_CHECK is not OFF", result.stdout + result.stderr)
+
+            cache.unlink()
+            result = run_in_dir(self.cache_assert_script, root)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("No CMakeCache.txt found", result.stdout + result.stderr)
+
+    def test_upload_choke_point_blocks_release_without_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            for marker in (*RELEASE_GATE_MARKERS, "marker-distributable-evidence"):
+                (runner_temp / marker).write_text("ok\n", encoding="utf-8")
+            index = runner_temp / RELEASE_GATE_INDEX
+            index.write_text("DFRoot_a.apk\tsha\tso\tmanifest\tso_sha\n", encoding="utf-8")
+            result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("3/3 markers", result.stdout)
+
+            for missing in RELEASE_GATE_MARKERS:
+                with self.subTest(marker=missing):
+                    (runner_temp / missing).unlink()
+                    result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"Distributable evidence marker missing: {missing}", result.stdout + result.stderr)
+                    (runner_temp / missing).write_text("ok\n", encoding="utf-8")
+
+            with self.subTest(fixture="empty index"):
+                index.write_text("", encoding="utf-8")
+                result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("APK gate index is empty or missing", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

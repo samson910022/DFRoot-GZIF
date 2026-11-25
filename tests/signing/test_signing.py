@@ -1109,6 +1109,15 @@ class MakeSigningTests(unittest.TestCase):
 
 
 class GradleSigningConfigTests(unittest.TestCase):
+    """Post-rebase Gradle semantics: incomplete material disables Release.
+
+    With no (or incomplete) signing.properties the build must still configure
+    so debug builds and JVM tests run on a fresh checkout/PR.  It warns, installs
+    a harmless placeholder signing config, and disables every release variant,
+    so no unsigned/dummy-signed Release APK can be produced.  With a real
+    keystore plus all four values, release signing is enabled unchanged.
+    """
+
     @classmethod
     def setUpClass(cls) -> None:
         if not SUPPORTING_ROOTS:
@@ -1116,8 +1125,43 @@ class GradleSigningConfigTests(unittest.TestCase):
         cls.java_home = Path(JAVA).parent.parent
         sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
         cls.android_sdk = Path(sdk) if sdk else Path.home() / "Android" / "Sdk"
+        cls.fixture_root = Path(tempfile.mkdtemp(prefix="dfroot-gradle-signing-", dir=SUPPORTING_ROOTS[0][0]))
+        cls.addClassCleanup(shutil.rmtree, cls.fixture_root, True)
+        cls.source_keystore = generate_source_keystore(cls.fixture_root)
 
-    def run_gradle(self, properties: dict[str, str] | None) -> subprocess.CompletedProcess[str]:
+    # The init script reads the *effective* release signing config after Gradle
+    # evaluation.  A placeholder is observable here and must never be mistaken
+    # for real signing material.
+    INIT_SCRIPT = """
+allprojects { p ->
+  p.afterEvaluate {
+    if (p.plugins.hasPlugin('com.android.application')) {
+      p.tasks.register('printReleaseSigning') {
+        doLast {
+          def c = p.android.signingConfigs.getByName('release')
+          println 'SIGNING_STORE=' + c.storeFile
+          println 'SIGNING_ALIAS=' + c.keyAlias
+        }
+      }
+    }
+  }
+}
+"""
+
+    def run_gradle(
+        self,
+        properties: dict[str, str] | None,
+        *,
+        keystore: tuple[str, str, str | None] | None = None,
+        task: str = ":app:tasks --all",
+        print_signing: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run Gradle in an isolated copy of the project.
+
+        ``keystore`` is (password, alias, key_password); when given, a real JKS
+        with those credentials is created at the path referenced by
+        KEYSTORE_FILE=../keystore.jks.
+        """
         with tempfile.TemporaryDirectory(prefix="dfroot-signing-gradle-", dir=SUPPORTING_ROOTS[0][0]) as directory:
             project = Path(directory)
             files = (
@@ -1138,13 +1182,22 @@ class GradleSigningConfigTests(unittest.TestCase):
             (project / "local.properties").write_text(f"sdk.dir={self.android_sdk}\n", encoding="utf-8")
             if properties is not None:
                 (project / "signing.properties").write_bytes(serialize_properties_fixture(properties))
+            if keystore is not None:
+                write_fixture_keystore(self.source_keystore, project / "keystore.jks", *keystore)
+            init = project / "print-signing.gradle"
+            init.write_text(self.INIT_SCRIPT, encoding="utf-8")
 
             environment = os.environ.copy()
             environment["JAVA_HOME"] = str(self.java_home)
             environment["ANDROID_HOME"] = str(self.android_sdk)
             environment["ANDROID_SDK_ROOT"] = str(self.android_sdk)
+            command = [str(ROOT / "gradlew"), "-p", str(project), "--init-script", str(init)]
+            if print_signing:
+                command.append(":app:printReleaseSigning")
+            command.extend(task.split())
+            command.extend(["--console=plain", "--no-daemon"])
             return subprocess.run(
-                [str(ROOT / "gradlew"), "-p", str(project), ":app:tasks", "--all", "--console=plain", "--no-daemon"],
+                command,
                 cwd=ROOT,
                 env=environment,
                 text=True,
@@ -1164,52 +1217,103 @@ class GradleSigningConfigTests(unittest.TestCase):
             "KEY_PASSWORD": "password",
         }
 
-    def test_missing_signing_config_is_allowed(self) -> None:
-        result = self.run_gradle(None)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("release builds will be unsigned", result.stdout + result.stderr)
+    @staticmethod
+    def field(output: str, name: str) -> str | None:
+        prefix = name + "="
+        for line in output.splitlines():
+            if line.startswith(prefix):
+                return line[len(prefix):]
+        return None
 
-    def test_partial_signing_config_is_rejected_with_all_missing_keys(self) -> None:
-        result = self.run_gradle({"KEYSTORE_FILE": "../keystore.jks"})
-        self.assertNotEqual(result.returncode, 0)
+    def assert_placeholder_release_disabled(self, result: subprocess.CompletedProcess[str]) -> str:
         output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        store = self.field(output, "SIGNING_STORE") or ""
+        self.assertTrue(store.endswith("build/dummy-release-keystore.jks"), output)
+        self.assertEqual(self.field(output, "SIGNING_ALIAS"), "dummy")
+        self.assertNotIn("assembleRelease", output)
+        return output
+
+    def assert_real_release_enabled(self, result: subprocess.CompletedProcess[str], alias: str) -> str:
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        store = self.field(output, "SIGNING_STORE") or ""
+        self.assertTrue(store.endswith("/keystore.jks"), output)
+        self.assertNotIn("dummy-release-keystore.jks", store)
+        self.assertEqual(self.field(output, "SIGNING_ALIAS"), alias)
+        self.assertIn("assembleRelease", output)
+        return output
+
+    def test_missing_signing_config_warns_uses_placeholder_and_disables_release(self) -> None:
+        result = self.run_gradle(None)
+        output = self.assert_placeholder_release_disabled(result)
+        self.assertIn("signing.properties not found", output)
+        self.assertIn("release builds will be unsigned and unavailable", output)
+
+    def test_partial_signing_config_warns_uses_placeholder_and_disables_release(self) -> None:
+        result = self.run_gradle({"KEYSTORE_FILE": "../keystore.jks"})
+        output = self.assert_placeholder_release_disabled(result)
         self.assertIn("missing required key(s)", output)
         for key in ("KEYSTORE_PASSWORD", "KEY_ALIAS", "KEY_PASSWORD"):
             self.assertIn(key, output)
 
-    def test_empty_signing_value_is_rejected(self) -> None:
-        properties = self.complete_properties()
-        properties["KEY_ALIAS"] = ""
-        result = self.run_gradle(properties)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("KEY_ALIAS", result.stdout + result.stderr)
+    def test_empty_or_blank_signing_values_are_not_real_material(self) -> None:
+        cases = (
+            ("empty alias", "KEY_ALIAS", "", "KEY_ALIAS"),
+            ("empty store password", "KEYSTORE_PASSWORD", "", "KEYSTORE_PASSWORD"),
+            ("empty key password", "KEY_PASSWORD", "", "KEY_PASSWORD"),
+            ("blank keystore file", "KEYSTORE_FILE", " \t\r\n\f ", "KEYSTORE_FILE"),
+        )
+        for label, key, value, expected in cases:
+            with self.subTest(case=label):
+                properties = self.complete_properties()
+                properties[key] = value
+                result = self.run_gradle(properties)
+                output = self.assert_placeholder_release_disabled(result)
+                self.assertIn(expected, output)
 
-    def test_whitespace_only_keystore_file_is_rejected(self) -> None:
-        properties = self.complete_properties()
-        properties["KEYSTORE_FILE"] = " \t\r\n\f "
-        result = self.run_gradle(properties)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("KEYSTORE_FILE", result.stdout + result.stderr)
+    def test_release_task_is_unreachable_without_real_signing_material(self) -> None:
+        """No unsigned or dummy-signed Release APK can be emitted."""
+        for label, properties in (
+            ("missing", None),
+            ("partial", {"KEYSTORE_FILE": "../keystore.jks"}),
+        ):
+            with self.subTest(case=label):
+                result = self.run_gradle(properties, task=":app:assembleRelease", print_signing=False)
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertNotIn("BUILD SUCCESSFUL", output)
+                self.assertIn("assembleRelease", output)
+                self.assertIn("Task not found", output)
 
-    def test_complete_signing_config_is_accepted(self) -> None:
-        result = self.run_gradle(self.complete_properties())
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    def test_complete_real_signing_config_is_accepted(self) -> None:
+        result = self.run_gradle(self.complete_properties(), keystore=("password", "alias", None))
+        output = self.assert_real_release_enabled(result, "alias")
+        self.assertNotIn("missing required key(s)", output)
+        self.assertNotIn("release builds will be unsigned and unavailable", output)
 
-    def test_complete_config_accepts_whitespace_only_credentials(self) -> None:
+    def test_complete_config_accepts_non_bmp_credentials(self) -> None:
+        password = "  password-😀  "
+        alias = "  alias-🔐-𝄞  "
+        key_password = "password-😀"
+        properties = {
+            "KEYSTORE_FILE": "../keystore.jks",
+            "KEYSTORE_PASSWORD": password,
+            "KEY_ALIAS": alias,
+            "KEY_PASSWORD": key_password,
+        }
+        result = self.run_gradle(properties, keystore=(password, alias, key_password))
+        self.assert_real_release_enabled(result, alias)
+
+    def test_blank_credentials_stay_disabled_even_with_a_real_keystore(self) -> None:
         properties = self.complete_properties()
         properties["KEYSTORE_PASSWORD"] = " \t "
         properties["KEY_ALIAS"] = "\r\n\f "
         properties["KEY_PASSWORD"] = "   "
-        result = self.run_gradle(properties)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_complete_config_accepts_non_bmp_credentials(self) -> None:
-        properties = self.complete_properties()
-        properties["KEYSTORE_PASSWORD"] = "  password-😀  "
-        properties["KEY_ALIAS"] = "  alias-🔐-𝄞  "
-        properties["KEY_PASSWORD"] = "password-😀"
-        result = self.run_gradle(properties)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # The keystore uses valid credentials, but blank values in
+        # signing.properties must not be treated as real signing material.
+        result = self.run_gradle(properties, keystore=("password", "alias", None))
+        self.assert_placeholder_release_disabled(result)
 
 
 if __name__ == "__main__":

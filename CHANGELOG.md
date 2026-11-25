@@ -1,5 +1,87 @@
 # Changelog — DFRoot GZIF
 
+## Unreleased — PR #1 hardening (CI build reliability), integrated into this rebased head
+
+Hardening pass over the build, signing and release pipeline; no change to the
+exploit chain or to the GZIF validation claims. Documentation was brought in
+line with the shipped configuration (Gradle wrapper **9.9.2** with a pinned
+distribution SHA-256; AGP **9.5.0** effective through
+`gradle/libs.versions.toml` via the version-catalog alias with no root
+`build.gradle.kts` pin; Kotlin/Java sources unchanged).
+
+- **Signing writer and fail-closed behavior** (`scripts/WriteSigningProperties.java`,
+  `app/build.gradle.kts`): signing material is serialized safely for arbitrary
+  passwords/aliases and locales; `signing.properties` is optional at
+  configuration time (a fresh checkout no longer fails `assembleDebug`),
+  incomplete properties are reported readably, and local keystore/property
+  files are created with restrictive permissions and verified after writing.
+  With PR #3's rebased semantics, absent/incomplete signing material installs
+  a harmless placeholder and **disables/fails closed on every release task**;
+  Debug stays debug-keystore signed. An installable Release requires complete
+  signing material.
+- **Protected release environment** (`.github/workflows/build.yml`): least
+  privilege by default; only a push of a `v*` tag runs `build-release` in the
+  `release` environment, where the four `KEYSTORE*` secrets are available.
+  Ancestry check precedes any secret reference; the signed APK is
+  `apksigner`-verified, checksummed and uploaded with 1-day retention; the
+  publish job only downloads, verifies and publishes. Action references are
+  pinned to full 40-hex SHAs and permissions are least-privilege.
+- **PR/branch/manual CI artifacts, reconciled with PR #3**: those events run
+  all host suites as required gates and build a **debug-keystore-signed Debug**
+  APK (no signing secrets, no signed Release, no GitHub Release). The APK is
+  uploaded as a public, downloadable Actions artifact named
+  **`DFRoot-UNVERIFIED-CI`**, carrying `GPL-3.0.txt`, `LICENSE`, `NOTICE` and
+  `THIRD_PARTY_NOTICES.md`. It is explicitly UNVERIFIED — no release claim.
+  The protected tag path adds PR #3's packaged-byte, provenance-identity and
+  release-evidence gates before any signed artifact is uploaded or published.
+- **New release key identity warning**: releases from this hardened pipeline
+  are signed with a **new key identity**. Android will not overwrite-update an
+  installed application signed by a different key — uninstall any existing
+  DFRoot GZIF build before installing a signed release APK (**UNVERIFIED CI
+  Debug artifacts** cannot update a signed install either).
+- **Make/DDK hardening** (`Makefile`, `scripts/ddk-image.sh`): exactly one
+  digest-pinned `android13-5.15` DDK image for the single embedded KMI, derived
+  from CI instead of a floating tag; Podman uses `--network=none`,
+  `--cap-drop=ALL` and `no-new-privileges` with only `lkm/` and the KO directory
+  mounted. `SIGN_PASS`/`SIGN_ALIAS` are accepted **only from the environment**;
+  command-line assignments are rejected at parse time. CI strips
+  `.note.gnu.build-id` from the KO, so the CI/release artifact is 13,384 B with
+  sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`,
+  while the local `make` build is 13,504 B with sha256 `94f8be98…` (it retains
+  the build-id note); they are not byte-identical.
+- **GPLv3 licence conveyance**: added verbatim `GPL-3.0.txt` from
+  https://www.gnu.org/licenses/gpl-3.0.txt; `NOTICE` and
+  `THIRD_PARTY_NOTICES.md` state the full GPL-3.0-or-later obligations for the
+  bundled userspace loaders (correcting the "no other obligations"
+  overstatement) while retaining the provenance and complete-source offer.
+  Both `GPL-3.0.txt` and the repository's own GPL-2.0 `LICENSE`, plus `NOTICE`
+  and `THIRD_PARTY_NOTICES.md`, accompany the signed release assets **and** the
+  publicly downloadable UNVERIFIED CI APK artifact, with the upload and
+  publish allowlists tightened to those exact files. The signed bundle is not
+  the only unit of conveyance.
+- **Documentation corrections** in `README.md`, `PORTING-GZIF.md`, `NOTICE`
+  and `THIRD_PARTY_NOTICES.md`: 9.9.2 / 9.5.0-effective, signing/debug behavior,
+  CI KO hash, digest-pinned DDK image, environment-only Make credentials,
+  single-KMI Make, and the CI event matrix. No AndroidX / Material Components
+  dependency (themes use framework `android:Theme.Material*`); four KMI modules
+  are embedded in `libksudnext.so` with GZIF using `android13-5.15`.
+- **Regression coverage**: workflow policy/contract tests, make contract tests,
+  signing material/permission tests and signed/unsigned release smoke tests
+  cover the hardened pipeline, including license/notice packaging, a byte pin
+  for `LICENSE`, equality-locked upload/publish allowlists, and rejection of
+  `secrets/`, `.jks`, `signing.properties` and `..` artifact entries.
+
+### Post-rebase integration
+
+PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
+head. Host-suite counts, the round-4 stable-ID disposition table and the
+validation boundary below remain authoritative for the rebased head. run6/run8
+and every prior CI run predate the rebase: they are historical and do not
+validate this head. No tag was created by us. Where PR #1's unsigned Release CI
+APK met PR #3's fail-closed release variant, the rebased CI path builds Debug
+only and labels the artifact UNVERIFIED; signed releases are exclusively on
+the gated `v*` tag path.
+
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
 **All evidence in this section is host-only.** No hardware run validates the
@@ -17,7 +99,7 @@ attached to the historical implementation described in §4.8-gzif below.
 | P1-02 | **Addressed in host-tested scope; device timing/quiescence UNVALIDATED** | 128-bit nonce generated and bound before any state write; strict `df_parse_final_token()` (exact length, no embedded NUL, exact nonce, no extra bytes) with garbled/foreign tokens ignored; reserved-nonce `BOOTSTRAP_FAILED` published only on the separate app-owned `dfbootfail` channel and consumed as observable rc=1 via a dedicated reader. Real-file and mock tests cover stale state and repeated observations. Android publication/access and on-device freshness remain unproven. |
 | P1-07 | **Addressed in host-tested scope; asynchronous safety UNVALIDATED** | Cleanup runs exactly once, after the first valid bound status observation (or once on the shared deadline if none arrives), on the SAME absolute deadline as the poll loop; its time is charged to that deadline and the clock is rechecked. Recovery polling is bounded to 5 s and clamped to the remaining deadline; a NULL/failed `recovery_ok()` or timeout publishes `REBOOT_SKIPPED` and can only disable the reboot. A failed restore adds the rc-64 bit to every code. Mocks prove ordering, count and fail-closed branches, not device quiescence or that asynchronous activity has finished. |
 | P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing it requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not claim fixed. |
-| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | The packaged-byte gate always runs; the real APK gate runs on every non-PR (publishing) event before any upload, over the complete staged APK set, with per-APK manifest + `so_sha256` binding, manifest/dump invalidation at entry and `if-no-files-found: error`. PR runs are non-publishing (host fixtures only, no APK uploaded, no release claim). Pins are unchanged and the gate is fail-closed pending a reviewed re-pin; no tag was created. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | The packaged-byte gate always runs; the real APK gate runs on the protected `v*` tag publishing path before any signed artifact is uploaded or published, over the complete staged APK set, with per-APK manifest + `so_sha256` binding, manifest/dump invalidation at entry and `if-no-files-found: error`. PR/branch/manual runs upload only an explicitly UNVERIFIED Debug APK with no release claim. The byte gate rejects unknown bytes but **accepts the two known obsolete pins**; release is withheld by policy (reviewed re-pin, OPEN P1-08, device validation), not by the hash gate alone. Passing the gate is not device validation. No tag was created by us. |
 | P2-06 | **Addressed for identity checks; provenance remains informational** | Required identity check on EVERY `dfroot-build-provenance.txt` (git HEAD == `GITHUB_SHA`, release variant, reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler identity fields), plus complete-set release evidence with one row per uploaded APK. Records are audit evidence, not an attestation or an independent reproducible-build proof. |
 | P2-07 | **Addressed in this repair** | Test/lifecycle/failure-path counts and CI markers documented below; the PR description is replaced to match the current head and actual CI without device-verification claims; historical run6/run8 remain attached only to the historical implementation. |
 | P2-08 | **Addressed in host-tested scope; real PackageManager/fsync UNVALIDATED** | A durable write-ahead `PENDING` marker is published before the commit (full write, read-back, fsync); recovery requires a fully validated PENDING→commit cycle of the SAME key; unattributable faults latch a sticky fail-closed `WILDCARD`; the boot component is disabled synchronously at the failure boundary. Device-protected storage and real PackageManager/fsync behavior are untested. |
@@ -47,30 +129,33 @@ unchanged; none of them constitutes device validation.
   0 skips** — `LaunchGate` 4, `ListenerLifecycle` 5, `PreferenceIntegrity` 8,
   `PreferencePersister` 11. CI parses the JUnit XML and asserts exactly
   28/0/0/0; a green Gradle exit code alone is not accepted.
-- **All-events suite markers (7/7)**: `marker-native`, `marker-ko-policy`,
+- **Suite markers on every non-tag CI event (7/7)**: `marker-native`, `marker-ko-policy`,
   `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`,
   `marker-jvm`, `marker-junit`; one gate fails if any marker is missing.
-- **Publishing-only gates (non-PR events, before upload)**: `marker-apk-gate`
-  (every distributable APK, per-APK manifest + `so_sha256` binding),
-  `marker-provenance-identity` (required, every record),
+- **Publishing-only gates (`v*` tag path, before any signed upload/publish)**:
+  `marker-apk-gate` (every distributable APK, per-APK manifest + `so_sha256`
+  binding), `marker-provenance-identity` (required, every record),
   `marker-release-evidence`, `marker-distributable-evidence`, then a single
-  upload choke point on the staged set. PR runs are **non-publishing**: host
-  fixtures only, no APK uploaded, no release claim. Provenance is informational
-  evidence, not attestation or reproducible-build proof.
+  upload choke point on the staged set. PR/branch/manual runs upload only an
+  explicitly UNVERIFIED Debug APK (with the licence/notice bundle) and make no
+  release claim. Provenance is informational evidence, not attestation or
+  reproducible-build proof.
 
 ### Validation boundary
 
 P1-02/P1-07 are proven only with host mocks and real-file adapters; device
 timing, quiescence and privileged-state safety are UNVALIDATED. P2-04/P2-06/
-P2-09 are proven with host fixtures and CI-shaped checks; the real release APK
-path stays fail-closed with the unchanged obsolete pre-CFI pins until a
-reviewed re-pin, and no tag was created. P2-08/P2-10 are proven with host JVM
+P2-09 are proven with host fixtures and CI-shaped checks; the byte gate rejects
+unknown bytes but **accepts the two known obsolete pins**. Release is withheld
+by policy — a reviewed re-pin, the OPEN P1-08 staging gate and device
+validation — not by the hash gate alone; passing the gate is not device
+validation. No tag was created by us. P2-08/P2-10 are proven with host JVM
 tests; real PackageManager/fsync and UI lifecycle behavior are UNVALIDATED.
 P1-08 remains OPEN. Auto Soft Reboot and Start on Boot remain disabled by
-default and unvalidated. No hardware run validates this head — run6/run8
-validate only the historical implementation (old multi-marker protocol,
-then-current pins, old preference path). A successful build does not certify
-safe privileged execution.
+default and unvalidated. No hardware run validates the rebased head — run6/run8
+and all earlier CI runs validate only the historical implementation (old
+multi-marker protocol, then-current pins, old preference path). A successful
+build does not certify safe privileged execution.
 
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
 
@@ -167,15 +252,15 @@ not be published.
   KO SHA-256 MISMATCH) and writes a manifest with status, sha256, bytes,
   section, so_sha256, pins, timestamp and git HEAD. No pin was added or
   relaxed. `ko_pin_policy.cmake` shares pin validation between both verifiers.
-- **Real APK gate (P2-04).** On every non-PR (publishing) event the workflow
-  unzips `lib/arm64-v8a/libdfroot.so` from EACH release APK, runs the same
-  verifier with the NDK's llvm-objcopy and asserts `status: verified` plus a
-  matching manifest `so_sha256` **before** any upload or GitHub Release, with
-  no `continue-on-error`. PR runs are non-publishing: host fixtures only, no
-  APK uploaded, no release claim. **The real gate is blocked until KO re-pin**:
-  pins are unchanged and the final bytes must be reviewed and deliberately
-  re-pinned before a tag can ship; an unknown blob fails closed rather than
-  being accepted by a skip flag. Do not treat a passing host fixture run as
+- **Real APK gate (P2-04).** On the protected `v*` tag publishing path the
+  workflow unzips `lib/arm64-v8a/libdfroot.so` from EACH distributable APK,
+  runs the same verifier with the NDK's llvm-objcopy and asserts
+  `status: verified` plus a matching manifest `so_sha256` **before** any signed
+  upload or GitHub Release, with no `continue-on-error`. PR/branch/manual runs
+  upload only an explicitly UNVERIFIED Debug APK and make no release claim.
+  **The byte gate rejects unknown bytes but accepts the two known obsolete
+  pins**; release is withheld by policy (reviewed re-pin, OPEN P1-08 and device
+  validation), not by the hash gate alone. A passing host fixture run is not
   device validation.
 - **Provenance is evidence, never stale (P2-06).**
   `record_build_provenance.cmake` now fails closed if the KO manifest is
@@ -370,15 +455,18 @@ this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
 
 Residual risks / **release gates** (not closed by this PR):
 
-- run6 and run8 (2026-11-17) validated the **historical implementation** — the
-  old multi-marker status protocol and the then-current KO pins — only. Every
-  change in this "Unreleased" section is **host-tested only and UNVALIDATED on
+- run6 and run8 (2026-11-17) and every earlier CI run validated the
+  **historical implementation** — the old multi-marker status protocol and the
+  then-current KO pins — only; they predate the post-PR #1 rebase. Every change
+  in this "Unreleased" section is **host-tested only and UNVALIDATED on
   device**; no new hardware run has exercised the single-`/dev/dffinal` flow,
   the new build policy, or the new Java persistence paths.
-- **No release may ship with obsolete KO pins.** If a DDK rebuild produces a
-  hash outside the two reviewed pins, stop: verify the artifact out of band,
-  update the pins in a reviewed commit and docs, or do not release. Never
-  skip the check for CI/release builds.
+- **No release may ship with obsolete KO pins.** The byte gate rejects unknown
+  bytes but still accepts the two known obsolete pins; if a DDK rebuild
+  produces a hash outside them, stop and verify out of band. Withhold release
+  by policy until a reviewed re-pin, P1-08 is closed and the device path is
+  validated. Never skip the check for CI/release builds; passing it is not
+  device validation.
 - Provenance manifests are informational and are **not** an independent
   reproducible-build proof.
 - Auto Soft Reboot and Start on Boot remain disabled by default and

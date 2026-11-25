@@ -7,27 +7,35 @@
 
 > [!IMPORTANT]
 > This document describes an **experimental, volatile, per-boot root exploit** for a shipping Samsung firmware. It is for the device owner's own research. It is not a distribution, not stable, and not persistent across reboot. Read §10 (Safety & limitations) before using anything in it.
+> "It is not a distribution" refers to this technique note, not to the built
+> APKs: built APKs, including the **UNVERIFIED** CI ones, are publicly
+> downloadable and carry the notice/licence bundle (`GPL-3.0.txt`, `LICENSE`,
+> `NOTICE` and `THIRD_PARTY_NOTICES.md`).
 
 > [!WARNING]
 > **Current head is UNVALIDATED on device.** The current head of
-> `fix/native-exploit-robustness` (round-4 repair, 2026-11-25) — single
-> nonce-bound `/dev/dffinal` outcome, app-owned bootfail/recovery channels,
-> write-ahead preference transaction, lifecycle-safe listeners, KO hash policy,
-> build provenance and packaging gates — is **host-tested only**. The hardware
-> results in §5 and §12 (run6/run8, 2026-11-17) were obtained with the
+> `fix/native-exploit-robustness` (round-4 repair, 2026-11-25, rebased onto the
+> merged PR #1 head) — single nonce-bound `/dev/dffinal` outcome, app-owned
+> bootfail/recovery channels, write-ahead preference transaction, lifecycle-safe
+> listeners, KO hash policy, build provenance and packaging gates — is
+> **host-tested only**. The hardware results in §5 and §12 (run6/run8,
+> 2026-11-17) and all earlier CI runs were obtained with the
 > **historical implementation** — the old multi-marker protocol, the then-current
 > KO pins and the old preference-write path — and must not be read as validation
-> of the current head. PR CI is green on host suites only and is
-> **non-publishing**: no APK is uploaded and no release claim is made. On
-> publishing (non-PR) events, before upload, every distributable APK is
-> packaged-byte-verified with a per-APK manifest and `so_sha256` binding, every
-> provenance record is identity-checked, and release/distributable evidence is
-> asserted at a single upload choke point. Provenance is informational evidence,
-> **not** an attestation or independent reproducible-build proof. No release may
-> ship with obsolete KO pins: pins are unchanged and the gate is fail-closed
-> until a reviewed re-pin; no tag was created. Gradle passes the Android variant
-> (`release` / `debug`) as the authoritative native policy signal, and the KO is
-> linked into a dedicated `.dfroot_ko` section whose final bytes in
+> of the current head. PR/branch/manual CI runs are host-suite gates plus a
+> public downloadable **`DFRoot-UNVERIFIED-CI`** Debug APK with the licence
+> bundle: no signing secrets, no signed APK, no GitHub Release and no release
+> claim. On the protected `v*` tag path only, before any signed upload or
+> publish, every distributable APK is packaged-byte-verified with a per-APK
+> manifest and `so_sha256` binding, every provenance record is identity-checked,
+> and release/distributable evidence is asserted at a single upload choke point.
+> Provenance is informational evidence, **not** an attestation or independent
+> reproducible-build proof. **The byte gate rejects unknown bytes but accepts
+> the two known obsolete pins**; release is withheld by policy (reviewed re-pin,
+> OPEN P1-08, device validation), not by the hash gate alone — passing the gate
+> is not device validation. No tag was created by us. Gradle passes the Android
+> variant (`release` / `debug`) as the authoritative native policy signal, and
+> the KO is linked into a dedicated `.dfroot_ko` section whose final bytes in
 > `libdfroot.so` are SHA-256-checked against the same pins (no skip option).
 > CI asserts 7/7 suite markers and a strict JUnit XML assertion of **28 tests**,
 > 0 failures/errors/skips. Auto Soft Reboot and Start on Boot remain disabled by
@@ -35,6 +43,11 @@
 > (P1-08) remains **OPEN** and requires a loader rebuild. A successful build
 > does not certify safe privileged execution. See §17 for the round-4
 > test/lifecycle/failure-path shape.
+
+> [!NOTE]
+> **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
+> the base and PR #3 was rebased onto it; run6/run8 and all prior CI runs remain
+> historical and do not validate the rebased head.
 
 ---
 
@@ -100,7 +113,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 
 **(2) crash_dump64 splicehelper bridge.** `crash_dump64` (`/apex/com.android.runtime/bin/crash_dump64`) is a privileged binary that runs in the `u:r:crash_dump` SELinux domain via exec-label transition — a domain `untrusted_app` cannot reach directly. The exploit patches it **in the page cache** with `splicehelper` (a freestanding static binary, built on the fly by CMake; see `app/src/main/jni/CMakeLists.txt`). The patch mechanism: AES-CBC in-place decrypt — `IV = AES_ECB_DEC(key, current_content) ⊕ desired_content` — so the kernel's ESP decrypt rewrites the page-cache bytes to the desired shellcode (`exp.c:34-53`). splicehelper has two modes: **splice mode** (pipe a 16-byte page chunk out to the parent, used for writing the `.ko` and patching `crash_dump64`/`libc++.so`) and **read mode** (`argv[3]="r"`, dumps 16 bytes of file content to a pipe for IV computation, `exp.c:189-206`). The vendor file bridge exists because `crash_dump` can open `vendor_file`-labeled files but app-untrusted_app cannot.
 
-**(3) dfroot.ko → vendor file.** The **android13-5.15** LKM `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK-built; byte-identical twin of the make-built `app/src/main/jni/ko/dfroot-android13-5.15.ko` (sha256 `94f8be98…`); vermagic `5.15.202-android13-5.15.202_r00-dirty`, modversions satisfied via KMI CRC) is written via the crash_dump bridge (splicehelper splice mode) into **`/vendor/lib64/AIAwbModel_v2.2.tflite`** — a vendor asset that is never executed by the system. File presence is proven by the splice patch; size and `vendor_file` label are unverified (no retained `stat`/`ls -Z` evidence). (Original upstream candidates `libbinderdebug.so` / `libstagefrighthw.so` / `libstagefright_aidl_bufferpool2.so` are **absent** on this build; the local port hard-codes the tflite in `exp.c:443` and `libcxx.S:22`.) The exploit targets GZIF's `KMI=android13-5.15` (`Using KMI: android13-5.15`).
+**(3) dfroot.ko → vendor file.** The **android13-5.15** LKM `app/src/main/jni/ko/dfroot-android13-5.15.ko` (DDK-built; two distinct fingerprints — the **CI/release artifact is 13,384 B**, sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`, because CI strips `.note.gnu.build-id` with `llvm-objcopy --strip-unneeded`, while the **local `make` build is 13,504 B**, sha256 `94f8be98…`, retaining `.note.gnu.build-id`; they are not byte-identical — vermagic `5.15.202-android13-5.15.202_r00-dirty`, modversions satisfied via KMI CRC) is written via the crash_dump bridge (splicehelper splice mode) into **`/vendor/lib64/AIAwbModel_v2.2.tflite`** — a vendor asset that is never executed by the system. File presence is proven by the splice patch; size and `vendor_file` label are unverified (no retained `stat`/`ls -Z` evidence). (Original upstream candidates `libbinderdebug.so` / `libstagefrighthw.so` / `libstagefright_aidl_bufferpool2.so` are **absent** on this build; the local port hard-codes the tflite in `exp.c:443` and `libcxx.S:22`.) The exploit targets GZIF's `KMI=android13-5.15` (`Using KMI: android13-5.15`).
 
 **(4) libc++.so sentry hook → init tid=1.** The exploit patches `/system/lib64/libc++.so` at `std::ostream::sentry::sentry()` (symbol `_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_`): **trampoline @ `+0xb4ae0`**, **shellcode @ `+0x10faa8`**, hook site `0xb4ae8`; a BTI/PAC preamble at the hook site was detected and the landing pad advanced (+4) — all printed in-run (`run8_logcat.txt:7777-7782`). The `createOrphanProcess()` double-fork makes the grandchild an orphan; **init (PID 1) reaps it**, and init's main thread (**tid=1**) then calls through the hooked function. The shellcode (`libcxx.S`):
 - verifies `getuid()==0 && gettid()==1`, returns otherwise;
@@ -356,7 +369,7 @@ This matches the documented FZG1 loader contract (`kernelsu/README.md:154-156` i
 `git diff` in `DFRoot-fzg1/` additionally shows:
 
 - `app/build.gradle.kts` — `compileSdk`/`targetSdk` 37→36 (host SDK tops at 36);
-- `gradle/libs.versions.toml` — AGP 9.4.0→9.5.0 (cached artifact; root `build.gradle.kts` still pins `version "9.4.0" apply false`, and `app/build.gradle.kts` has no explicit version — so the effective AGP is whatever the root pin resolves; the catalog bump is inert for the app module);
+- `gradle/libs.versions.toml` — AGP 9.4.0→9.5.0. This is now the **single source of truth**: the root `build.gradle.kts` no longer pins `version "9.4.0" apply false` (it applies `alias(libs.plugins.android.application) apply false`) and `app/build.gradle.kts` applies the same alias, so the **effective AGP is 9.5.0**. The old root pin made the catalog bump inert; that pin is gone;
 - `app/src/main/AndroidManifest.xml` — label "DFRoot" → **"DFRoot GZIF"**;
 - `app/src/main/jni/CMakeLists.txt` — keeps only `ko/dfroot-android13-5.15.ko` (drops the other 7 KMI entries);
 - `app/src/main/jni/exp.c` — embedded KO assets trimmed to `dfroot_ko_13_5_15`; `detect_ko_target()` now hard-codes `/vendor/lib64/AIAwbModel_v2.2.tflite`; `KO_TARGET` selection comment updated for libbase fallback (hook selection via `patch_hook` → `/system/lib64/libc++.so`, falling back to `libbase.so`);
@@ -374,7 +387,7 @@ In `DFRoot-fzg1/` (all paths relative to its root):
 
 | Path | Size / fingerprint | Role |
 |---|---|---|
-| `app/src/main/jni/ko/dfroot-android13-5.15.ko` | 13,504 B · sha256 `94f8be98…` | The android13-5.15 LKM. **Not committed** (gitignored; rebuilt by `make` / CI). Built against the DDK GKI image `ghcr.io/ylarod/ddk-min:android13-5.15-20260828`; modversions satisfied via KMI CRC; intentionally `module_init → return -ENODEV` (unload-immediately; avoids MTK mrdump callbacks). `lkm/dfroot.ko` was removed from the tree during public release hygiene (it was a duplicate of this file). |
+| `app/src/main/jni/ko/dfroot-android13-5.15.ko` | **CI/release artifact: 13,384 B · sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`**; **local `make` build: 13,504 B · sha256 `94f8be98…`** (retains `.note.gnu.build-id`) | The android13-5.15 LKM. **Not committed** (gitignored; rebuilt by the single-KMI `make` or CI). Built against the digest-pinned DDK GKI image `ghcr.io/ylarod/ddk-min:android13-5.15-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd` (top-level `make` resolves this exact reference through `scripts/ddk-image.sh`). CI runs `llvm-objcopy --strip-unneeded -R .note.gnu.build-id …`, so its KO (13,384 B) differs from the local build's (13,504 B, `94f8be98…`); both compile the same source and load on GZIF. Modversions satisfied via KMI CRC; intentionally `module_init → return -ENODEV` (unload-immediately; avoids MTK mrdump callbacks). `lkm/dfroot.ko` was removed from the tree during public release hygiene (it was a duplicate of this file). |
 | `app/src/main/jniLibs/arm64-v8a/libksud.so` | 5,101,488 B · sha256 **`aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`** · md5 `3d8e7d5a3bf315832867bf6074f71ecc` | **Samsung-patched classic KernelSU 3.3.0** loader (v3.3.0, uapi 2, code 32601), `ksud-dm3q-S9180ZHS8FZG1-kdp` copied verbatim from the payloads repo (pre-strip; APK ships the stripped variant). FZG1-validated on 5.15.189; loads 5.15.197-GZIF (vermagic rewrite via ksuinit). Embedded asset: **`android13-5.15_kernelsu.ko`** (2-part/family name — correct for this firmware). Log tag `KernelSU`. **Device-validated on GZIF (run6).** |
 | `app/src/main/jniLibs/arm64-v8a/libksudnext.so` | 4,717,248 B · sha256 **`679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`** | **Samsung-patched KernelSU-Next 3.4.2** loader (uapi 5, code 33355), `ksud-next-generic-kdp` verbatim from `support/kernelsu-generic.json` (`sha256 679504dd…`, "version 3.4.2", four KMIs). Embedded assets: **`android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`, `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`** (all 2-part/family names). Log tag `KernelSU Next`. **Device-validated on GZIF (run8).** Do **not** substitute `ksud-next-dm3q-S9180ZHS8FZF5-kdp` (`f23ede9b…`, 3.4.1) — it embeds only `android13-5.15.189_kernelsu.ko` and provably fails pre-load on this build (17:00 evidence). |
 | `app/src/main/jni/libcxx.S` | source | tid=1 shellcode + `ko_target` patch point + `/dev/df` mutex + `vendor_modprobe` exec. |
@@ -407,10 +420,10 @@ The APK is currently **dual-mode**: both loaders are inside one APK; the spinner
   - **NDK `28.2.13676358`** (i.e. **r28c**) — cited by the build metadata; AGP's default SDK at `~/Android/Sdk` (also present on this host, with `platforms/android-37.0`, NDKs r28c and r29, cmake 3.22.1) would equally resolve. `ANDROID_HOME` was unset in the shell; if reproducing elsewhere, pin `sdk.dir` in `local.properties` or export `ANDROID_HOME` to wherever android-36 lives.
   - CMake **3.22.1** + ninja at `…/cmake/3.22.1`,
   - JDK: toolchain **21** pinned in `gradle/gradle-daemon-jvm.properties` (auto-provisioned via foojay; host JDK 25 also present but the Gradle daemon JVM is 21); CI also uses temurin 21 (`.github/workflows/build.yml`),
-  - Gradle wrapper **9.7.1** (`gradle/wrapper/gradle-wrapper.properties`), AGP catalog 9.5.0 (root pin 9.4.0, §6 note).
-- `signing.properties` at repo root with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (**do not commit; it is gitignored**) — required for `assembleRelease`. Debug builds sign with `signingConfigs.getByName("debug")` — still references the same properties file (absent entries fail closed).
+  - Gradle wrapper **9.9.2** (`gradle/wrapper/gradle-wrapper.properties`, distribution SHA-256 pinned), AGP **9.5.0** declared in `gradle/libs.versions.toml` and consumed via the version-catalog alias — no root pin, so the catalog value is effective (§6 note).
+- `signing.properties` at repo root with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (**do not commit; it is gitignored**) is **optional at configuration time**. When it is absent or incomplete, a harmless placeholder is installed and the release variant and every release task are disabled/fail closed, while debug builds and JVM tests still configure; no unsigned or dummy-signed Release APK is emitted. **Debug** is always signed with the standard Android debug keystore via `signingConfigs.getByName("debug")`. For local `make`, `SIGN_PASS` / `SIGN_ALIAS` must be **exported in the environment**; command-line assignments (`make SIGN_PASS=…`) are rejected. In CI the four `KEYSTORE*` secrets exist only in the protected `release` environment and are referenced only on `v*` tag pushes; PR/branch/manual builds use no secrets and upload only an explicitly UNVERIFIED Debug APK (no signed release, no GitHub Release). The `KEYSTORE` secret/environment value must be a **base64-encoded JKS** (e.g. `base64 -w0 keystore.jks`); the CI writer decodes and validates it before publishing signing material. Signed releases use a **new key identity** — uninstall an existing installation before installing one.
 - NDK sysroot builds: `splicehelper` is compiled freestanding at CMake time (`-nodefaultlibs -nostartfiles -ffreestanding -static`).
-- LKM rebuild (**required** — the `.ko` is not committed): `cd lkm && make KDIR=<kdir> LLVM=1` (or CI workflow `.github/workflows/build.yml`, which uses `ghcr.io/ylarod/ddk-min:<kmi>-20260828` containers). Top-level `Makefile` chains podman DDK builds for all eight KMIs then `:app:assembleRelease`.
+- LKM rebuild (**required** — the `.ko` is not committed): `cd lkm && make KDIR=<kdir> LLVM=1` (or CI workflow `.github/workflows/build.yml`, which uses digest-pinned `ghcr.io/ylarod/ddk-min:<kmi>-20260828@sha256:…` containers). Top-level `Makefile` runs exactly **one** podman DDK build for `android13-5.15` (no eight-KMI loop); the image reference is derived from CI by `scripts/ddk-image.sh` and is digest-pinned, and the container runs with `--network=none`, `--cap-drop=ALL` and `no-new-privileges`, then `:app:assembleRelease`.
 - `lkm/dfroot.ko` is intentionally GPL with `module_init` returning `-ENODEV`; §4 step (5).
 
 ### 8.2 Build
@@ -425,8 +438,11 @@ The release variant passes `-DDFROOT_ANDROID_VARIANT=release` to CMake (the
 authoritative policy signal; a cached Debug label cannot weaken it). CMake
 requires `CMAKE_OBJCOPY` and verifies the final `.dfroot_ko` bytes in
 `libdfroot.so` after linking, with no skip path; tag CI repeats the check on
-the APK's native library before upload. No hashes were added or relaxed: a
-rebuilt KO must be re-pinned in a reviewed commit before a tag can ship.
+the APK's native library before upload. The byte gate rejects unknown bytes but
+**accepts the two known obsolete pins**; no hashes were added or relaxed. A
+release is withheld by policy — a reviewed re-pin, OPEN P1-08 and device
+validation — not by the hash gate alone, and passing the gate is not device
+validation.
 
 ### 8.3 Install & run (device)
 
@@ -563,14 +579,17 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 ## 12. Reproduction confidence — what is device-validated vs unverified
 
 Rows 1–20 are evidence for the **historical implementation** (old marker
-protocol, historical KO pins, old preference write path). They do not validate
-the current head of `fix/native-exploit-robustness`, which is host-tested only;
-rows 21+ describe that host evidence explicitly. A green build does not certify
-safe privileged execution. Provenance manifests are informational, not
-independent reproducible-build proofs or attestations. A release is blocked by
-the obsolete unchanged KO pins until a reviewed re-pin, by unvalidated Auto Soft
-Reboot / Start on Boot, and by the P1-08 `/data/local/tmp/.ksud-stage` trust gap
-that still needs a loader rebuild.
+protocol, historical KO pins, old preference write path). run6/run8 and all
+earlier CI runs predate the post-PR #1 rebase and do not validate the current
+head of `fix/native-exploit-robustness`, which is host-tested only; rows 21+
+describe that host evidence explicitly. A green build does not certify safe
+privileged execution. Provenance manifests are informational, not independent
+reproducible-build proofs or attestations. **The byte gate rejects unknown
+bytes but accepts the two known obsolete pins**: release is withheld by policy
+— a reviewed re-pin, unvalidated Auto Soft Reboot / Start on Boot, the OPEN P1-08
+`/data/local/tmp/.ksud-stage` trust gap needing a loader rebuild, and device
+validation — not by the hash gate alone. Passing the gate is not device
+validation.
 
 | # | Claim | Status | Evidence |
 |---|---|---|---|
@@ -598,8 +617,8 @@ that still needs a loader rebuild.
 | 22 | Nonce bound before state write, reserved-nonce `BOOTSTRAP_FAILED` on app-owned `dfbootfail`, strict `dfrecover` status, bounded/clamped recovery poll, `REBOOT_SKIPPED` on NULL/failure/timeout, cleanup once on the shared deadline, 85 s grace cap, `/proc` scan verdict | **UNVALIDATED on device** — host-only: 49 status cases, 13 proc-scan cases, 26 ELF cases, 16+14+10 device-version cases, real-file bootfail/recovery tests | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/elf_parser_test.c`, `tests/native/device_version_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 4 |
 | 23 | Write-ahead durable `PENDING` preference marker, same-key recovery, sticky fail-closed `WILDCARD`, lifecycle-scoped listeners, component-state-authoritative boot UI, rc 9 `/dev/df` gate, rc 8 uncertain-prefs gate, truthful `StatusRc` | **UNVALIDATED on device** — host-only JVM: 28 tests, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 5, PreferenceIntegrity 8, PreferencePersister 11); strict CI XML assertion | `tests/java/*.java`; `CHANGELOG.md` round 4; §17 |
 | 24 | CMake KO policy / packaged bytes / APK packaging fixture suites | **UNVALIDATED on device** — host-only: 23 ko-policy cases (clean env + simulated CI markers), 15 packaged-KO cases incl. reused-path stale evidence, 3 APK fixture cases | `tests/cmake/ko_hash_policy_test.cmake`, `tests/cmake/packaged_ko_test.cmake`, `tests/cmake/apk_packaging_gate_test.cmake` |
-| 25 | All-events suite markers and publishing-only gates | **UNVALIDATED on device** — PR runs are non-publishing (host fixtures only, no APK upload); 7/7 suite markers asserted on all events; publish gates (`apk-gate`, `provenance-identity`, `release-evidence`, `distributable-evidence`) asserted before a single upload choke point on non-PR events | `.github/workflows/build.yml`; `CHANGELOG.md` round 4 |
-| 26 | Real release APK path with unchanged obsolete pre-CFI pins | **NOT VALIDATED / FAIL-CLOSED** — no tag created; pins must be re-reviewed before a tag; provenance is informational, not attestation | `app/src/main/jni/CMakeLists.txt`; `NOTICE`; `CHANGELOG.md` round 4 |
+| 25 | Suite markers and publishing-only gates | **UNVALIDATED on device** — PR/branch/manual runs upload only an explicitly UNVERIFIED Debug APK (no signed APK, no release claim); 7/7 suite markers asserted on every non-tag CI event; publish gates (`apk-gate`, `provenance-identity`, `release-evidence`, `distributable-evidence`) asserted before a single upload choke point on the `v*` tag path | `.github/workflows/build.yml`; `CHANGELOG.md` round 4 |
+| 26 | Real release APK path with unchanged obsolete pre-CFI pins | **NOT VALIDATED on device / release withheld by policy** — no tag created by us; the byte gate rejects unknown bytes but accepts the two known obsolete pins; reviewed re-pin, P1-08 and device validation are required before a release; provenance is informational, not attestation | `app/src/main/jni/CMakeLists.txt`; `NOTICE`; `CHANGELOG.md` round 4 |
 
 Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; every other CVE/module/persistence aspect remains unverified, and the current head has no device run at all.** A successful host build does not certify safe privileged execution.
 
@@ -637,7 +656,7 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
 9. Patch 1 (`ExploitRunner.stageAssets()`) prefers bundled Samsung loaders by selected package (`com.rifsxd.ksunext`→`libksudnext.so`; else bundled classic `libksud.so`; else upstream manager APK fallback).
 10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
 11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
-12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle 9.7.1 → `./gradlew :app:assembleRelease`, `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
+12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle **9.9.2** (distribution SHA-256 pinned) with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease` (release needs complete signing material; otherwise the variant is disabled) → `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
 13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
@@ -830,17 +849,19 @@ head.
 | CMake `packaged_ko_test` | **15** cases, including reused-path stale manifest/dump invalidation |
 | CMake `apk_packaging_gate_test` | **3** cases with a harmless deterministic ZIP fixture (not a real APK) |
 | JVM `:app:testDebugUnitTest` | **28 tests, 0 failures/errors/skips** — LaunchGate 4, ListenerLifecycle 5, PreferenceIntegrity 8, PreferencePersister 11; strict CI XML assertion |
-| Suite markers (all events) | **7/7**: `marker-native`, `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`, `marker-junit` |
-| Publish gates (non-PR, pre-upload) | `marker-apk-gate` (every APK, per-APK manifest + `so_sha256` binding), `marker-provenance-identity` (required, every record), `marker-release-evidence`, `marker-distributable-evidence`, single upload choke point |
+| Suite markers (every non-tag CI event) | **7/7**: `marker-native`, `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`, `marker-junit` |
+| Publish gates (`v*` tag path, pre-upload) | `marker-apk-gate` (every APK, per-APK manifest + `so_sha256` binding), `marker-provenance-identity` (required, every record), `marker-release-evidence`, `marker-distributable-evidence`, single upload choke point |
 
-PR runs are non-publishing: host fixtures only, no APK uploaded, no release
-claim. Provenance is informational evidence, **not** an attestation or an
-independent reproducible-build proof. The real release APK path stays
-fail-closed with unchanged obsolete pre-CFI pins until a reviewed re-pin; no
-tag was created. **P1-08 remains OPEN**, and Auto Soft Reboot / Start on Boot
-remain disabled by default and unvalidated. run6/run8 validate only the
-historical implementation. **A successful build does not certify safe
-privileged execution.**
+PR/branch/manual runs upload only an explicitly UNVERIFIED Debug APK (with the
+licence/notice bundle) and make no release claim. Provenance is informational
+evidence, **not** an attestation or an independent reproducible-build proof.
+The byte gate rejects unknown bytes but **accepts the two known obsolete pins**;
+release is withheld by policy (reviewed re-pin, P1-08, device validation), not
+by the hash gate alone, and passing the gate is not device validation. No tag
+was created by us. **P1-08 remains OPEN**, and Auto Soft Reboot / Start on Boot
+remain disabled by default and unvalidated. run6/run8 and all earlier CI runs
+validate only the historical implementation. **A successful build does not
+certify safe privileged execution.**
 
 ---
 

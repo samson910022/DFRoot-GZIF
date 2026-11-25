@@ -129,41 +129,49 @@ Validation status and release gates
 -----------------------------------
 
 The run6/run8 hardware results recorded in `PORTING-GZIF.md` and `CHANGELOG.md`
-(2026-11-17) belong to the **historical implementation only**: the old
-multi-marker status protocol, the then-current `dfroot.ko` pins and the old
-preference-write path. No hardware run validates the current head of
+(2026-11-17), and every earlier CI run, belong to the **historical
+implementation only**: the old multi-marker status protocol, the then-current
+`dfroot.ko` pins and the old preference-write path. They predate the rebase
+onto the merged PR #1 head. No hardware run validates the current head of
 `fix/native-exploit-robustness` (round-4 repair, 2026-11-25); that head is
 **host-tested only and UNVALIDATED on device**, and a successful build does not
 certify safe privileged execution.
 
-- **PR CI is non-publishing.** Green PR checks run native/CMake/JVM host suites
-  with harmless fixtures only: no APK is uploaded and no release claim is made.
-  The all-events gate asserts 7/7 suite markers (`marker-native`,
-  `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`,
-  `marker-ko-ci-policy`, `marker-jvm`, `marker-junit`), and the strict JUnit XML
-  assertion requires exactly **28 tests**, 0 failures/errors/skips (LaunchGate
-  4, ListenerLifecycle 5, PreferenceIntegrity 8, PreferencePersister 11).
-- **Publishing (non-PR) gates run before upload.** Every distributable APK is
-  packaged-byte-verified with a per-APK manifest and `so_sha256` binding; every
-  provenance record gets a required identity check (git HEAD, release variant,
-  reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler
-  identity); release evidence emits one row per uploaded APK, and a
-  distributable-evidence choke point gates the single upload of the staged set.
-  Failed verifier reruns cannot leave stale success evidence: manifests and
-  section dumps are invalidated at entry.
-- **No release with obsolete KO pins.** If a DDK rebuild no longer matches the
-  two reviewed SHA-256 pins in `app/src/main/jni/CMakeLists.txt`, stop and
-  verify out of band; update pins in a reviewed commit or do not release. Skip
-  mode is forbidden in CI/release builds. Gradle passes the Android variant
+- **PR/branch/manual CI artifacts are UNVERIFIED.** Green CI runs execute the
+  native/CMake/JVM host suites as required gates and upload a
+  debug-keystore-signed Debug APK as a public downloadable Actions artifact
+  named `DFRoot-UNVERIFIED-CI`, together with this NOTICE, `GPL-3.0.txt`,
+  `LICENSE` and `THIRD_PARTY_NOTICES.md`. It carries no signed APK, no signing
+  secrets, no GitHub Release and no release claim. The all-events gate asserts
+  7/7 suite markers (`marker-native`, `marker-ko-policy`, `marker-packaged-ko`,
+  `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`,
+  `marker-junit`), and the strict JUnit XML assertion requires exactly
+  **28 tests**, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 5,
+  PreferenceIntegrity 8, PreferencePersister 11).
+- **Publishing gates run before any signed upload or publish.** On the
+  protected `v*` tag path only, every distributable APK is packaged-byte-verified
+  with a per-APK manifest and `so_sha256` binding; every provenance record gets
+  a required identity check (git HEAD, release variant, reviewed KO pin, KO
+  manifest and splicehelper binary/source digests, compiler identity); release
+  evidence emits one row per uploaded APK, and a distributable-evidence choke
+  point gates the signed artifact upload before `publish`. Failed verifier
+  reruns cannot leave stale success evidence: manifests and section dumps are
+  invalidated at entry.
+- **KO pins do not by themselves block a release.** The byte gate rejects
+  unknown bytes but **accepts the two known obsolete pins** in
+  `app/src/main/jni/CMakeLists.txt`. Release is withheld by **policy** — a
+  reviewed re-pin, the OPEN P1-08 staging gate and device validation — not by
+  the hash gate alone; passing the gate is not device validation. Skip mode is
+  forbidden in CI/release builds. Gradle passes the Android variant
   (`release` / `debug`) as the authoritative native policy signal.
 - **Final packaged bytes (no skip).** The KO is linked into a dedicated
   `.dfroot_ko` section; `verify_packaged_ko.cmake` dumps it from
   `libdfroot.so` with objcopy and compares it to the SAME reviewed pins and
   expected sizes. Configure fails without `CMAKE_OBJCOPY`; the gate has no
-  skip option and writes a manifest only on success. Every publishing (non-PR)
-  event repeats it on the real APK before upload. **This real gate is blocked
-  until KO re-pin**: pins are unchanged and the final embedded bytes must be
-  reviewed and deliberately re-pinned before a tag can ship; no tag was created.
+  skip option and writes a manifest only on success. The protected tag path
+  repeats it on every distributable APK before upload. It accepts the known
+  obsolete pins, so release is withheld by policy (reviewed re-pin, P1-08,
+  device validation) rather than by the gate alone. No tag was created by us.
   Host-only fixture tests are not device validation.
 - **Provenance is evidence, not proof or attestation.** The build/provenance
   manifests record hashes, toolchain identity, git HEAD, Android variant and
@@ -171,11 +179,27 @@ certify safe privileged execution.
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
 - **All CI suites are asserted.** Every native/CMake/JVM suite writes a marker
-  that CI checks (7/7 on all events), the JUnit XML must report **28 tests** with
+  that CI checks (7/7 on every non-tag CI event), the JUnit XML must report **28 tests** with
   0 failures/errors/skips, and a release-evidence step cross-checks git SHA,
   skip OFF in every CMakeCache, the complete set of verified KO and packaged
-  manifests with matching hashes, and every staged APK hash. Only the
-  informational provenance uploads remain best-effort.
+  manifests with matching hashes, and every staged APK hash. The informational
+  provenance upload uses `if-no-files-found: error`; no required gate uses
+  `continue-on-error`.
+
+- **PR #1 build/signing baseline (integrated).** Toolchain: Gradle wrapper
+  **9.9.2** (distribution SHA-256 pinned), AGP **9.5.0** declared once in
+  `gradle/libs.versions.toml` via the version-catalog alias with no root
+  `build.gradle.kts` pin, JDK 21, SDK 36, NDK r28c. The single-KMI `make` uses
+  the digest-pinned DDK image resolved from CI by `scripts/ddk-image.sh`, with
+  `SIGN_PASS`/`SIGN_ALIAS` accepted only from the environment (command-line
+  assignments are rejected). Signed releases use a **new key identity**:
+  uninstall an existing DFRoot GZIF installation before installing one; the
+  UNVERIFIED CI Debug artifact cannot update a signed install either.
+
+> **Post-rebase integration.** PR #1 is now merged into the base; PR #3 was
+> rebased onto it. run6/run8 and all prior CI runs are historical and do not
+> validate the rebased head. No tag was created by us.
+
 - **App-owned channels and durable preference transaction (host-proven).**
   Bootstrap failures before a run identity exists publish a reserved-nonce
   `BOOTSTRAP_FAILED` token on the separate `dfbootfail` channel (observable
