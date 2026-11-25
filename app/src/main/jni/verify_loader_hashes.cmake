@@ -11,9 +11,12 @@
 #         -P verify_loader_hashes.cmake
 #
 # This gate is separate from, and does not touch, the KO pin gates. There is
-# NO skip option and no environment override: any failure is FATAL and no
-# verified manifest survives it (the manifest is removed at entry, before any
-# check, so a reused output path cannot carry a previous success forward).
+# NO skip option and no environment override: any failure is FATAL. Both output
+# paths (manifest and stamp) are INVALIDATED at entry, before ANY validation,
+# whenever they are supplied: a previous success at a reused path can never
+# survive a later failure as stale "status: verified" evidence. The manifest
+# and stamp are written only after a fully successful run (failure is
+# fail-closed: no verified evidence, non-zero exit).
 #
 # Both loaders are committed binaries whose exact bytes were rebuilt from the
 # P1-08-patched payloads source and re-reviewed. A size alone can never make an
@@ -30,16 +33,22 @@ set(REQUIRED_ARGS
     LOADER_KSUD_SHA256 LOADER_KSUD_SIZE
     LOADER_KSUDNEXT_SHA256 LOADER_KSUDNEXT_SIZE
     LOADER_VERIFY_STAMP LOADER_VERIFY_MANIFEST)
+# Entry invalidation must happen BEFORE any validation, including the required
+# argument check below. Anything at either output path belongs to a prior run.
+# Each removal is guarded so an omitted/empty output path fails unambiguously
+# via the required-argument check below and never calls file(REMOVE "").
+if(DEFINED LOADER_VERIFY_MANIFEST AND NOT "${LOADER_VERIFY_MANIFEST}" STREQUAL "")
+    file(REMOVE "${LOADER_VERIFY_MANIFEST}")
+endif()
+if(DEFINED LOADER_VERIFY_STAMP AND NOT "${LOADER_VERIFY_STAMP}" STREQUAL "")
+    file(REMOVE "${LOADER_VERIFY_STAMP}")
+endif()
+
 foreach(required IN LISTS REQUIRED_ARGS)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "verify_loader_hashes: missing -D${required}=... argument")
     endif()
 endforeach()
-
-# Fail-closed reused output path: drop any previously verified evidence before
-# running any check. Only a fully successful run below may write it again.
-file(REMOVE "${LOADER_VERIFY_MANIFEST}")
-file(REMOVE "${LOADER_VERIFY_STAMP}")
 
 get_filename_component(verify_script "${CMAKE_CURRENT_LIST_FILE}" ABSOLUTE)
 
@@ -134,20 +143,13 @@ check_loader("KSUDNEXT" "libksudnext.so" "${LOADER_KSUDNEXT_FILE}"
 
 # Stable stamp: identical verified inputs produce byte-identical content so an
 # always-running force target does not needlessly invalidate downstream work.
+# Written unconditionally on success: entry invalidation above has already
+# removed this invocation's stamp, so there is no stale file to compare against.
 set(stamp_text
     "verified ${ksud_hash} ${ksud_size} ${ksudnext_hash} ${ksudnext_size}\n")
-set(write_stamp TRUE)
-if(EXISTS "${LOADER_VERIFY_STAMP}")
-    file(READ "${LOADER_VERIFY_STAMP}" old_stamp)
-    if(old_stamp STREQUAL stamp_text)
-        set(write_stamp FALSE)
-    endif()
-endif()
-if(write_stamp)
-    get_filename_component(stamp_dir "${LOADER_VERIFY_STAMP}" DIRECTORY)
-    file(MAKE_DIRECTORY "${stamp_dir}")
-    file(WRITE "${LOADER_VERIFY_STAMP}" "${stamp_text}")
-endif()
+get_filename_component(stamp_dir "${LOADER_VERIFY_STAMP}" DIRECTORY)
+file(MAKE_DIRECTORY "${stamp_dir}")
+file(WRITE "${LOADER_VERIFY_STAMP}" "${stamp_text}")
 
 # The manifest exists ONLY after both artifacts passed. It is informational
 # evidence of this check, not an independent reproducible-build proof.

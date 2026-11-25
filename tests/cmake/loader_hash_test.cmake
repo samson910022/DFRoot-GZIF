@@ -7,13 +7,17 @@
 # plus copies of the committed loader blobs. It does not execute any loader,
 # needs no Android toolchain or device, and makes no release claim.
 #
-# Cases (5):
+# Cases (16, including subcases 6a/6b/6c/6d/6e/6f/6g/6h/6i/6j):
 #   1  real pins from CMakeLists.txt verify copies of both bundled loaders
 #   2  wrong SHA-256 pin fails with a hash-mismatch reason, no manifest
 #   3  wrong size pin fails with a size-mismatch reason, no manifest
 #   4  missing loader file fails with a not-found reason, no manifest
 #   5  reused output path: success writes a verified manifest; a following
 #      failure leaves neither that manifest nor a verified stamp behind
+#   6  argument-validation failures at ONE reused output-path pair invalidate
+#      BOTH prior records before any validation (pre + 6a-6h); an OMITTED or
+#      EXPLICITLY EMPTY output path (6f/6g/6i/6j) is left untouched and is never
+#      named in the error message
 
 cmake_minimum_required(VERSION 3.22)
 
@@ -89,6 +93,31 @@ function(expect_failure case_name reason_regex ksud ksudnext h1 s1 h2 s2 stamp m
     else()
         report_case("${case_name}" "failure matching /${reason_regex}/" FALSE "${out}" "${err}")
     endif()
+endfunction()
+
+# Like run_verifier, but omit the named -D entirely instead of supplying an
+# empty value. Used for the missing-output-path cases: an undefined argument
+# must fail with "missing -D..." and must never name or touch a supplied path.
+function(run_verifier_omit rc_var out_var err_var omitted ksud ksudnext h1 s1 h2 s2 stamp manifest)
+    set(args
+        "-DLOADER_KSUD_FILE=${ksud}"
+        "-DLOADER_KSUDNEXT_FILE=${ksudnext}"
+        "-DLOADER_KSUD_SHA256=${h1}"
+        "-DLOADER_KSUD_SIZE=${s1}"
+        "-DLOADER_KSUDNEXT_SHA256=${h2}"
+        "-DLOADER_KSUDNEXT_SIZE=${s2}")
+    if(NOT omitted STREQUAL "LOADER_VERIFY_STAMP")
+        list(APPEND args "-DLOADER_VERIFY_STAMP=${stamp}")
+    endif()
+    if(NOT omitted STREQUAL "LOADER_VERIFY_MANIFEST")
+        list(APPEND args "-DLOADER_VERIFY_MANIFEST=${manifest}")
+    endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" ${args} -P "${VERIFY_SCRIPT}"
+        RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+    set(${rc_var} "${rc}" PARENT_SCOPE)
+    set(${out_var} "${out}" PARENT_SCOPE)
+    set(${err_var} "${err}" PARENT_SCOPE)
 endfunction()
 
 # --- Case 1: real, reviewed pins verify copies of the committed loaders. ---
@@ -203,4 +232,183 @@ if(EXISTS "${REUSED_STAMP}")
     message(FATAL_ERROR "FAIL: case 5 left a verified stamp at the reused path after failure")
 endif()
 
-message(STATUS "loader_hash_test: all 5 cases passed")
+# --- Case 6 (P2-13): argument-validation failures at ONE reused output pair. ---
+# Entry invalidation must precede required-argument validation: every validation
+# failure below erases BOTH prior records. An OMITTED output path has no value to
+# invalidate, so it must be left untouched and never named in the error.
+set(ARG_DIR "${WORK}/argument-validation")
+file(MAKE_DIRECTORY "${ARG_DIR}")
+set(ARG_STAMP "${ARG_DIR}/reused.verified")
+set(ARG_MANIFEST "${ARG_DIR}/reused.manifest")
+
+function(require_verified_records case_name stamp manifest)
+    if(NOT EXISTS "${manifest}" OR NOT EXISTS "${stamp}")
+        message(FATAL_ERROR
+            "FAIL: ${case_name} did not write both manifest and stamp")
+    endif()
+    file(READ "${manifest}" records_manifest)
+    if(NOT records_manifest MATCHES "status: verified")
+        message(FATAL_ERROR
+            "FAIL: ${case_name} manifest not verified:\n${records_manifest}")
+    endif()
+    file(READ "${stamp}" records_stamp)
+    if(NOT records_stamp MATCHES "^verified [0-9a-f]+ [0-9]+ [0-9a-f]+ [0-9]+")
+        message(FATAL_ERROR
+            "FAIL: ${case_name} stamp not a verified record:\n${records_stamp}")
+    endif()
+endfunction()
+
+function(require_no_records case_name stamp manifest)
+    if(EXISTS "${manifest}")
+        message(FATAL_ERROR
+            "FAIL: ${case_name} left a verified manifest at the reused path")
+    endif()
+    if(EXISTS "${stamp}")
+        message(FATAL_ERROR
+            "FAIL: ${case_name} left a verified stamp at the reused path")
+    endif()
+endfunction()
+
+# 6 pre: a valid run establishes both records at the reused path pair.
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+if(rc EQUAL 0)
+    report_case("06 pre success at reused argument-validation path" "success" TRUE "${out}" "${err}")
+else()
+    report_case("06 pre success at reused argument-validation path" "success" FALSE "${out}" "${err}")
+endif()
+require_verified_records("06 pre" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6a: a missing INPUT PATH fails with the specific reason and erases both records.
+expect_failure("06a missing input path invalidates stale evidence"
+    "missing -DLOADER_KSUD_FILE="
+    "" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+require_no_records("06a" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6b: re-establish both records at the same path before the next failure.
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+if(rc EQUAL 0)
+    report_case("06b fresh success before next validation failure" "success" TRUE "${out}" "${err}")
+else()
+    report_case("06b fresh success before next validation failure" "success" FALSE "${out}" "${err}")
+endif()
+require_verified_records("06b" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6c: a missing HASH PIN fails with the specific reason and erases both records.
+expect_failure("06c missing hash pin invalidates stale evidence"
+    "missing -DLOADER_KSUD_SHA256="
+    "${FIX_A}" "${FIX_B}" "" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+require_no_records("06c" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6d: re-establish both records before the last validation failure.
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+if(rc EQUAL 0)
+    report_case("06d fresh success before next validation failure" "success" TRUE "${out}" "${err}")
+else()
+    report_case("06d fresh success before next validation failure" "success" FALSE "${out}" "${err}")
+endif()
+require_verified_records("06d" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6e: a missing SIZE PIN fails with the specific reason and erases both records.
+expect_failure("06e missing size pin invalidates stale evidence"
+    "missing -DLOADER_KSUD_SIZE="
+    "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+require_no_records("06e" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6f: OMIT the manifest -D entirely and pre-seed stale content at the real path.
+# The missing argument must fail unambiguously, name no path, and leave that
+# unsupplied path untouched.
+file(WRITE "${ARG_MANIFEST}" "status: verified\nstale fixture manifest evidence\n")
+run_verifier_omit(rc out err "LOADER_VERIFY_MANIFEST"
+    "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}"
+    "${ARG_STAMP}" "${ARG_MANIFEST}")
+set(combined "${out}\n${err}")
+string(REGEX REPLACE "[\r\n]+" " " combined "${combined}")
+string(REGEX REPLACE "[ \t]+" " " combined "${combined}")
+if(NOT rc EQUAL 0 AND combined MATCHES "missing -DLOADER_VERIFY_MANIFEST=" AND
+   NOT combined MATCHES "${ARG_MANIFEST}" AND
+   NOT combined MATCHES "${ARG_STAMP}")
+    report_case("06f missing LOADER_VERIFY_MANIFEST fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_MANIFEST= with no output path" TRUE "${out}" "${err}")
+else()
+    report_case("06f missing LOADER_VERIFY_MANIFEST fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_MANIFEST= with no output path" FALSE "${out}" "${err}")
+endif()
+file(READ "${ARG_MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "stale fixture manifest evidence")
+    message(FATAL_ERROR "FAIL: case 6f touched a path it was not given")
+endif()
+
+# 6g: OMIT the stamp -D entirely and pre-seed stale content at the real path.
+file(WRITE "${ARG_STAMP}" "status: verified\nstale fixture stamp evidence\n")
+run_verifier_omit(rc out err "LOADER_VERIFY_STAMP"
+    "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}"
+    "${ARG_STAMP}" "${ARG_MANIFEST}")
+set(combined "${out}\n${err}")
+string(REGEX REPLACE "[\r\n]+" " " combined "${combined}")
+string(REGEX REPLACE "[ \t]+" " " combined "${combined}")
+if(NOT rc EQUAL 0 AND combined MATCHES "missing -DLOADER_VERIFY_STAMP=" AND
+   NOT combined MATCHES "${ARG_STAMP}" AND
+   NOT combined MATCHES "${ARG_MANIFEST}")
+    report_case("06g missing LOADER_VERIFY_STAMP fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_STAMP= with no output path" TRUE "${out}" "${err}")
+else()
+    report_case("06g missing LOADER_VERIFY_STAMP fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_STAMP= with no output path" FALSE "${out}" "${err}")
+endif()
+file(READ "${ARG_STAMP}" stamp_text)
+if(NOT stamp_text MATCHES "stale fixture stamp evidence")
+    message(FATAL_ERROR "FAIL: case 6g touched a path it was not given")
+endif()
+
+# 6h: a clean run at the reused path pair regenerates BOTH fresh records.
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "${ARG_MANIFEST}")
+if(rc EQUAL 0)
+    report_case("06h fresh success regenerates both records at reused path" "success" TRUE "${out}" "${err}")
+else()
+    report_case("06h fresh success regenerates both records at reused path" "success" FALSE "${out}" "${err}")
+endif()
+require_verified_records("06h" "${ARG_STAMP}" "${ARG_MANIFEST}")
+
+# 6i: an EXPLICITLY EMPTY manifest value (defined but "-D...=") exercises the
+# NOT STREQUAL "" half of the entry guard. No file(REMOVE "") may run, the
+# error must name no path, and the real manifest path (not supplied) stays put.
+file(WRITE "${ARG_MANIFEST}" "status: verified\nstale empty-value manifest evidence\n")
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "${ARG_STAMP}" "")
+set(combined "${out}\n${err}")
+string(REGEX REPLACE "[\r\n]+" " " combined "${combined}")
+string(REGEX REPLACE "[ \t]+" " " combined "${combined}")
+if(NOT rc EQUAL 0 AND combined MATCHES "missing -DLOADER_VERIFY_MANIFEST=" AND
+   NOT combined MATCHES "${ARG_MANIFEST}" AND
+   NOT combined MATCHES "${ARG_STAMP}")
+    report_case("06i empty manifest value fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_MANIFEST= with empty value" TRUE "${out}" "${err}")
+else()
+    report_case("06i empty manifest value fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_MANIFEST= with empty value" FALSE "${out}" "${err}")
+endif()
+file(READ "${ARG_MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "stale empty-value manifest evidence")
+    message(FATAL_ERROR "FAIL: case 6i touched a path it was not given")
+endif()
+
+# 6j: symmetric EXPLICITLY EMPTY stamp value exercises the same guard half.
+file(WRITE "${ARG_STAMP}" "status: verified\nstale empty-value stamp evidence\n")
+run_verifier(rc out err "${FIX_A}" "${FIX_B}" "${H_FIX_A}" "${S_FIX_A}" "${H_FIX_B}" "${S_FIX_B}" "" "${ARG_MANIFEST}")
+set(combined "${out}\n${err}")
+string(REGEX REPLACE "[\r\n]+" " " combined "${combined}")
+string(REGEX REPLACE "[ \t]+" " " combined "${combined}")
+if(NOT rc EQUAL 0 AND combined MATCHES "missing -DLOADER_VERIFY_STAMP=" AND
+   NOT combined MATCHES "${ARG_STAMP}" AND
+   NOT combined MATCHES "${ARG_MANIFEST}")
+    report_case("06j empty stamp value fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_STAMP= with empty value" TRUE "${out}" "${err}")
+else()
+    report_case("06j empty stamp value fails unambiguously (no path)"
+        "missing -DLOADER_VERIFY_STAMP= with empty value" FALSE "${out}" "${err}")
+endif()
+file(READ "${ARG_STAMP}" stamp_text)
+if(NOT stamp_text MATCHES "stale empty-value stamp evidence")
+    message(FATAL_ERROR "FAIL: case 6j touched a path it was not given")
+endif()
+
+message(STATUS "loader_hash_test: all 16 cases passed")
