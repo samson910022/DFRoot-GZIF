@@ -202,8 +202,10 @@ add_custom_target(ko_sha256_check DEPENDS "${KO_VERIFY_STAMP}")
 set(LOADER_KSUD_FILE "${JNI_DIR}/../jniLibs/arm64-v8a/libksud.so")
 set(LOADER_KSUDNEXT_FILE "${JNI_DIR}/../jniLibs/arm64-v8a/libksudnext.so")
 # Reviewed P1-08 rebuilds, from payloads branch fix/p1-08-root-owned-staging
-# (commit 891e897). CI evidence: classic pair run 45674540939, Next generic
-# run 45674545588. Adding/changing a pin requires a reviewed source rebuild and
+# (commit 891e897). CI evidence: classic pair run 45674540939 (failed overall
+# in its separate generic job; its successful pair-ksud job produced the pinned
+# classic bytes), Next generic run 45674545588 (succeeded overall).
+# Adding/changing a pin requires a reviewed source rebuild and
 # documentation update -- never an automatic re-pin or a relaxed check.
 set(LOADER_KSUD_SHA256 "731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4")
 set(LOADER_KSUD_SIZE 5127584)

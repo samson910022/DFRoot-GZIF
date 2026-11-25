@@ -15,8 +15,8 @@
 
 > [!WARNING]
 > **Current head is UNVALIDATED on device.** The current head of
-> `fix/native-exploit-robustness` (`2b59684`, round-8 P1-08 integration,
-> 2026-11-26, rebased onto the merged PR #1 head) — single nonce-bound `/dev/dffinal`
+> `fix/native-exploit-robustness` (`413a5cb`; producer `2b59684`, round-8 P1-08
+> integration, 2026-11-26, rebased onto the merged PR #1 head) — single nonce-bound `/dev/dffinal`
 > outcome, app-owned bootfail/recovery channels, write-ahead preference
 > transaction, lifecycle-safe listeners, persistent `UNKNOWN` boot-state UI,
 > KO hash policy, build provenance and packaging gates — is **host-tested
@@ -73,7 +73,10 @@
 > validated for owner/mode/non-empty content before promotion to
 > `/data/adb/ksud`); DFRoot's producer at `2b59684` stages to that exact path.
 > Host source-build evidence: CI run **45674540939** (classic pair,
-> `android13-5.15`) and **45674545588** (Next generic, four KMIs). Current
+> `android13-5.15`) and **45674545588** (Next generic, four KMIs). Run
+> 45674540939 **failed overall** — only its successful `pair ksud` job produced
+> the integrated classic artifact; its separate generic-ksud job failed for a
+> missing no-patch-text module. Run 45674545588 succeeded overall. Current
 > bundled bytes, enforced by `verify_loader_hashes.cmake` (sha256 **and**
 > size, with no skip option):
 >
@@ -95,8 +98,8 @@
 - **CVE-2026-43499 is patched** in GZIF (binary-verified) — do not port it. **CVE-2026-98260 is present but unported** (no 5.15/dm3q work exists). **CVE-2026-43284 is open** and is the live route.
 - Stock vanilla KernelSU classic v3.3.0 (`me.weishu.kernelsu`) and stock vanilla KernelSU-Next v3.4.2 (`com.rifsxd.ksunext`) **kernel-panicked this device** inside/around `init_module()` on 2026-11-17 (two hardware runs). The panics were the stock-vs-Samsung RKP/KDP/DEFEX class of failure.
 - The port works because DFRoot-fzg1 now **bundles and prefers two Samsung-patched Samsung loaders** from the companion payloads repo instead of stock ones:
-  - `app/src/main/jniLibs/arm64-v8a/libksud.so` — classic FZG1-validated Samsung-patched ksud **3.3.0** (sha256 `aab76943…`),
-  - `app/src/main/jniLibs/arm64-v8a/libksudnext.so` — Next **3.4.2** generic Samsung-patched ksud (sha256 `679504dd…`).
+  - `app/src/main/jniLibs/arm64-v8a/libksud.so` — classic FZG1-validated Samsung-patched ksud **3.3.0**, P1-08 rebuilt (sha256 `731c3fa1…`, 5,127,584 B),
+  - `app/src/main/jniLibs/arm64-v8a/libksudnext.so` — Next **3.4.2** generic Samsung-patched ksud, P1-08 rebuilt (sha256 `7f28f1fb…`, 4,728,320 B).
 - End-to-end hardware validation was achieved **twice** on the same firmware build on 2026-11-17: **run6** (16:49, classic loader, `ksud start: SUCCESS`, `su -c id` → `uid=0(root) … context=u:r:ksu:s0`, SELinux **Enforcing**, `su -v` = `3.3.0:KernelSU`) and **run8** (17:53, Next loader, identical verification with `su -v` = `3.4.2:KernelSU`).
 - Root is **volatile** (RAM-only). Every reboot wipes it. **Start on Boot / Auto Soft Reboot are not validated — do not enable them on this model.**
 
@@ -172,7 +175,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **`adopt_zygote_env()`** — clones zygote64's `environ` (SELinux/label propagation for later children);
 - **`set_partitions_ro()`** — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` pref set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
-- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). **Historical (run4/run6/run8) loaders:** the stage was `/data/local/tmp/.ksud-stage`, baked into those binaries' self-staging constant. **Current head (`2b59684`):** the rebuilt loaders consume `/data/adb/.ksud-stage` inside root-owned `/data/adb` (0700) and validate it by fd before promotion; bootstrap stages to that exact path. Then execs the staged daemon's **`late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
+- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). **Historical (run4/run6/run8) loaders:** the stage was `/data/local/tmp/.ksud-stage`, baked into those binaries' self-staging constant. **Current head (`413a5cb`; producer `2b59684`):** the rebuilt loaders consume `/data/adb/.ksud-stage` inside root-owned `/data/adb` (0700) and validate it by fd before promotion; bootstrap stages to that exact path. Then execs the staged daemon's **`late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
 - `exp.c` first writes a fresh 128-bit run nonce to
   `/data/user_de/0/df.root/files/dfinv` (atomic 0644 replace + fsync); bootstrap
   strictly reads it at startup. A missing/malformed nonce is a bootstrap
@@ -710,7 +713,7 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
 8. run8 validated the dual-mode APK with KernelSU-Next selected (`su -v` = `3.4.2:KernelSU`, Enforcing). Both KSU lineages now hardware-proven; both manager APKs present on the unit.
 9. Patch 1 (`ExploitRunner.stageAssets()`) prefers bundled Samsung loaders by selected package (`com.rifsxd.ksunext`→`libksudnext.so`; else bundled classic `libksud.so`; else upstream manager APK fallback).
 10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
-11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
+11. Load-bearing artifacts (historical run6/run8 chain): `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (then `aab76943…`/`679504dd…`; current bundles are the P1-08 rebuilds `731c3fa1…`/`7f28f1fb…` — see §6 and the round-8 note), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle **9.9.2** (distribution SHA-256 pinned) with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease` (release needs complete signing material; otherwise the variant is disabled) → `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
 13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
@@ -1009,7 +1012,7 @@ not certify safe privileged execution.**
 ## 19. Round-6 repair (2026-11-25) — historical round-6 head (`d72838d`)
 
 > **Historical section.** It superseded §18 for the round-6 head only. The
-> current head (`2b59684`) is covered by the round-8/P1-08 note at the top of
+> current head (`413a5cb`; producer `2b59684`) is covered by the round-8/P1-08 note at the top of
 > this file and by `CHANGELOG.md` round 8.
 
 This section superseded §18 for the round-6 head of

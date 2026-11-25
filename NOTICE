@@ -27,7 +27,9 @@ This fork ships two prebuilt executables under
 payloads-repository artifacts: both were rebuilt from the P1-08-patched source
 on payloads branch `fix/p1-08-root-owned-staging` (commit `891e897`) to consume
 a root-owned stage at `/data/adb/.ksud-stage` (see CHANGELOG.md round 8). The
-rebuilds are host-build-attested (CI runs 45674540939 and 45674545588) but are
+rebuilds are host-build-attested (classic pair from the successful `pair ksud`
+job of CI run 45674540939, which failed overall in its separate generic job;
+Next generic from CI run 45674545588, which succeeded overall) but are
 **not** device-validated. Build-time sha256 + size pins are enforced by
 `app/src/main/jni/verify_loader_hashes.cmake`:
 

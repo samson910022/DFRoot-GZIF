@@ -3,7 +3,8 @@
 ## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; gate still OPEN
 
 This section is authoritative for the current head of
-`fix/native-exploit-robustness` (`2b59684`). Every earlier section, including
+`fix/native-exploit-robustness` (`413a5cb`; producer change `2b59684`, loader
+integration `413a5cb`). Every earlier section, including
 round 6, is **historical** and describes earlier heads only. All evidence in
 this section is **host-only**; there was no device run, no tag and no release.
 
@@ -26,8 +27,12 @@ documentation or Java-side gating:
   together and the full chain must be validated on a device.
 - Source-build evidence (host builds of the patched loaders): CI run
   **45674540939** (classic pair, `android13-5.15`) and CI run **45674545588**
-  (Next generic, four KMIs). These runs attest the loader rebuilds only; they
-  are not device validation and not certification of this head.
+  (Next generic, four KMIs). Run 45674540939 **failed overall**: only its
+  successful `pair ksud` job produced the integrated classic artifact; its
+  separate generic-ksud job failed because no no-patch-text module was
+  available. Run 45674545588 succeeded overall. These runs attest the loader
+  rebuilds only; they are not device validation and not certification of this
+  head.
 
 Rebuilt artifacts now bundled under `app/src/main/jniLibs/arm64-v8a/`:
 
