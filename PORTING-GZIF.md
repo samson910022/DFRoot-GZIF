@@ -23,8 +23,10 @@
 > hardware gates that remain open. **§17** records the R2-19/R2-04 recovery and
 > wording phase; **§18** is the authoritative consolidated record of the third
 > repair round (rebase onto PR #1, CI integration, R2-12/13/14/16/17/18/19 and
-> the R2-04 caveat, with current counts and gates). No device or privileged
-> validation was done for any 2026-11-25 revision.
+> the R2-04 caveat, with current counts and gates); **§19** records the fourth
+> repair round and **§20** is a short dated note on the sixth repair round's
+> host-side bounded UI work. No device or privileged validation was done for
+> any 2026-11-25/2026-11-26 repair revision.
 
 ---
 
@@ -1029,6 +1031,27 @@ owner-facing recovery UI (app-data reset is NOT safe recovery), `BOOT_COUNT`
 diagnostic only, and the R4.4/R4.5/R4.8 optional residuals recorded in
 `CHANGELOG.md`. A fresh full suite/CI green run and the four final
 comprehensive reviews are the main agent's gates.
+
+---
+
+## 20. Sixth repair round (R6.1–R6.4, 2026-11-26) — host-side bounded UI note
+
+Short dated note only; **§5, §11, §12 and §14 remain the 2026-11-17 historical
+hardware-validation ledger and are unchanged by this round.** Final local HEAD
+`9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`, R6.4 `9e1aff7`) on
+top of R5 code head `33980e2` / docs head `689f378`, addressing Re-review 5.
+R6 closes the remaining **R2-17** residuals in reviewed host scope and reduces
+**R2-18** to bounded host-only responsiveness evidence: a 25-tick / 200 ms
+read-only outcome watch, a 200 ms monotonic flush deadline with a three-deferral
+cap and a post-winner sweep, owned express 16 / general host 64 bounded
+executors, and a four-slot terminal-only render replay queue. **R2-14 and R2-16
+remain SCOPED / OPEN gates — not closed and not proved safe.** Device
+foreground-service-grace timing remains an OS/hardware gate; the host evidence
+is **not** a device ANR proof and no green host CI result implies device safety.
+Phase commits, focused verification counts, fix loops and the honest residual
+list are in `README.md` and `CHANGELOG.md`; the final comprehensive reviews at
+this head are the main agent's unchecked gate. No device, ADB, payload,
+privileged-container, crash/power-loss or APK work was done for this round.
 
 ---
 

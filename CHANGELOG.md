@@ -1,5 +1,62 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
+
+Authoritative record of the **sixth repair round** (final local HEAD
+`9e1aff7`, on top of the last pre-R6 commit `fd1ccd8` (R5 code `33980e2` / docs `689f378`). It addresses
+Re-review 5. It closes the remaining **R2-17** residuals (visible-Activity and
+eviction/absence halves) and reduces **R2-18** to bounded **host-only**
+responsiveness evidence. **R2-14 and R2-16 remain SCOPED / OPEN gates — NOT
+closed and NOT proved safe.** All evidence below is focused host-only tests plus
+independent static reviews; no device, ADB, payload, privileged-container,
+crash/power-loss or APK-assembly work, no fresh full-suite run, no device-ANR
+proof and no CI-green claim. Older R6.x notes below are historical phase
+records; the counts and gate states in this section are current.
+
+### Phase table — commit (verified via `git log`), finding, fix loop, focused verification, review outcome
+
+| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
+|---|---|---|---|
+| R6.1 `13ee65fe` | R2-17 (visible-Activity half) | Per-Activity main-looper read-only outcome watch armed on start requests, 25 ticks 200 ms apart, cancelled on clear/stop/destroy; one explicit UI-only "outcome unconfirmed" status on cap exhaustion with no record. No fabricated outcome, replay, retry, cancel, clear or authorization; run control stays disabled. **46 focused `MainActivityTest` cases, 0 failures.** | Two independent reviews APPROVED (correctness/lifecycle, test quality), no Required/Critical. Optional residuals: watch budget is per visible arming session, and `onPause` does not explicitly cancel (ticks become no-ops while paused). |
+| R6.2 `731e88c3` | R2-17 (eviction/absence half) | Documented that a `null` ledger lookup — including eviction of the Activity's own record from the bounded 32-entry LRU after a long absence — means UNCONFIRMED, never admission/rejection/completion proof. Comment-stripped diff identical: ledger 32, reporter 64, separate `outcomeLock` and strict `lock -> outcomeLock` order unchanged. **108 focused tests, 0 failures.** | Two independent reviews APPROVED; one optional vacuous replay assertion strengthened and re-reviewed RESOLVED. |
+| R6.3 `cdf76e7e` | R2-18 (unbounded foreground-flush wait) | Replaced the deadline-free flush wait with a 200 ms monotonic deadline; main-thread contenders never wait and queue one bounded host re-decision; expiry/interruption log honestly and claim no `stopForeground`/`stopSelf` completion; re-decisions capped at three, singly queued and destroy-aware; a post-winner host-only sweep retires a start ID resolved during the winner's guarded phase after the deferral cap is spent, without spending that budget or interrupting the winner. **115 focused tests, 0 failures; post-fix re-run also green.** | Correctness review found one Required stranding gap → post-winner sweep added, re-reviewed RESOLVED; test-quality APPROVE with source-guard hardening applied. No device ANR proof. |
+| R6.4 `9e1aff73` | R2-18(b) (main-thread foreground platform calls) | Owned bounded daemon executors: **express** 16-slot AbortPolicy worker for main-thread foreground attach/start handling, **general host** 64-slot worker for observer renders and the whole winning guarded flush phase; flush guard released in the posted task's `finally`. A main-thread start during a held flush offloads whole handling and returns `START_NOT_STICKY`; a refused express post registers/resolves that start ID's own `REJECTED` + one `stopSelf` (short caller-side bookkeeping only); refused TERMINAL renders enter a **four-slot terminal-only replay queue** drained by both the deferred re-decision and the post-winner sweep, with non-terminal refusals/overflow dropped honestly. **124 focused tests initially, then 127 after the second fix loop (47 + 32 + 48 classes), 0 failures.** | Architecture review found three Required items (main-thread `startsLock` wait, render-post strand, FGS attach priority) → fixed; both reviewers then found a guard-refusal start-ID leak and a render-slot residual → fixed again and re-reviewed RESOLVED by both. Host-only evidence, not a device ANR proof. |
+
+### R6 final gate state, bounded mechanisms and residual optional items
+
+- **R2-17 — closed in the reviewed host scope.** Reconciliation reads only the
+  Activity's own ledger record, is independent of best-effort observer
+  delivery, and treats absent/evicted records as explicit uncertainty. Nothing
+  is replayed, retried, cancelled or authorized from an unconfirmed UI state.
+- **R2-18 — reduced to bounded host-scope responsiveness, NOT a device ANR
+  proof.** The two bounded mechanisms are the 25-tick / 200 ms read-only outcome
+  watch and the 200 ms flush deadline + three-deferral cap + post-winner sweep,
+  with express 16 / host 64 owned executors and the four-slot terminal-only
+  render replay. Device foreground-service-grace timing remains an OS/hardware
+  gate that host fixtures cannot prove.
+- **R2-14 — OPEN gate, NOT closed or proved safe.** The publication observation
+  window and the OPEN hardware/OS gate are unchanged; no new device or
+  crash/power-loss evidence was produced in R6.
+- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization
+  read and the external `PackageManager` OFF write remain non-atomic; no
+  unattended action or post-start revocation was added.
+- **R5 residuals superseded, new residuals recorded, not silently accepted.**
+  R5.3 reporter-overflow UX and R5.4 interrupted-wait / ANR residuals are
+  superseded by R6.1/R6.3/R6.4 work, but the following remain: the 25-tick
+  budget is per visible arming session; `onPause()` does not explicitly cancel
+  the watch (ticks are no-ops while paused); the post-winner sweep is a bounded
+  one-shot backstop that does not re-queue after a no-op sweep; the four-slot
+  render replay drops overflow and non-terminal refusals with honest logs;
+  rare refusal paths still take short caller-side `startsLock` sections; and
+  the pre-existing timing-sensitive
+  `hostExecutorIsOwnedBoundedAndShutdownGracefully` test is unchanged.
+- **Final comprehensive reviews are PENDING at the current R6 head `9e1aff7`:**
+  the main agent runs the correctness/lifecycle, security, architecture/native
+  and test/build/CI reviews after this consolidation. APPROVE outcomes recorded
+  for R4 were at `74d35f5` and for the R5 final gate at `689f378`; both are
+  historical and are **not** an approval of the current HEAD. `tasks/plan.md`
+  and `tasks/todo.md` keep the final 6.1–6.6 checkboxes **UNCHECKED**.
+
 ## 2026-11-26 — R6.4 second fix loop: guard-refusal lifetime + bounded render replay — PR #2
 
 Both reviewers of the remaining Required finding required two more fixes in
@@ -162,19 +219,23 @@ upload/trigger allowlists untouched (policy test-side locks were extended). **Po
   real soft-reboot safety, abnormal-death/crash/power-loss `/dev` marker
   durability, and all device/ADB/payload/APK validation. Green host CI is not
   proof of device safety.
-- **Final comprehensive reviews are PENDING at HEAD `33980e2`:** the main agent
-  runs the correctness/lifecycle, security, architecture/native and test/build/CI
-  reviews after this consolidation. The APPROVE outcomes recorded in the R4
-  sections were run at `74d35f5` and are historical; they are not an approval of
-  the current HEAD. `tasks/plan.md` and `tasks/todo.md` keep the final
-  6.1–6.6 checkboxes **UNCHECKED** for that purpose.
+- **Final comprehensive reviews are PENDING at the current R6 head `9e1aff7`**
+  (this R5 section was written when the pending head was `33980e2`; R6 has since
+  added four phase commits). The main agent runs the correctness/lifecycle,
+  security, architecture/native and test/build/CI reviews after the R6.5
+  consolidation. The APPROVE outcomes recorded in the R4 sections were run at
+  `74d35f5` and the R5 final reviews at `689f378`, both historical; neither is
+  an approval of the current HEAD. `tasks/plan.md` and `tasks/todo.md` keep the
+  final 6.1–6.6 checkboxes **UNCHECKED** for that purpose.
 - **Prior-round baselines only:** **623 JVM tests / 45 suites** and **140 host
   CTest** (R4 final gate) and the **138/138 host-native + 623/45 Java tests**
   reported in Re-review 4 are prior-round baselines, **not** a fresh R5
   full-suite result. No fresh full suite or CI-green result is claimed here.
 - **Residual optional items recorded, not silently accepted:** R5.3 optional
-  reporter-overflow UX until `onStart()`; R5.4 `stopForeground` under
-  `startsLock` ANR risk and interrupted-waiting flush; R5.8 optional
+  reporter-overflow UX until `onStart()` and R5.4 `stopForeground` under
+  `startsLock` / interrupted-waiting flush — both superseded by R6.1/R6.3/R6.4
+  work, with the new R6 residuals listed in the consolidated section above;
+  R5.8 optional
   `if: always()` upload-bypass guard (currently absent); plus earlier accepted
   residuals — benign duplicate correlated rejection, signed-release job
   packaged-pin gate inherited from PR #1 policy, owner-facing recovery UI out

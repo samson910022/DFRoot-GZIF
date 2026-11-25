@@ -48,6 +48,56 @@ separate `outcomeLock` and the strict `lock -> outcomeLock` order are unchanged;
 this phase adds Javadoc and tests only, with no executable production change.
 R2-14 and R2-16 remain OPEN gates.
 
+## Sixth repair round (R6.1–R6.4) — consolidated summary (2026-11-26)
+
+Final local HEAD `9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`,
+R6.4 `9e1aff7`) on top of the last pre-R6 commit `fd1ccd8` (R5 code `33980e2` / docs `689f378`). This
+round addresses Re-review 5. It closes the remaining **R2-17** residuals
+(visible-Activity and eviction/absence halves) and reduces **R2-18** to bounded
+**host-only** responsiveness evidence. **R2-14 and R2-16 remain SCOPED / OPEN
+gates — not closed, not proved safe.** Focused host verification only: 46, 108,
+115, then 124 and 127 focused tests across R6.1–R6.4 (post-fix re-runs green),
+0 failures, with two independent reviews per phase and every Required fix loop
+resolved. No fresh full-suite or CI-green result, no device-ANR proof and no
+device/ADB/payload/privileged-container/APK work is claimed.
+
+The two bounded mechanisms and their supporting bounds:
+
+1. **Read-only outcome watch (R2-17).** A continuously visible Activity runs a
+   per-Activity main-looper watch armed after each manual start request: at most
+   **25 ticks, 200 ms apart**, each calling only the unchanged ledger-only
+   reconciliation for that Activity's own request. Exhausting the budget with no
+   record shows one explicit "outcome unconfirmed" status; `null` (including
+   eviction from the bounded 32-entry ledger) is UNCONFIRMED, never an outcome.
+   The watch is cancelled on correlated clearing, stop and destroy, and nothing
+   is replayed, retried, cancelled, cleared or authorized from an unconfirmed UI
+   state — the run control stays disabled.
+2. **Bounded flush responsiveness (R2-18).** A losing foreground flush waits at
+   most a **200 ms monotonic deadline**; a main-thread contender never waits and
+   instead queues one bounded host re-decision. Re-decisions are capped at
+   **three** per lifetime, singly queued and destroy-aware, and a **post-winner
+   sweep** retires a start ID resolved during the winner's guarded phase after
+   the cap is spent, without spending that budget or interrupting the winner.
+
+Supporting bounds: foreground attach and main-thread start handling run on an
+owned **express** executor (16-slot queue, AbortPolicy) separate from the owned
+general **host** executor (64-slot queue) that carries observer renders and the
+whole winning flush phase; the flush guard is released in the posted task's
+`finally`. A refused express post fails closed with a correlated `REJECTED` and
+exactly one `stopSelf`, and a refused TERMINAL render is remembered in a
+**four-slot terminal-only replay queue** drained by both the deferred
+re-decision and the post-winner sweep (non-terminal refusals and overflow are
+dropped with honest logs).
+
+**What this does NOT prove:** this is bounded **host-only** evidence of
+responsive returns, **not a device ANR proof**. Caller-side bookkeeping in rare
+refusal paths still takes short `startsLock` sections, up to 16 express tasks
+can precede an attach, and device foreground-service-grace timing remains an
+OS/hardware gate that host fixtures cannot prove. R2-14 (publication/acknowledgement
+window) and R2-16 (non-atomic OFF authorization) remain OPEN gates; no green
+host CI result implies device safety. See the residual list in the R5
+consolidated section below for the honest, still-open limitations.
+
 ## Supported managers
 
 DFRoot GZIF supports exactly two manager packages. Each is bound to one bundled,
@@ -381,19 +431,30 @@ recovery; `engineFinished` only proves the Java engine call returned/threw; a
 new `BOOT_COUNT` is diagnostic only. Unattended soft reboot stays OFF and
 manual soft reboot remains experimental/unvalidated on GZIF.
 
-**Final comprehensive reviews are pending at HEAD `33980e2`.** The main agent
-runs correctness/lifecycle, security, architecture/native and test/build/CI
-reviews after this consolidation. The APPROVE outcomes recorded for R4 were at
-`74d35f5` and are historical; `tasks/plan.md` and `tasks/todo.md` keep the
-final 6.1–6.6 checkboxes UNCHECKED. Residual optional items recorded, not
-silently accepted: R5.3 reporter-overflow UX until `onStart()`, R5.4
-`stopForeground`-under-`startsLock` ANR risk (R6.3 bounded the waiting flush and
-removed the unbounded/interruptibility gap, but the winner's platform call still
-holds that lock), R5.8
-optional `if: always()` upload-bypass guard, benign duplicate correlated
-rejection, the signed-release packaged-pin gate inherited from PR #1, recovery
-UI out of scope, `/dev` marker-root trust, AES key in argv, `BOOT_COUNT`
-diagnostic only, and the abnormal-death publication window (OPEN).
+**Final comprehensive reviews are pending at the current R6 head `9e1aff7`**
+(this R5 section was written when the pending head was `33980e2`; R6 has since
+added four phase commits). The main agent runs correctness/lifecycle, security,
+architecture/native and test/build/CI reviews after the R6.5 consolidation. The
+APPROVE outcomes recorded for R4 were at `74d35f5` and the R5 final reviews at
+`689f378`; both are historical and neither is an approval of the current HEAD.
+`tasks/plan.md` and `tasks/todo.md` keep the final 6.1–6.6 checkboxes
+UNCHECKED. Residual optional items recorded, not silently accepted: R5.3
+reporter-overflow UX until `onStart()` and R5.4 interrupted-waiting /
+`stopForeground`-under-`startsLock` ANR risk are **superseded by R6.1/R6.3/R6.4
+work** (R6 bounded the waiting flush, offloaded foreground platform calls and
+made read-only reconciliation independent of observer delivery; the winner's
+platform call still holds `startsLock`), but the NEW R6 residuals remain: the
+25-tick budget is per visible arming session, `onPause()` does not explicitly
+cancel the watch (ticks are no-ops while paused), the post-winner sweep is a
+bounded one-shot backstop that does not re-queue after a no-op sweep, the
+four-slot render replay drops overflow and non-terminal refusals with honest
+logs, rare refusal paths still take short caller-side `startsLock` sections,
+and the pre-existing timing-sensitive
+`hostExecutorIsOwnedBoundedAndShutdownGracefully` test is unchanged. Also
+recorded: R5.8 optional `if: always()` upload-bypass guard, benign duplicate
+correlated rejection, the signed-release packaged-pin gate inherited from PR
+#1, recovery UI out of scope, `/dev` marker-root trust, AES key in argv,
+`BOOT_COUNT` diagnostic only, and the abnormal-death publication window (OPEN).
 
 ### R5.1 detail (2026-11-26) — replayable request-outcome ledger
 
@@ -644,10 +705,11 @@ sticky-bit `/data/local/tmp` owner (`shell`); AES key in argv out of scope;
 no owner-facing recovery UI (ordinary users stay intentionally locked out and
 app-data reset is not safe recovery); `BOOT_COUNT` is diagnostic only; the
 R4.4 second-recheck test gap, R4.5 duplicate correlated rejection, and R4.8
-idle worker thread and benign duplicates. The four final comprehensive reviews
-were APPROVE (one REQUEST CHANGES for stale docs tags only, corrected). A fresh
-remote CI green run after push remains the POST-PUSH gate — CI green is not
-claimed locally.
+idle worker thread and benign duplicates. At historical R4 HEAD `74d35f5` the
+four comprehensive reviews were APPROVE (one REQUEST CHANGES for stale docs tags
+only, corrected); that outcome is **not** an approval of the current head. A
+fresh remote CI green run after push remains the POST-PUSH gate — CI green is
+not claimed locally.
 
 ## Third repair round — R3 consolidated summary (2026-11-25)
 

@@ -1,5 +1,6 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
 <!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record R5.1–R5.8 phases, four APPROVE final reviews, fresh full verification, scoped OPEN gates and residual optional items. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R6.5): add R6.1–R6.4 phases and an unchecked Checkpoint R6; scope R3/R4/R5 APPROVE statements to their historical heads; leave Final 6.1–6.6 UNCHECKED for the main agent. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -332,8 +333,8 @@ validation, no full-suite/CI green claim, and no dependency or binary change.
   reset, pinned message tests (50 focused tests, 0 failures/errors/skips), and
   consolidated README/CHANGELOG/PORTING/plan/todo. No behavior change, no
   retry/clear control, no root probe, no kill/signal.
-- [ ] Checkpoint R4: pending main agent — fresh full Java + native suite and CI
-  green after push, then the four final comprehensive reviews below. Open
+- [x] Checkpoint R4 (historical): completed at `74d35f5`; four final reviews then
+  ran and their Required item was resolved. Open
   gates: Direct Boot FGS eligibility; real soft-reboot safety; `/dev`
   marker-root trust; sticky-bit `/data/local/tmp` owner (`shell`); AES key in
   argv out of scope; no recovery UI (users intentionally locked out — app-data
@@ -371,8 +372,9 @@ Completed local gates (host only):
 - [x] Post-rebase CI contract (`f6faf75`, `770d07c`): workflow policy 67/67,
   signing 40/40, make 36/36, `:app:tasks --all` resolves and the negative
   loader-pin fixture is green.
-- [x] Final verification: **554 JVM tests / 45 suites, 0 failures / 0 errors /
-  0 skipped**; **137 host CTest cases**; lint **0 errors / 15 warnings**;
+- [x] R3 historical final verification at HEAD `1252b3d`: **554 JVM tests / 45
+  suites, 0 failures / 0 errors / 0 skipped**; **137 host CTest cases**; lint
+  **0 errors / 15 warnings**;
   loader pins match `app/build.gradle.kts` and `app/src/main/jniLibs`; no
   generated/secret files tracked; secret scan benign-only; `git diff --check`
   clean. No dependency or binary change; documentation edits add no runtime
@@ -436,9 +438,11 @@ R5 full-suite result.
   142 host CTest, 0 failures; hooks absent from production.
 - [x] R5.8 (`33980e2`, R2-23): both APK variants pin-gated before upload on every
   trigger; policy 73/73, make 36/36; two reviews APPROVE.
-- [x] Checkpoint R5: phases complete, four final reviews APPROVED, fresh full
-  host verification green. Previously pending items: fresh full Java + native suite, full
-  verification and four final comprehensive reviews at HEAD `33980e2`. Open gates:
+- [x] Checkpoint R5 (historical, code head `33980e2` / docs head `689f378`):
+  phases complete, four final reviews APPROVED at `689f378`, fresh full host
+  verification green. Previously pending items then: fresh full Java + native
+  suite, full verification and four final comprehensive reviews. That APPROVE
+  is historical and is **not** an approval of the current R6 head. Open gates:
   R2-14 publication observation window, R2-16 OFF atomicity, Direct Boot FGS
   eligibility, real soft-reboot safety, `/dev` marker-root trust, sticky-bit
   owner, AES key in argv, no recovery UI, `BOOT_COUNT` diagnostic only. R5
@@ -447,23 +451,77 @@ R5 full-suite result.
   waiting flush (R5.4), and a future `if: always()` upload bypass guard (R5.8,
   currently absent).
 
-## Final Gate
+## Historical final gate (R5, HEAD `689f378` — not an approval of the current head)
 
-Four fresh independent comprehensive reviews ran at HEAD `689f378`:
-correctness/lifecycle APPROVE, security/honest-claims APPROVE,
+Four independent comprehensive reviews ran at historical R5 docs HEAD
+`689f378`: correctness/lifecycle APPROVE, security/honest-claims APPROVE,
 architecture/native APPROVE, test/build/CI APPROVE — no Required/Critical
-findings. Fresh non-privileged host verification: **653 JVM tests / 45 suites,
-142 host CTest, lint 0 errors / 15 warnings, policy 73/73, signing 40/40,
-make 36/36, pins matched, hygiene clean**. The approved commit series is pushed;
-fresh remote CI green is a POST-PUSH gate, not device validation.
+findings. Fresh non-privileged host verification then: **653 JVM tests / 45
+suites, 142 host CTest, lint 0 errors / 15 warnings, policy 73/73, signing
+40/40, make 36/36, pins matched, hygiene clean**. The approved commit series was
+pushed; fresh remote CI green remained a POST-PUSH gate, not device validation.
+Similarly, the R3/R4 APPROVE statements in the sections above are scoped to
+their own heads (`1252b3d` / `74d35f5`). None of these historical outcomes is an
+approval of the current R6 head `9e1aff7`.
 
-- [x] Final 6.1: correctness/lifecycle independent review — APPROVE.
-- [x] Final 6.2: security/staging/environment independent review — APPROVE.
-- [x] Final 6.3: test/build/CI independent review — APPROVE.
-- [x] Final 6.4: architecture/native integration independent review — APPROVE.
-- [x] Final 6.5: No Required/Critical findings; optional residuals recorded.
-- [x] Final 6.6: Fresh full verification complete; commit series pushed.
-- Keep the PR draft unless the user explicitly asks to mark it ready; pushing does not imply hardware validation or merge approval.
+## Sixth repair round (R6.1–R6.4) — phases, gates and residuals (2026-11-26)
+
+Final local HEAD `9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`,
+R6.4 `9e1aff7`) on top of the last pre-R6 commit `fd1ccd8` (R5 code `33980e2` / docs `689f378`),
+addressing Re-review 5. It closes the remaining **R2-17** residuals and reduces
+**R2-18** to bounded host-only responsiveness evidence; **R2-14 and R2-16 remain
+SCOPED / OPEN gates — not closed and not proved safe.** Host-only focused
+verification and independent static reviews only; no fresh full-suite/CI-green,
+device, ADB, payload, privileged-container or APK work, and no device-ANR proof.
+
+- [x] R6.1 (`13ee65f`, R2-17 visible Activity): per-Activity read-only outcome
+  watch, 25 ticks 200 ms apart, explicit once-only unconfirmed status, no
+  replay/retry/cancel/authorization; 46 focused tests, 0 failures; two reviews
+  APPROVE. Residuals: per-session budget, `onPause` does not explicitly cancel.
+- [x] R6.2 (`731e88c`, R2-17 eviction): null/evicted ledger record is explicitly
+  UNCONFIRMED, no executable production change (32/64 bounds and lock order
+  unchanged); 108 focused tests, 0 failures; two reviews APPROVE, one optional
+  vacuous replay assertion strengthened and re-reviewed RESOLVED.
+- [x] R6.3 (`cdf76e7`, R2-18): 200 ms monotonic flush deadline, main-thread
+  no-wait re-decision, three-deferral cap and post-winner sweep; 115 focused
+  tests, 0 failures (68 after the fix); one Required stranding gap fixed with
+  the sweep and re-reviewed RESOLVED; test-quality APPROVE with source guards.
+- [x] R6.4 (`9e1aff7`, R2-18(b)): owned express 16-slot / general host 64-slot
+  bounded executors, offloaded attach/render/winning flush, fail-closed refusals
+  and a four-slot terminal-only render replay queue; 124 then 127 focused tests,
+  0 failures; three Required architecture items fixed, then a guard-refusal
+  start-ID leak and render-slot residual fixed again, re-reviewed RESOLVED.
+- [ ] Checkpoint R6: pending main agent — fresh full Java + native suite and CI
+  green after push, then the four final comprehensive reviews below (all
+  UNCHECKED). Open gates: R2-14 publication window, R2-16 OFF atomicity, Direct
+  Boot FGS eligibility, real soft-reboot safety, `/dev` marker-root trust,
+  sticky-bit owner, AES key in argv, no recovery UI, `BOOT_COUNT` diagnostic.
+  R5.3 reporter-overflow UX and R5.4 interrupted-wait/ANR residuals are
+  superseded by R6 work; NEW R6 residuals recorded, not silently accepted:
+  per-session 25-tick budget, `onPause()` does not explicitly cancel the watch
+  (ticks are no-ops while paused), the post-winner sweep is a bounded one-shot
+  backstop that does not re-queue after a no-op sweep, the four-slot render
+  replay drops overflow/non-terminal refusals with honest logs, rare refusal
+  paths still take short caller-side `startsLock` sections, and the pre-existing
+  timing-sensitive `hostExecutorIsOwnedBoundedAndShutdownGracefully` test is
+  unchanged. No device ANR proof and no CI-green claim.
+
+## Final Comprehensive Review — R6 head `9e1aff7` — PENDING
+
+The main agent runs these four reviews after this documentation consolidation.
+All six checkboxes are intentionally **UNCHECKED**; the APPROVE outcomes above
+belong to earlier heads only. Keep the PR draft/open unless the user explicitly
+asks to mark it ready; pushing or green host CI never implies hardware
+validation or merge approval.
+
+- [ ] Final 6.1: correctness/lifecycle independent review at R6 head `9e1aff7`.
+- [ ] Final 6.2: security/staging/environment independent review at that head.
+- [ ] Final 6.3: test/build/CI independent review at that head.
+- [ ] Final 6.4: architecture/native integration independent review at that head.
+- [ ] Final 6.5: no Required/Critical findings; R6 residuals and the OPEN
+  R2-14/R2-16 gates recorded honestly, not silently accepted.
+- [ ] Final 6.6: fresh full verification complete (full Java + native suites,
+  lint, policy and CI after push) before any commit/ready/merge decision.
 
 ## Risks and Mitigations
 
