@@ -38,6 +38,7 @@ ACTION_PINS = {
     "actions/download-artifact": ("37930b1c2abaa49bbe596cd826c3c89aef350131", "v7"),
     "actions/setup-java": ("d1374f8ac74474200d16ef8ecee22c7ae7a51880", "v6"),
     "gradle/actions/setup-gradle": ("8da46b539cd8fe6ab27ca75128919a18d757604c", "v6"),
+    "android-actions/setup-android": ("be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd", "v4"),
     "softprops/action-gh-release": ("8a0cd651e5b2365bd640854a3fa5dfc70e4875f3", "v3"),
 }
 ALLOWED_SECRETS = {"${{ secrets." + name + " }}" for name in SIGNING_SECRETS}
@@ -178,6 +179,26 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
 # Exact ordered step-name contract for every job.  An extra (or reordered, or
 # renamed) step is a policy violation, not a harmless addition.
 JOB_STEP_NAMES: dict[str, list[str]] = {
+    "app-checks": [
+        "Check out source",
+        "Set up Java 21",
+        "Set up Android SDK",
+        "Set up Gradle",
+        "Verify all app task definitions resolve",
+        "Clean previous test and lint reports",
+        "Run host-native run-config tests",
+        "Run unit tests",
+        "Run lint",
+        "Verify unit tests executed",
+        "Upload test and lint reports",
+    ],
+    "loader-pin-fixtures": [
+        "Check out source",
+        "Set up Java 21",
+        "Set up Android SDK",
+        "Set up Gradle",
+        "Verify clean and tampered synthetic APK loader-pin fixtures",
+    ],
     "test-ci": [
         "Check out source",
         "Set up Java 21",
@@ -198,6 +219,7 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Download DF LKM (android13-5.15)",
         "Set up Gradle",
         "Build debug and release APKs",
+        "Verify packaged loader pins",
         APK_COUNTER_COMMAND,
         "Upload DFRoot APKs",
     ],
@@ -1112,8 +1134,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         download = action_steps(job, "actions/download-artifact")
         self.assertEqual(len(download), 1)
         self.assertEqual(mapping(download[0], "with", 8).get("name"), "df-lkm-android13-5.15")
-        builds = [run_script(step) for step in steps(job) if "./gradlew" in run_script(step)]
-        self.assertEqual(len(builds), 1)
+        builds = [run_script(named_step(job, "Build debug and release APKs"))]
         self.assertIn(":app:assembleDebug", builds[0])
         self.assertIn(":app:assembleRelease", builds[0])
         self.assertNotIn("WriteSigningProperties", job)
@@ -1232,7 +1253,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_every_upload_fails_closed_and_overwrites(self) -> None:
         uploads = [step for job in self.jobs.values() for step in action_steps(job, "actions/upload-artifact")]
-        self.assertEqual(len(uploads), 3)
+        self.assertEqual(len(uploads), 4)
         for upload in uploads:
             with self.subTest(artifact=mapping(upload, "with", 8).get("name")):
                 inputs = mapping(upload, "with", 8)
@@ -1245,9 +1266,9 @@ class WorkflowPolicyTests(unittest.TestCase):
                 timeout = property_value(job, "timeout-minutes", 4)
                 self.assertIsNotNone(timeout)
                 self.assertGreater(int(timeout or 0), 0)
-        for name in ("build-dfroot", "build-release"):
-            scripts = [run_script(step) for step in steps(self.jobs[name]) if "./gradlew" in run_script(step)]
-            self.assertEqual(len(scripts), 1)
+        for name, build_step in (("build-dfroot", "Build debug and release APKs"),
+                                 ("build-release", "Build signed release APK")):
+            scripts = [run_script(named_step(self.jobs[name], build_step))]
             self.assertIn("for attempt in 1 2 3", scripts[0])
             self.assertIn("sleep 30", scripts[0])
 
