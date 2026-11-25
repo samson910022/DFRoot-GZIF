@@ -18,6 +18,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): bound the outcome-report executor queue with an explicit reject policy and expose read-only queue seams; a rejected post cannot lose the caller-written ledger record. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.5): order the final pre-engine gate so the blocking authorization read precedes the owner liveness check; a host destroyed during that read cannot authorize a not-yet-started engine, and started work is never revoked. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.6): comments/Javadoc only — state the honest final-authorization boundary; the PackageManager OFF write is outside the coordinator monitor and cannot be made atomic with the gate read or engine.run(). No behavior change. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.2): Javadoc only — state that a null ledger lookup (including LRU eviction of the Activity's own record from the bounded 32-entry ledger during a long absence) means UNCONFIRMED, never an outcome and never proof of admission, rejection or completion. No behavior change. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -78,7 +79,16 @@ public final class RunCoordinator {
      *
      * <p>This is an observation, never an operation owner and never permission
      * to replay, retry or cancel work. Absence of a record means uncertainty:
-     * it is NOT proof of admission or of rejection.</p>
+     * it is NOT proof of admission, rejection or completion.</p>
+     *
+     * <p>A lookup can return {@code null} both for a request that was never
+     * recorded and for one whose record was written earlier but has since been
+     * evicted from the bounded LRU ledger ({@code MAX_OUTCOME_RECORDS} entries).
+     * In either case the request is UNCONFIRMED: {@code null} is never a fourth
+     * {@link RequestOutcome} value and never evidence that the privileged
+     * operation was admitted, rejected or finished. Callers keep the request
+     * unconfirmed and must not fabricate a reason, replay, retry, authorize or
+     * clear anything on the basis of an absence.</p>
      */
     public static final class RequestOutcomeRecord {
         private final String requestId;
@@ -851,8 +861,16 @@ public final class RunCoordinator {
     /**
      * Read-only lookup of ONE request's recorded outcome. Takes ONLY
      * {@code outcomeLock}, so it is never blocked by a checked store operation
-     * holding the durable {@code lock}. Absence means UNCERTAINTY: it is not
-     * evidence of admission, rejection or any privileged effect.
+     * holding the durable {@code lock}.
+     *
+     * <p>{@code null} means UNCONFIRMED. That includes the case where a record
+     * was written earlier but has since been evicted from the bounded LRU
+     * ledger ({@code MAX_OUTCOME_RECORDS} = 32 entries) after a long absence:
+     * eviction drops only the cached observation and does NOT imply rejection,
+     * completion or any privileged effect, nor does it authorize a replay.
+     * {@code null} is never an outcome and never proof of admission, rejection
+     * or completion; the caller keeps the request pending/unconfirmed and does
+     * not fabricate a reason, replay, retry, clear or cancel anything.</p>
      */
     public RequestOutcomeRecord getRequestOutcome(String requestId) {
         if (requestId == null || requestId.isEmpty()) {

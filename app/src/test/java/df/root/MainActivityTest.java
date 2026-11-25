@@ -6,6 +6,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin the synchronous start-failure path to the lock-free ledger write with blocked checked storage and a throwing starter. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): keep failure reports observable on the existing queue seam and pin Activity reconciliation when both dispatchers reject. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.1): cover the bounded, lifecycle-scoped read-only outcome watch on a continuously visible Activity. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.2): pin that an evicted/absent ledger record stays explicitly unconfirmed on the watch and a later start, with no replay, fabricated reason or durable mutation. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -649,6 +650,158 @@ public class MainActivityTest {
         assertEquals(0, immediateEngine.calls.get());
         assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
                 .getNextStartedService());
+    }
+
+    /**
+     * R6.2 (evicted-record half of R2-17): after this Activity's own ledger
+     * record is evicted during an absence, the watch and onStart find null and
+     * keep the request explicitly unconfirmed. Absence is uncertainty, never an
+     * outcome and never evidence of admission, rejection or completion.
+     */
+    @Test
+    public void evictedOwnOutcomeStaysUnconfirmedOnWatchAndOnStart()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 76), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 48L, Runnable::run);
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        RecordingStarter starter = new RecordingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        assertEquals(1, starter.requests.size());
+        assertEquals(requestId, starter.requestIds.get(0));
+        OperationAttempt beforeAttempt = attemptStore.load();
+
+        // Go absent so publishing cannot clear pending via the snapshot listener.
+        controller.stop();
+        // First write the Activity's own harmless observation, then publish enough
+        // OTHER harmless observations to evict it from the bounded 32-entry LRU.
+        coordinator.noteRequestOutcome(requestId, RunCoordinator.RequestOutcome.ACCEPTED,
+                "fake acceptance before eviction");
+        assertNotNull(coordinator.getRequestOutcome(requestId));
+        int fillerCount = RunCoordinator.MAX_OUTCOME_RECORDS + 2;
+        for (int i = 0; i < fillerCount; i++) {
+            coordinator.noteRequestOutcome("eviction-filler-" + i,
+                    RunCoordinator.RequestOutcome.REJECTED, "harmless filler-" + i);
+        }
+        assertNull("the Activity's own record was evicted from the bounded ledger",
+                coordinator.getRequestOutcome(requestId));
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        controller.start(); // onStart finds null and deliberately keeps pending
+
+        assertTrue("absence after eviction stays pending",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(requestId, ReflectionHelpers.getField(activity, "mPendingRequestId"));
+        assertFalse("the run control stays disabled while unconfirmed",
+                activity.findViewById(R.id.btnRun).isEnabled());
+        assertSame("onStart reconciliation is read-only", beforeSnapshot,
+                coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request on start",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+
+        outcomeWatch.runAll(); // bounded read-only ticks; no lifecycle restart here
+
+        String unconfirmed = "Operation request outcome unconfirmed: no acknowledgement "
+                + "was received; no automatic retry or recovery is available in this app.";
+        assertEquals("one explicit unconfirmed status", 1,
+                occurrences(output(activity), unconfirmed));
+        assertFalse("no fabricated rejection", output(activity).contains("Operation request rejected"));
+        assertFalse("no fabricated cancellation", output(activity).contains("Operation request cancelled"));
+        assertFalse("no fabricated reason", output(activity).contains("no reason supplied"));
+        assertTrue("the unconfirmed click stays pending",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame("watch reconciliation is read-only", beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertFalse(outcomeWatch.hasPending());
+        assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
+    }
+
+    /**
+     * R6.2: a later start still re-reads the ledger read-only after an
+     * unconfirmed status. No replay, no duplicate status for the same token and
+     * no durable mutation; when a harmless record is later published for that
+     * token the re-read is proven by a real, correlated reconciliation.
+     */
+    @Test
+    public void laterStartRereadsLedgerWithoutReplayOrDuplicateUnconfirmedStatus()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 77), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 49L, Runnable::run);
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+        RecordingStarter starter = new RecordingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        assertEquals(1, starter.requests.size());
+        assertEquals(requestId, starter.requestIds.get(0));
+        OperationAttempt beforeAttempt = attemptStore.load();
+
+        outcomeWatch.runAll(); // no record at all -> explicit unconfirmed once
+
+        String unconfirmed = "Operation request outcome unconfirmed: no acknowledgement "
+                + "was received; no automatic retry or recovery is available in this app.";
+        assertEquals(1, occurrences(output(activity), unconfirmed));
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        controller.stop();
+        controller.start(); // later start: re-read ledger, still absent
+        assertTrue("absence stays pending", ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertSame("re-read is read-only", beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, attemptStore.clears);
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+        assertEquals("no duplicate unconfirmed status on the later start", 1,
+                occurrences(output(activity), unconfirmed));
+
+        // A freshly armed bounded window still cannot duplicate the status.
+        outcomeWatch.runAll();
+        assertEquals(1, occurrences(output(activity), unconfirmed));
+        assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertSame(beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+
+        // Prove the later start really re-reads the ledger: publish a harmless
+        // correlated outcome while stopped, then start once more.
+        controller.stop();
+        coordinator.noteRequestOutcome(requestId, RunCoordinator.RequestOutcome.REJECTED,
+                "harmless late ledger record");
+        RunCoordinator.Snapshot published = coordinator.getSnapshot();
+
+        controller.start();
+
+        assertFalse("the re-read clears pending from the ledger record",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertSame("reconciliation stays read-only", published, coordinator.getSnapshot());
+        assertEquals(1, occurrences(output(activity), "harmless late ledger record"));
+        assertEquals("the unconfirmed status is still shown only once", 1,
+                occurrences(output(activity), unconfirmed));
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
     }
 
     /** Destruction before admission cancels only service-local work, never an engine. */

@@ -37,6 +37,17 @@ is an honest UI status, **not** evidence about the privileged operation; R2-14
 and R2-16 remain OPEN safety gates. No device/ADB/payload/privileged work was
 performed.
 
+### R6.2 (2026-11-26) — eviction/absence contract — short note (R6.5 consolidates)
+A `null` ledger lookup — whether the request was never recorded or its record
+was evicted from the bounded 32-entry LRU during a sufficiently long absence —
+means **UNCONFIRMED** only. It is never an outcome and never evidence of
+admission, rejection or completion: neither the watch nor a later `onStart()`
+fabricates a reason, replays/retries the request, clears durable state or
+enables the run control. The ledger bound (32), reporter capacity (64), the
+separate `outcomeLock` and the strict `lock -> outcomeLock` order are unchanged;
+this phase adds Javadoc and tests only, with no executable production change.
+R2-14 and R2-16 remain OPEN gates.
+
 ## Supported managers
 
 DFRoot GZIF supports exactly two manager packages. Each is bound to one bundled,

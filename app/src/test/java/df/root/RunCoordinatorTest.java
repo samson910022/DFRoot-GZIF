@@ -11,6 +11,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): pin the bounded outcome-reporter queue, its reject policy and the caller-written ledger under overflow. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.5): pin that an owner destroyed during the blocking final authorization read cannot authorize a not-yet-started engine, with fail-closed, honest denial and no revocation of started work. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.6): add a deterministic source-text guard that the removed authorization-atomicity overclaims are absent from the touched Java/README sections and the honest boundary text is present. No behavior change. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.2): pin that LRU eviction returns null (UNCONFIRMED) with exactly 32 retained records, monotonic sequences and unchanged ledger/reporter bounds. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -1655,6 +1656,58 @@ public class RunCoordinatorTest {
         Field records = RunCoordinator.class.getDeclaredField("outcomeRecords");
         records.setAccessible(true);
         assertEquals(RunCoordinator.MAX_OUTCOME_RECORDS, ((Map<?, ?>) records.get(coordinator)).size());
+    }
+
+    /**
+     * R6.2: eviction is an absence (UNCONFIRMED), never a fabricated rejection
+     * or a claim of completion. Exactly the bounded number of records is
+     * retained, publication sequences stay monotonic and both bounds and the
+     * lock-free read path are unchanged. Harmless fake IDs/outcomes only.
+     */
+    @Test
+    public void evictedOutcomeIsUnconfirmedAndBoundsAreUnchanged() throws Exception {
+        assertEquals("ledger bound", 32, RunCoordinator.MAX_OUTCOME_RECORDS);
+        assertEquals("reporter bound", 64, RunCoordinator.MAX_OUTCOME_QUEUE_CAPACITY);
+        RunCoordinator coordinator = coordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run);
+        coordinator.setOutcomeExecutorForTesting(Runnable::run); // deterministic seam
+        assertEquals("reporter capacity unchanged", RunCoordinator.MAX_OUTCOME_QUEUE_CAPACITY,
+                coordinator.outcomeQueueCapacityForTesting());
+
+        int written = RunCoordinator.MAX_OUTCOME_RECORDS + 3;
+        long[] sequences = new long[written];
+        for (int i = 0; i < written; i++) {
+            coordinator.noteRequestOutcome("evict-" + i,
+                    RunCoordinator.RequestOutcome.REJECTED, "harmless-" + i);
+            RunCoordinator.RequestOutcomeRecord justWritten =
+                    coordinator.getRequestOutcome("evict-" + i);
+            assertNotNull(justWritten);
+            sequences[i] = justWritten.getSequence();
+            assertTrue("publication sequence must be monotonic",
+                    i == 0 || sequences[i] > sequences[i - 1]);
+        }
+
+        Field records = RunCoordinator.class.getDeclaredField("outcomeRecords");
+        records.setAccessible(true);
+        assertEquals("exactly the bounded number of records is retained",
+                RunCoordinator.MAX_OUTCOME_RECORDS,
+                ((Map<?, ?>) records.get(coordinator)).size());
+        assertNull("evicted evidence is absent, not a fabricated rejection",
+                coordinator.getRequestOutcome("evict-0"));
+        assertNull(coordinator.getRequestOutcome("evict-2"));
+        RunCoordinator.RequestOutcomeRecord oldestRetained =
+                coordinator.getRequestOutcome("evict-3");
+        assertNotNull(oldestRetained);
+        assertTrue("retained sequence is newer than the evicted one",
+                oldestRetained.getSequence() > sequences[0]);
+        RunCoordinator.RequestOutcomeRecord newest =
+                coordinator.getRequestOutcome("evict-" + (written - 1));
+        assertNotNull(newest);
+        assertTrue(newest.getSequence() > oldestRetained.getSequence());
+        assertEquals("reporter capacity still unchanged",
+                RunCoordinator.MAX_OUTCOME_QUEUE_CAPACITY,
+                coordinator.outcomeQueueCapacityForTesting());
+        assertEquals(0, coordinator.outcomeQueueSizeForTesting());
     }
 
     /** A newer single-slot snapshot never removes an older request's recorded outcome. */

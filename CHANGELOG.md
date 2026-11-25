@@ -1,5 +1,19 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R6.2: explicit eviction/absence contract (Javadoc + tests) — PR #2
+
+Short note (R6.5 consolidates): `RunCoordinator` Javadoc now states that a
+`null` ledger lookup — including eviction of the Activity's own record from the
+bounded 32-entry LRU after a sufficiently long absence — means UNCONFIRMED and
+is never an outcome or proof of admission, rejection or completion. No
+executable production change: ledger capacity (32), reporter capacity (64),
+the separate `outcomeLock` and the strict `lock -> outcomeLock` order are
+untouched, verified by a comment-stripped diff. Host tests pin eviction-only
+unconfirmed status on the watch and on a later start, exact 32-record retention
+with monotonic sequences and unchanged bounds, and no replay, fabricated reason
+or durable mutation. R2-14 and R2-16 remain OPEN gates; no device/ADB/payload/
+privileged-container/APK work; no commit/stage/push.
+
 ## 2026-11-26 — R6.1: bounded read-only outcome watch for a visible Activity — PR #2
 
 Short note (R6.5 consolidates): `MainActivity` arms a per-Activity main-looper
