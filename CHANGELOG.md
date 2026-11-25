@@ -1,6 +1,5 @@
 # Changelog — DFRoot GZIF
 
-<<<<<<< HEAD
 ## Unreleased — PR #1 hardening (CI build reliability)
 
 Hardening pass over the build, signing and release pipeline; no change to the
@@ -86,10 +85,8 @@ repository is public, so Actions artifacts are not private, and the unsigned
 APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
-## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (uncommitted)
-=======
+
 ## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (locally committed, not yet pushed)
->>>>>>> ffe8056 (fix(app): contain close errors and finalize PR #2 documentation)
 
 Architecture repairs on top of `4.8-gzif`; `versionCode`/`versionName` are
 unchanged (408 / `4.8-gzif`). No runtime payload, firmware target, or SUCCESS

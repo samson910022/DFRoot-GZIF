@@ -94,6 +94,11 @@ jobs:
       - name: Verify all app task definitions resolve
         run: ./gradlew :app:tasks --all --no-daemon --console=plain
 
+      # Regression guard for the non-static-inner-task class failure that broke
+      # `:app:tasks --all`; this also resolves both debug and release pin tasks.
+      - name: Verify all app task definitions resolve
+        run: ./gradlew :app:tasks --all --no-daemon --console=plain
+
       - name: Clean previous test and lint reports
         run: rm -rf app/build/test-results app/build/reports
 
@@ -152,6 +157,35 @@ jobs:
             app/build/reports/lint-results-debug.txt
             app/build/reports/lint-results-debug.xml
           if-no-files-found: warn
+
+  loader-pin-fixtures:
+    name: Loader pin fixture guards
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      # Harmless host-only fixtures: no KO, device, privileged container, or
+      # real APK path. This step fails if the tampered loader is accepted.
+      - name: Verify clean and tampered synthetic APK loader-pin fixtures
+        run: ./gradlew :app:verifyLoaderPinFixtures --no-daemon --console=plain
 
   build-lkms:
     name: LKMs / ${{ matrix.kmi }}

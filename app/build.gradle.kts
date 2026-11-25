@@ -1,7 +1,7 @@
 import com.android.build.api.artifact.SingleArtifact
-import java.security.MessageDigest
+import dfroot.VerifyLoaderPinFixturesTask
+import dfroot.VerifyPackagedLoaderPinsTask
 import java.util.Properties
-import java.util.zip.ZipFile
 // Modified 2026-11-17 (DFRoot GZIF): compileSdk/targetSdk 37→36; versionCode 407→408; versionName 4.7→4.8-gzif. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): signing.properties is now optional at configuration time.
 // Reason: PR CI / fresh clones have no signing.properties. Reading it unconditionally made
@@ -25,65 +25,9 @@ require(bundledLoaderPins.all { (loader, pin) -> pin.matches(Regex("[0-9a-f]{64}
     "bundledLoaderPins must contain lowercase SHA-256 values for $requiredBundledLoaders"
 }
 
-abstract class VerifyPackagedLoaderPinsTask : DefaultTask() {
-    @get:InputDirectory
-    abstract val loaderDirectory: DirectoryProperty
-
-    @get:InputDirectory
-    abstract val apkDirectory: DirectoryProperty
-
-    @get:Input
-    abstract val loaderPins: MapProperty<String, String>
-
-    @TaskAction
-    fun verify() {
-        val pins = loaderPins.get()
-        if (pins.keys != requiredBundledLoaders) {
-            throw GradleException("bundledLoaderPins must define exactly $requiredBundledLoaders; " +
-                    "found ${pins.keys}")
-        }
-
-        for ((loaderName, expectedPin) in pins) {
-            val repositoryLoader = loaderDirectory.get().file(loaderName).asFile
-            if (!repositoryLoader.isFile) {
-                throw GradleException("authoritative repository loader is missing: $repositoryLoader")
-            }
-            val repositoryPin = sha256(repositoryLoader.readBytes())
-            if (repositoryPin != expectedPin) {
-                throw GradleException("repository loader $loaderName does not match its bundled-loader pin: " +
-                        "expected $expectedPin, got $repositoryPin")
-            }
-        }
-
-        val apks = apkDirectory.get().asFileTree.matching { include("**/*.apk") }.files
-        if (apks.size != 1) {
-            throw GradleException("expected exactly one packaged APK in ${apkDirectory.get().asFile}, " +
-                    "found ${apks.size}; refusing to verify a stale or ambiguous artifact")
-        }
-        ZipFile(apks.single()).use { apk ->
-            for ((loaderName, expectedPin) in pins) {
-                val entryName = "lib/arm64-v8a/$loaderName"
-                val entry = apk.getEntry(entryName)
-                    ?: throw GradleException("packaged APK is missing $entryName; loader pins cannot be verified")
-                if (entry.isDirectory) {
-                    throw GradleException("packaged APK entry $entryName is a directory")
-                }
-                val actualPin = apk.getInputStream(entry).use { sha256(it.readBytes()) }
-                if (actualPin != expectedPin) {
-                    throw GradleException("packaged loader $entryName does not match its bundled-loader pin: " +
-                            "expected $expectedPin, got $actualPin")
-                }
-                logger.lifecycle("Verified $entryName against bundled-loader pin $expectedPin")
-            }
-        }
-    }
-
-    private fun sha256(bytes: ByteArray): String {
-        return MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
-            "%02x".format(it)
-        }
-    }
-}
+// VerifyPackagedLoaderPinsTask and its shared verifier are top-level buildSrc
+// classes; a script-local task class would be a non-static inner class and
+// Gradle cannot instantiate it (`:app:tasks --all` failed with that error).
 
 val signingProps = Properties()
 val signingPropsFile = rootProject.file("signing.properties")
@@ -214,10 +158,23 @@ androidComponents {
                 loaderDirectory.set(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
                 apkDirectory.set(variant.artifacts.get(SingleArtifact.APK))
                 loaderPins.set(bundledLoaderPins)
+                requiredLoaderNames.set(requiredBundledLoaders)
                 dependsOn("package$variantTaskName")
             }
         }
     }
+}
+
+// Host-only guard for the pin check itself: no KO, NDK toolchain, device, or
+// real APK path involved. Fixtures live in app/build/loader-pin-fixtures/.
+tasks.register<VerifyLoaderPinFixturesTask>("verifyLoaderPinFixtures") {
+    loaderDirectory.set(layout.projectDirectory.dir("src/main/jniLibs/arm64-v8a"))
+    loaderPins.set(bundledLoaderPins)
+    requiredLoaderNames.set(requiredBundledLoaders)
+    fixtureDirectory.set(layout.buildDirectory.dir("loader-pin-fixtures"))
+    // The verifier classes compiled into buildSrc are not task inputs; never let a
+    // local UP-TO-DATE decision skip the self-test after build logic changes.
+    outputs.upToDateWhen { false }
 }
 
 dependencies {
