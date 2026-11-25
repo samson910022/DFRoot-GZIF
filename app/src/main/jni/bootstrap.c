@@ -1,5 +1,6 @@
-/* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage /data/local/tmp/.ksud-stage before late-load. See NOTICE. */
+/* Modified 2026-11-17 (DFRoot GZIF): create /data/adb and stage the ksud daemon before late-load. See NOTICE. */
 /* Modified 2026-11-24 (PR #3 hardening): secure staging, fail-closed single final-status file and bounded wait handling. */
+/* Modified 2026-11-26 (PR #3 Phase C): stage into the root-owned /data/adb/.ksud-stage consumed by the rebuilt loaders. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,12 +18,18 @@
 #include "status_protocol.h"
 #include "final_status_publish.h"
 #include "proc_scan_policy.h"
+#include "bootstrap_stage.h"
 
 #define BLKROSET   0x125d
-/* The bundled Samsung-patched loaders have /data/local/tmp/.ksud-stage baked
- * into their self-staging constant, so the path must stay. Security is
- * preserved by stage_file() (unlink + O_EXCL|O_NOFOLLOW + 0700 + fsync). */
-#define KSUD_STAGE "/data/local/tmp/.ksud-stage"
+/* The rebuilt Samsung-patched loaders are expected to consume /data/adb/.ksud-stage: a stage
+ * inside root-owned /data/adb (0700) that they validate by fd (owner, mode,
+ * non-empty content) before promoting it to /data/adb/ksud. DFRoot's producer
+ * must create exactly that contract. P1-08 stays an OPEN release gate until
+ * the new loader binaries are integrated, re-reviewed and validated on a
+ * device; this producer change by itself is not proof the gate is closed. */
+#define KSUD_STAGE_DIR "/data/adb"
+#define KSUD_STAGE_NAME ".ksud-stage"
+#define KSUD_STAGE "/data/adb/.ksud-stage"
 #define KSUD_STAGE_SRC "/data/user_de/0/df.root/ksud"
 #define KSUD       "/data/adb/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
@@ -424,59 +431,11 @@ static int touch(const char *path)
     return 0;
 }
 
-/* Copy src into dst. O_EXCL|O_NOFOLLOW + 0700 close the classic symlink race
- * at creation time. The destination path itself is fixed by the bundled
- * loaders' baked-in staging constant (/data/local/tmp/.ksud-stage), so a
- * shell-uid process could still replace the file between close() and the
- * loader's rename(); that residual risk is documented in PORTING-GZIF.md and
- * can only be removed by rebuilding the loaders. */
-static int stage_file(const char *src, const char *dst)
-{
-    int sfd = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (sfd < 0) {
-        printf("bootstrap: open %s failed: %s\n", src, strerror(errno));
-        return -1;
-    }
-    unlink(dst);
-    int dfd = open(dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0700);
-    if (dfd < 0) {
-        printf("bootstrap: create %s failed: %s\n", dst, strerror(errno));
-        close(sfd);
-        return -1;
-    }
-
-    char buf[65536];
-    for (;;) {
-        ssize_t r = read(sfd, buf, sizeof(buf));
-        if (r == 0) break;
-        if (r < 0) {
-            printf("bootstrap: read %s failed: %s\n", src, strerror(errno));
-            goto fail;
-        }
-        size_t off = 0;
-        while (off < (size_t)r) {
-            ssize_t w = write(dfd, buf + off, (size_t)r - off);
-            if (w <= 0) {
-                printf("bootstrap: write %s failed: %s\n", dst, strerror(errno));
-                goto fail;
-            }
-            off += (size_t)w;
-        }
-    }
-    if (fchmod(dfd, 0700) < 0 || fsync(dfd) < 0) {
-        printf("bootstrap: finalize %s failed: %s\n", dst, strerror(errno));
-        goto fail;
-    }
-    close(sfd);
-    close(dfd);
-    return 0;
-
-fail:
-    close(sfd);
-    close(dfd);
-    unlink(dst);
-    return -1;
-}
+/* Staging now lives in bootstrap_stage.c: df_stage_file() anchors every lookup
+ * to an fd for /data/adb, validates its owner/mode, replaces only a regular
+ * destination, creates with O_EXCL|O_NOFOLLOW/0700, and removes only the entry
+ * it created on failure. The strict root-owner policy is selected with NULL
+ * overrides; the host test exercises the same code with injected policy/IO. */
 
 /* Mark every installed module disabled before ksud runs. A broken module
  * otherwise loads on the next boot and bootloops the device. */
@@ -666,8 +625,12 @@ int main(void)
     }
 
     touch("/dev/dfm5");
-    mkdir("/data/adb", 0700);
-    if (stage_file(KSUD_STAGE_SRC, KSUD_STAGE) != 0)
+    if (mkdir(KSUD_STAGE_DIR, 0700) != 0 && errno != EEXIST)
+        printf("bootstrap: mkdir %s failed: %s\n", KSUD_STAGE_DIR, strerror(errno));
+    /* df_stage_file() fails closed if the directory is not root-owned/0700-
+     * style, so a failed mkdir here needs no recovery action of its own. */
+    if (df_stage_file(KSUD_STAGE_SRC, KSUD_STAGE_DIR, KSUD_STAGE_NAME,
+                      NULL, NULL) != 0)
         return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
 
     late_load_rc = run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load",

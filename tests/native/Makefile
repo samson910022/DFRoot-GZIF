@@ -4,7 +4,7 @@ JNI := ../../app/src/main/jni
 
 .PHONY: all test clean fixtures
 
-all: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test
+all: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test
 
 status_protocol_test: status_protocol_test.c $(JNI)/status_protocol.c $(JNI)/status_protocol.h
 	$(CC) $(CFLAGS) -o $@ status_protocol_test.c $(JNI)/status_protocol.c
@@ -25,16 +25,22 @@ elf_parser_test: elf_parser_test.c $(JNI)/elf_parser.c $(JNI)/elf_parser.h
 device_version_test: device_version_test.c $(JNI)/device_version.c $(JNI)/device_version.h
 	$(CC) $(CFLAGS) -I$(JNI) -o $@ device_version_test.c $(JNI)/device_version.c
 
+# Host-only staging tests. The policy helper and copy loop are compiled from
+# the real JNI source; no root, no /dev and no fork/exec are involved.
+loader_stage_test: loader_stage_test.c $(JNI)/bootstrap_stage.c $(JNI)/bootstrap_stage.h
+	$(CC) $(CFLAGS) -I$(JNI) -o $@ loader_stage_test.c $(JNI)/bootstrap_stage.c
+
 # Regenerate the binary fixtures (checked in; run only on deliberate changes).
 fixtures:
 	python3 fixtures/gen_fixtures.py
 
-test: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test
+test: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test
 	./status_protocol_test
 	./final_publish_test
 	./proc_scan_policy_test
 	./elf_parser_test
 	./device_version_test
+	./loader_stage_test
 
 clean:
-	rm -f status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test
+	rm -f status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test

@@ -304,7 +304,7 @@ add_custom_command(
 )
 add_custom_target(dfroot_packaged ALL DEPENDS "${PACKAGED_KO_VERIFIED_SO}")
 
-add_executable(bootstrap bootstrap.c status_protocol.c final_status_publish.c proc_scan_policy.c)
+add_executable(bootstrap bootstrap.c bootstrap_stage.c status_protocol.c final_status_publish.c proc_scan_policy.c)
 set_target_properties(bootstrap PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"
