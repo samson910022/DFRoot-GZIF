@@ -1,5 +1,18 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-25 — R4.6: main-thread outcome reporting off the storage lock (R2-18)
+
+Short note (R4.9 consolidates docs): `ExploitService` now enqueues every
+main-thread null/unknown-intent, foreground-start, wake-lock, admission-dispatch
+and destruction-cancellation outcome report on the admission worker instead of
+calling the coordinator's lock-taking `noteRequestOutcome` from
+`onStartCommand`/`onDestroy`. The queued report is a strict no-op if the service
+was destroyed after that report was requested. Status/notification reads still
+use only the volatile snapshot. The durable barrier lock scope is unchanged: a
+background worker may still block on storage, so this is not a claim that all
+paths are nonblocking. Harness tests use blocked harmless storage to verify
+main-thread responsiveness and off-main publication.
+
 ## 2026-11-25 — R4.3: publication confirmation narrows R2-14
 
 Fourth repair round on `fix/app-correctness-safety` (after `6348c71` / `b8526d8`).

@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify Activity detachment, service-only requests, coordinator observation, and single-flight UI gating. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recheck service request wiring against operation-ID publication. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover request-correlated acknowledgement, overlapping rejections and cancelled service-local work. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): drive the outcome-report executor explicitly in failure/cancellation tests. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -377,6 +378,9 @@ public class MainActivityTest {
         assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
 
         controller.destroy();
+        // The cancellation is now enqueued off the destroying thread; drive the
+        // deterministic seam before asserting the correlated outcome.
+        admission.runAll();
         coordinatorObservers.runAll();
 
         RunCoordinator.Snapshot cancelled = coordinator.getSnapshot();
@@ -391,6 +395,7 @@ public class MainActivityTest {
         assertFalse(coordinatorWorker.hasNext());
 
         // A task that is later dequeued must be a strict no-op.
+        assertFalse(admission.hasNext());
         admission.runAll();
         assertSame(cancelled, coordinator.getSnapshot());
         assertEquals(0, immediateEngine.calls.get());
@@ -463,11 +468,16 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create();
         serviceControllers.add(serviceController);
-        // Admission is normally off-main; run it inline for these deterministic tests.
-        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
+        // Admission and failure reports are normally off-main; drive the queued
+        // work explicitly instead of relying on inline delivery.
+        QueueExecutor admission = new QueueExecutor();
+        serviceController.get().setAdmissionExecutorForTesting(admission);
         Shadows.shadowOf(serviceController.get()).setThrowInStartForeground(
                 new IllegalStateException("FGS denied by platform"));
         serviceController.withIntent(request).startCommand(0, 73);
+        assertEquals(1, admission.commands.size());
+        assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+        admission.runAll();
 
         RunCoordinator.Snapshot failure = coordinator.getSnapshot();
         assertNotSame(beforeClick, failure);
@@ -494,12 +504,17 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
-        // Admission is normally off-main; run it inline for these deterministic tests.
-        serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
+        // Admission and failure reports are normally off-main; drive the queued
+        // work explicitly instead of relying on inline delivery.
+        QueueExecutor admission = new QueueExecutor();
+        serviceController.get().setAdmissionExecutorForTesting(admission);
         serviceController.get().setWakeLockSourceForTesting(ignored -> {
             throw new IllegalStateException("PowerManager unavailable");
         });
         serviceController.startCommand(0, 74);
+        assertEquals(1, admission.commands.size());
+        assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+        admission.runAll();
 
         RunCoordinator.Snapshot failure = coordinator.getSnapshot();
         assertNotSame(beforeClick, failure);

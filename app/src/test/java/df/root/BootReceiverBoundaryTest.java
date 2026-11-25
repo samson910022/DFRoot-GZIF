@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): make finish observation deterministic and add real-store restart coverage. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): model the Start at Boot component state in production-path tests. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): drive OFF-at-admission work on a controllable executor and assert the correlated REJECTED outcome. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): confirm the main-thread boundary still queues exactly one admission task before driving it. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -390,6 +391,8 @@ public class BootReceiverBoundaryTest {
             // The request is queued, not admitted inline by onStartCommand.
             assertEquals(1, admission.tasks.size());
             assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+            assertEquals(RunCoordinator.RequestOutcome.NONE,
+                    coordinator.getSnapshot().getRequestOutcome());
             assertEquals(0, workerTasks.get());
 
             // Drive the queued worker explicitly. It re-checks the component,
