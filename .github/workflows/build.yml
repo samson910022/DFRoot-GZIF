@@ -268,12 +268,12 @@ jobs:
           done
 
       - name: Verify packaged loader pins
+        # Every uploaded APK variant must be integrity-checked before upload.
+        # No event-name guard: this fails closed on all trigger paths that
+        # build and upload both debug and unsigned release APKs.
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain
-          else
-            ./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
-          fi
+          set -euo pipefail
+          ./gradlew :app:verifyDebugPackagedLoaderPins :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
 
       - name: Verify APK counts
         # Fail closed if the build produced zero or more than one APK of either

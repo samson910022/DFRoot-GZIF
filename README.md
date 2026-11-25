@@ -264,6 +264,11 @@ container.
   Branch/PR/manual unsigned APKs are nevertheless public Actions artifacts (the
   repository is public): the `DFRoot` artifact also carries `GPL-3.0.txt`,
   `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` alongside the APKs.
+  Before that upload, the `Verify packaged loader pins` step runs **both**
+  `verifyDebugPackagedLoaderPins` and `verifyReleasePackagedLoaderPins` under
+  `set -euo pipefail`, with no event-name guard: on every event that builds the
+  pair, a failed pin check stops the job before `Verify APK counts` and
+  `Upload DFRoot APKs`, so unverified APKs are withheld from the artifact.
 - The `KEYSTORE` value — the protected CI secret, or the environment value read
   by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
   (produce it with `base64 -w0 keystore.jks`). It is decoded and the resulting

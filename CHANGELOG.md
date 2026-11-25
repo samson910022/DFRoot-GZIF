@@ -1,5 +1,25 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.8: integrated CI/artifact pin gate (R2-23) — PR #2
+
+Scoped workflow + policy change only; R5.9 consolidates. In `build-dfroot` the
+`Verify packaged loader pins` step now runs **both**
+`:app:verifyDebugPackagedLoaderPins` and
+`:app:verifyReleasePackagedLoaderPins` in one `set -euo pipefail` script, with
+no `github.event_name` conditional, no `if:` and no `continue-on-error`. It
+precedes the unchanged `Verify APK counts` and `Upload DFRoot APKs` steps, so a
+verification failure skips upload and withholds unverified artifacts on PR,
+branch-push and manual runs. The signed-release/publish job, digest pins, action
+SHAs, permissions, artifact paths/counts, event triggers and negative loader
+fixture are untouched. Policy tests equality-lock the new script and both active
+Gradle task lines, assert the gate is unskippable and precedes upload, lock the
+CI upload allowlist unchanged, and reject event-name guards, dropped variants,
+tolerated failures, step skips and allowlist edits. Results:
+`python3 tests/workflow/test_policy.py` 73/73 OK (includes a harmless stub
+`./gradlew` fixture proving a failed gate never reaches a follow-on upload);
+`python3 -B tests/make/test_make.py` 36/36 OK; `git diff --check` clean. No
+local APK assembly, device/ADB or privileged container; no commit/stage/push.
+
 ## 2026-11-26 — R5.7: R2-14 residual publication-window boundary (scoped docs + harmless host fixtures) — PR #2
 
 Documentation and harmless host fixtures only; **R2-14 remains OPEN** and the

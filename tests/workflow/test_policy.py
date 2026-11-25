@@ -177,6 +177,23 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
     "Package signed release APK": PACKAGE_SIGNED_SCRIPT,
     CLEANUP_STEP: CLEANUP_SCRIPT,
 }
+VERIFY_PINS_STEP = "Verify packaged loader pins"
+# R5.8 (R2-23): exact run-script contract for the integrated CI pin gate.
+# Both APK variants uploaded by build-dfroot must be verified on EVERY trigger
+# path that builds them, so there is no event-name conditional and no skip or
+# tolerated-failure attribute.  Equality-locked like RELEASE_RUN_SCRIPTS.
+VERIFY_PACKAGED_PINS_SCRIPT = (
+    "set -euo pipefail\n"
+    "./gradlew :app:verifyDebugPackagedLoaderPins "
+    ":app:verifyReleasePackagedLoaderPins --no-daemon --console=plain"
+)
+VERIFY_PACKAGED_PINS_ACTIVE_LINES = [
+    "set -euo pipefail",
+    "./gradlew :app:verifyDebugPackagedLoaderPins :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain",
+]
+CI_VERIFY_RUN_SCRIPTS: dict[str, str] = {
+    VERIFY_PINS_STEP: VERIFY_PACKAGED_PINS_SCRIPT,
+}
 # Exact ordered step-name contract for every job.  An extra (or reordered, or
 # renamed) step is a policy violation, not a harmless addition.
 JOB_STEP_NAMES: dict[str, list[str]] = {
@@ -700,7 +717,7 @@ def assert_required_steps_unskippable(text: str) -> None:
     jobs = job_blocks(active)
     required = {
         "test-ci": list(TEST_CI_COMMANDS),
-        "build-dfroot": [APK_COUNTER_COMMAND],
+        "build-dfroot": [VERIFY_PINS_STEP, APK_COUNTER_COMMAND],
         "build-release": [ANCESTRY_STEP, "Verify signed release APK", "Package signed release APK"],
         "publish": ["Verify release checksum"],
     }
@@ -788,6 +805,40 @@ def assert_exact_release_run_scripts(text: str) -> None:
             )
 
 
+def assert_exact_ci_verify_run_scripts(text: str) -> None:
+    """Lock the build-dfroot packaged-pin gate to one exact script.
+
+    Equality (not a substring check) rejects an event-name conditional, a
+    dropped variant, `|| true`, a no-op `echo`, or any appended command.  The
+    step may not carry `if:` or `continue-on-error` either: every uploaded APK
+    must be verified before the upload step runs.
+    """
+    job = job_blocks(strip_yaml_comments(text))["build-dfroot"]
+    for name, expected in CI_VERIFY_RUN_SCRIPTS.items():
+        step = named_step(job, name)
+        actual = run_script(step)
+        if actual != expected:
+            raise AssertionError(
+                f"build-dfroot/{name} run script must be exactly {expected!r}, got {actual!r}"
+            )
+        if step_property(step, "if") is not None or step_property(step, "continue-on-error") is not None:
+            raise AssertionError(f"build-dfroot/{name} must not be skippable or tolerated")
+
+
+def assert_ci_packaged_pin_tasks_are_active(text: str) -> None:
+    """Both verification tasks must be active commands, not comments/text."""
+    job = job_blocks(strip_yaml_comments(text))["build-dfroot"]
+    actual = active_script_lines(run_script(named_step(job, VERIFY_PINS_STEP)))
+    for task in (":app:verifyDebugPackagedLoaderPins", ":app:verifyReleasePackagedLoaderPins"):
+        if not any(line.startswith("./gradlew ") and task in line for line in actual):
+            raise AssertionError(f"missing active Gradle task line for {task}")
+    if actual != VERIFY_PACKAGED_PINS_ACTIVE_LINES:
+        raise AssertionError(
+            f"build-dfroot/{VERIFY_PINS_STEP} active lines must be exactly "
+            f"{VERIFY_PACKAGED_PINS_ACTIVE_LINES!r}, got {actual!r}"
+        )
+
+
 def assert_release_scripts_do_not_reference_signing_files(text: str) -> None:
     """Only the cleanup step may mention the private signing files at all."""
     job = job_blocks(strip_yaml_comments(text))["build-release"]
@@ -850,6 +901,8 @@ def validate_workflow(text: str) -> None:
     assert_exact_test_ci_commands(text)
     assert_exact_step_names(text)
     assert_exact_release_run_scripts(text)
+    assert_exact_ci_verify_run_scripts(text)
+    assert_ci_packaged_pin_tasks_are_active(text)
     assert_required_steps_unskippable(text)
     assert_exact_command_lines(text)
     assert_release_scripts_do_not_reference_signing_files(text)
@@ -1153,6 +1206,55 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(inputs.get("if-no-files-found"), "error")
         self.assertEqual(inputs.get("overwrite"), "true")
 
+    def test_ci_packaged_pin_gate_is_exact_unskippable_and_precedes_upload(self) -> None:
+        """R2-23: every uploaded variant is verified on every trigger path."""
+        job = self.jobs["build-dfroot"]
+        verify = named_step(job, VERIFY_PINS_STEP)
+        assert_exact_ci_verify_run_scripts(self.raw)
+        assert_ci_packaged_pin_tasks_are_active(self.raw)
+        self.assertEqual(run_script(verify), VERIFY_PACKAGED_PINS_SCRIPT)
+        active = active_script_lines(run_script(verify))
+        self.assertEqual(active, VERIFY_PACKAGED_PINS_ACTIVE_LINES)
+        for task in (":app:verifyDebugPackagedLoaderPins", ":app:verifyReleasePackagedLoaderPins"):
+            with self.subTest(task=task):
+                self.assertTrue(any(line.startswith("./gradlew ") and task in line for line in active))
+        # No event-name guard remains: no `if:`/`continue-on-error` attribute,
+        # and no shell conditional keyed on the trigger inside the script.
+        self.assertIsNone(step_property(verify, "if"))
+        self.assertIsNone(step_property(verify, "continue-on-error"))
+        self.assertNotIn("github.event_name", run_script(verify))
+        assert_required_steps_unskippable(self.raw)
+        job_steps = steps(job)
+        counter = named_step(job, APK_COUNTER_COMMAND)
+        upload = action_steps(job, "actions/upload-artifact")
+        self.assertEqual(len(upload), 1)
+        self.assertLess(job_steps.index(verify), job_steps.index(counter))
+        self.assertLess(job_steps.index(counter), job_steps.index(upload[0]))
+        # The job-level tag gate is unchanged: it excludes only signed tag
+        # pushes, which are handled by the separate signed-release job.
+        self.assertEqual(
+            property_value(job, "if", 4),
+            "${{ !(" + TAG_PUSH + ") }}",
+        )
+
+    def test_ci_upload_path_allowlist_is_unchanged(self) -> None:
+        """The CI artifact allowlist stays exactly the original six entries."""
+        expected = (
+            "app/build/outputs/apk/debug/DFRoot_*.apk\n"
+            "app/build/outputs/apk/release/DFRoot_*.apk\n"
+            "GPL-3.0.txt\n"
+            "LICENSE\n"
+            "NOTICE\n"
+            "THIRD_PARTY_NOTICES.md"
+        )
+        self.assertEqual(CI_UPLOAD_PATH, expected)
+        upload = action_steps(self.jobs["build-dfroot"], "actions/upload-artifact")
+        self.assertEqual(len(upload), 1)
+        self.assertEqual(mapping(upload[0], "with", 8).get("path"), expected)
+        self.assertEqual(CI_UPLOAD_PATH.splitlines()[0], "app/build/outputs/apk/debug/DFRoot_*.apk")
+        self.assertEqual(CI_UPLOAD_PATH.splitlines()[1], "app/build/outputs/apk/release/DFRoot_*.apk")
+        assert_exact_artifact_inputs(self.raw)
+
     def test_release_checks_ancestry_before_referencing_any_signing_secret(self) -> None:
         self.assertIn("# Fail before any signing secret is referenced.", self.raw)
         job = self.jobs["build-release"]
@@ -1420,6 +1522,73 @@ class MutationDetectionTests(unittest.TestCase):
             assert_required_steps_unskippable(mutated)
         with self.assertRaises(AssertionError):
             validate_workflow(mutated)
+
+    def test_ci_pin_gate_weakening_mutations_are_rejected(self) -> None:
+        original = (
+            "          ./gradlew :app:verifyDebugPackagedLoaderPins "
+            ":app:verifyReleasePackagedLoaderPins --no-daemon --console=plain\n"
+        )
+        cases = {
+            "event-name guard reinstated": (
+                original,
+                "          if [ \"${{ github.event_name }}\" = \"pull_request\" ]; then\n"
+                + original
+                + "          fi\n",
+            ),
+            "release variant dropped": (
+                original,
+                "          ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain\n",
+            ),
+            "debug variant dropped": (
+                original,
+                "          ./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain\n",
+            ),
+            "tolerated failure": (original, original.rstrip("\n") + " || true\n"),
+            "no-op replacement": (original, "          true\n"),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaisesRegex(AssertionError, "run script must be exactly"):
+                    assert_exact_ci_verify_run_scripts(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+        dropped = self.mutate(
+            original,
+            "          ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "missing active Gradle task line"):
+            assert_ci_packaged_pin_tasks_are_active(dropped)
+
+    def test_ci_pin_gate_cannot_be_skipped_or_tolerated(self) -> None:
+        anchor = "      - name: Verify packaged loader pins\n"
+        cases = {
+            "if: false": "        if: false\n",
+            "if: PR only": "        if: ${{ github.event_name == 'pull_request' }}\n",
+            "continue-on-error": "        continue-on-error: true\n",
+        }
+        for label, injected in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(anchor, anchor + injected)
+                with self.assertRaisesRegex(AssertionError, "must not be skippable or tolerated"):
+                    assert_exact_ci_verify_run_scripts(mutated)
+                with self.assertRaises(AssertionError):
+                    assert_required_steps_unskippable(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_ci_upload_path_allowlist_expansion_and_removal_are_rejected(self) -> None:
+        release_entry = "            app/build/outputs/apk/release/DFRoot_*.apk\n"
+        extra = self.mutate(release_entry, release_entry + "            app/build/outputs/apk/debug/Extra_*.apk\n")
+        with self.assertRaisesRegex(AssertionError, "upload path must be exactly"):
+            assert_exact_artifact_inputs(extra)
+        with self.assertRaises(AssertionError):
+            validate_workflow(extra)
+        removed = self.mutate(release_entry, "")
+        with self.assertRaisesRegex(AssertionError, "upload path must be exactly"):
+            assert_exact_artifact_inputs(removed)
+        with self.assertRaises(AssertionError):
+            validate_workflow(removed)
 
     def test_apksigner_noop_mutation_is_detected(self) -> None:
         mutated = self.mutate(
@@ -1798,6 +1967,7 @@ class BehavioralScriptTests(unittest.TestCase):
         cls.publisher_script = run_script(named_step(jobs["publish"], "Verify release checksum"))
         cls.verify_script = run_script(named_step(jobs["build-release"], "Verify signed release APK"))
         cls.counter_script = run_script(named_step(jobs["build-dfroot"], APK_COUNTER_COMMAND))
+        cls.gate_script = run_script(named_step(jobs["build-dfroot"], VERIFY_PINS_STEP))
 
     def test_package_script_requires_exactly_one_release_apk(self) -> None:
         for label, names in (("zero", []), ("multiple", ["DFRoot_a.apk", "DFRoot_b.apk"])):
@@ -2000,6 +2170,21 @@ class BehavioralScriptTests(unittest.TestCase):
             result = run_in_dir(self.verify_script, root, {"ANDROID_HOME": str(sdk)})
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("apksigner was not found", result.stderr)
+
+    def test_ci_pin_gate_fails_closed_before_a_follow_on_upload(self) -> None:
+        """A failing pin check must stop before any later upload command.
+
+        Harmless fixture only: a stub `./gradlew` returning nonzero stands in
+        for a failed verification.  No Gradle, APK, device or NDK is involved.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stub = root / "gradlew"
+            stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            stub.chmod(0o755)
+            result = run_in_dir(self.gate_script + "\necho UPLOAD_WOULD_RUN\n", root)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("UPLOAD_WOULD_RUN", result.stdout)
 
     def test_preupload_apk_counter_requires_exactly_one_of_each_variant(self) -> None:
         with self.subTest(fixture="one and one"), tempfile.TemporaryDirectory() as tmp:
