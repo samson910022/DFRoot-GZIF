@@ -15,15 +15,26 @@
 
 > [!WARNING]
 > **Current head is UNVALIDATED on device.** The current head of
-> `fix/native-exploit-robustness` (`413a5cb`; producer `2b59684`, round-8 P1-08
-> integration, 2026-11-26, rebased onto the merged PR #1 head) — single nonce-bound `/dev/dffinal`
-> outcome, app-owned bootfail/recovery channels, write-ahead preference
-> transaction, lifecycle-safe listeners, persistent `UNKNOWN` boot-state UI,
-> KO hash policy, build provenance and packaging gates — is **host-tested
-> only**. The hardware results in §5 and §12 (run6/run8, 2026-11-17) and all
-> earlier CI runs were obtained with the **historical implementation** — the
-> old multi-marker protocol, then-current KO pins and the old preference-write
-> path — and must not be read as validation of the current head. An
+> `fix/native-exploit-robustness` is `0ea022f` (Phase B, 2026-11-26, rebased
+> onto the merged PR #1 head): the round-8 review covered `36a11bc`, followed
+> by Phase A `0832331` (`fix(cmake): invalidate loader evidence before argument
+> validation`) and Phase B `0ea022f` (`fix(ci): verify loader bytes inside
+> every distributable APK`). Producer `2b59684` and loader integration
+> `413a5cb` are earlier/mid-increment points, **not** the head. This head —
+> single nonce-bound `/dev/dffinal` outcome, app-owned bootfail/recovery
+> channels, write-ahead preference transaction, lifecycle-safe listeners,
+> persistent `UNKNOWN` boot-state UI, KO hash policy, build provenance and
+> packaging gates — is **host-tested only**. CI status re-checked before
+> finalizing this ledger: run **45708004129** at `0ea022f` **completed with
+> conclusion `success`** (host-only, not device validation); runs
+> **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
+> **45697296267** (`bb83849`) also completed `success` but are **earlier
+> heads**. Counts below are confirmed by the current-head log;
+> no exact current-head count is asserted from an earlier log. The hardware
+> results in §5 and §12 (run6/run8, 2026-11-17) and all earlier CI runs were
+> obtained with the **historical implementation** — the old multi-marker
+> protocol, then-current KO pins and the old preference-write path — and must
+> not be read as validation of the current head. An
 > **unconditional** `host-gates` job (no `if`, checkout-SHA assertion) runs
 > **all** host suites as required gates on **every** event, including protected
 > `v*` tag pushes; both `build-dfroot` and `build-release` require it and
@@ -44,8 +55,19 @@
 > against the same pins (no skip option); a failed re-check removes the stale
 > verified copy. CI asserts 7/7 host suite markers on every event and a strict
 > JUnit XML assertion of **39 tests**, 0 failures/errors/skips, over 61 status
-> cases, CMake 23/25/3/3/6/5 cases (the sixth suite is the bundled-loader hash
-> gate) and JVM 39 tests (4/10/12/13). `dfrecover` is
+> cases, **28 ELF**, **40 loader-stage** cases and the helper-size suite, six
+> CMake suites at **23/25/3/7/6/16** cases (KO policy / packaged-KO / APK
+> packaging / APK content **7** / target graph / loader hash **16**), JVM 39
+> tests (4/10/12/13) and a workflow-policy suite of **90 tests** (was 85).
+> Every distributable APK on the tag path also has both bundled loader entries
+> extracted and checked for SHA-256 + size against the CMakeLists.txt pins by
+> the real verifier (Phase B gate), with a required nonempty per-APK loader
+> index at the pre-upload choke; release markers stay **3/3** and host markers
+> **7/7**. This is a host/CI gate, **not** device validation. Non-tag CI
+> uploads no DFRoot app APK — only the `DFRoot-CI-evidence` bundle; the
+> intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+> `build-lkms` on every event and is not a DFRoot app APK or a release claim.
+> `dfrecover` is
 > bound to the current run nonce (a stale or foreign `ok` is rejected);
 > bootfail token syntax is not invocation proof, and absence of evidence is not
 > proof that system activity stopped. Deadline checks are host-proven ordering
@@ -54,11 +76,15 @@
 > remains **OPEN**: both loaders were rebuilt from the patched source to consume
 > a root-owned `/data/adb/.ksud-stage` and the DFRoot producer at `2b59684`
 > stages to that exact path, but this is pending re-review and fresh on-device
-> full-chain validation (see round 8 in `CHANGELOG.md`). Staging descriptions
+> full-chain validation (see round 8 in `CHANGELOG.md`). **P1-02 and P1-07
+> also remain OPEN** safety/release gates; **P2-13 and P2-14 were addressed in
+> this round (Phase A/B) after the round-8 review** and are **pending final
+> comprehensive review**, not claimed finally closed. Staging descriptions
 > below that mention `/data/local/tmp/.ksud-stage` describe the **historical**
 > run4/run6/run8 loaders, not the rebuilt binaries now bundled. A successful
-> build does not certify safe privileged execution. See §19 for the
-> test/lifecycle/failure-path shape.
+> build does not certify safe privileged execution. No device run validates the
+> current head; no tag was created and no release was published. See §19 for
+> the test/lifecycle/failure-path shape.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
@@ -175,7 +201,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **`adopt_zygote_env()`** — clones zygote64's `environ` (SELinux/label propagation for later children);
 - **`set_partitions_ro()`** — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` pref set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
-- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). **Historical (run4/run6/run8) loaders:** the stage was `/data/local/tmp/.ksud-stage`, baked into those binaries' self-staging constant. **Current head (`413a5cb`; producer `2b59684`):** the rebuilt loaders consume `/data/adb/.ksud-stage` inside root-owned `/data/adb` (0700) and validate it by fd before promotion; bootstrap stages to that exact path. Then execs the staged daemon's **`late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
+- **(local port patch 2, see §6) `mkdir("/data/adb", 0700)` and securely stages `ksud`** with `unlink` + `open(O_CREAT|O_EXCL|O_NOFOLLOW, 0700)` + full-write loop + `fchmod`/`fsync` (replaces the old `system("cp ...")`, blocking symlink/TOCTOU races). **Historical (run4/run6/run8) loaders:** the stage was `/data/local/tmp/.ksud-stage`, baked into those binaries' self-staging constant. **Current head (`0ea022f`; producer `2b59684`, loader integration `413a5cb`):** the rebuilt loaders consume `/data/adb/.ksud-stage` inside root-owned `/data/adb` (0700) and validate it by fd before promotion; bootstrap stages to that exact path. Then execs the staged daemon's **`late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0;
 - `exp.c` first writes a fresh 128-bit run nonce to
   `/data/user_de/0/df.root/files/dfinv` (atomic 0644 replace + fsync); bootstrap
   strictly reads it at startup. A missing/malformed nonce is a bootstrap
@@ -634,9 +660,13 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 Rows 1–20 are evidence for the **historical implementation** (old marker
 protocol, historical KO pins, old preference write path). run6/run8 and all
 earlier CI runs predate the post-PR #1 rebase and do not validate the current
-head of `fix/native-exploit-robustness`, which is host-tested only; rows 21+
-describe that host evidence explicitly. A green build does not certify safe
-privileged execution. Provenance manifests are informational, not independent
+head of `fix/native-exploit-robustness` (`0ea022f`), which is host-tested only;
+rows 21+ describe that host evidence explicitly, with current-head counts
+locally verified at the final increment and tabulated in `CHANGELOG.md` round 8
+(current-increment host test shape). CI run 45708004129 at `0ea022f` completed
+with conclusion `success` at re-check (host-only evidence, not device
+validation). A green build does not certify safe privileged execution.
+Provenance manifests are informational, not independent
 reproducible-build proofs or attestations. **The byte gate rejects unknown
 bytes but accepts the two known obsolete pins**: release is withheld by policy
 — a reviewed re-pin, unvalidated Auto Soft Reboot / Start on Boot, the **OPEN
@@ -669,11 +699,12 @@ Passing the gate is not device validation.
 | 19 | CVE-2026-98260-dm3q port | **Not attempted** | — |
 | 20 | "Both managers" success (classic manager UI + Next UI) | **Half-validated**: both manager APKs present and exercised as *failures*; both **loader lineages** validated as successes (run6 = classic 3.3.0 lineage; run8 = Next 3.4.2 lineage). `me.weishu.kernelsu`-selected success run: **not performed** | §5.1 |
 | 21 | Single atomically published nonce-bound `/dev/dffinal` outcome + truthful rc 0–9 and additive 64 | **UNVALIDATED on device** — host-only: 61 `status_protocol` cases + real-file canonical/permission/atomicity/reader/bootfail/bound+unbound recovery checks | `tests/native/status_protocol_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 6 |
-| 22 | Nonce bound before state write, reserved-nonce `BOOTSTRAP_FAILED` on app-owned `dfbootfail`, nonce-bound `dfrecover` (stale/foreign `ok` rejected), deadline enforced before/after positive recovery and after cleanup before terminal outcomes, `REBOOT_SKIPPED` on NULL/failure/timeout/late evidence, exactly-once cleanup on every exit, `/proc` scan verdict | **UNVALIDATED on device** — host-only: 61 status cases, 13 proc-scan cases, 26 ELF cases, 16+14+10 device-version cases, real-file bootfail/recovery tests; async quiescence and device timing unvalidated | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/elf_parser_test.c`, `tests/native/device_version_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 6 |
+| 22 | Nonce bound before state write, reserved-nonce `BOOTSTRAP_FAILED` on app-owned `dfbootfail`, nonce-bound `dfrecover` (stale/foreign `ok` rejected), deadline enforced before/after positive recovery and after cleanup before terminal outcomes, `REBOOT_SKIPPED` on NULL/failure/timeout/late evidence, exactly-once cleanup on every exit, `/proc` scan verdict | **UNVALIDATED on device** — host-only at the current head: 61 status cases + `final_publish`, 13 proc-scan cases, **28 ELF** cases, 16+14+10 device-version cases, real-file bootfail/recovery tests; async quiescence and device timing unvalidated | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/elf_parser_test.c`, `tests/native/device_version_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 8 (historical round-6 count was 26 ELF) |
 | 23 | Write-ahead durable `PENDING` preference marker, same-key recovery, sticky fail-closed `WILDCARD`, launch tokens + whole-transaction lock (no success on failed transaction), lifecycle-scoped listeners, tri-state boot UI with persistent `UNKNOWN` row and explicit safe disable (never verified OFF, no auto-enable), rc 9 `/dev/df` gate, rc 8 uncertain-prefs gate, truthful `StatusRc` | **UNVALIDATED on device** — host-only JVM: 39 tests, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13); strict CI XML assertion; real UI lifecycle/PackageManager unvalidated | `tests/java/*.java`; `CHANGELOG.md` round 6; §19 |
-| 24 | CMake KO policy / packaged bytes / APK packaging / APK content / target-graph suites | **UNVALIDATED on device** — host-only: 23 ko-policy cases (clean env + simulated CI markers), 25 packaged-KO cases (same-path arg failures, mutating objcopy via 755 launcher so cases 14a/14b actually execute, input immutability), 3 APK fixture cases, 3 APK-content cases, 6 target-graph cases (case 5 proves wrong-pin failure and correct-pin recovery); stale verified `.so` removed at the start of the verified-copy command | `tests/cmake/ko_hash_policy_test.cmake`, `tests/cmake/packaged_ko_test.cmake`, `tests/cmake/apk_packaging_gate_test.cmake`, `tests/cmake/apk_content_gate_test.cmake`, `tests/cmake/packaging_target_graph_test.cmake`; `CHANGELOG.md` round 6 |
+| 24 | CMake KO policy / packaged bytes / APK packaging / APK content / target-graph / loader-hash suites | **UNVALIDATED on device** — host-only at the current head: **23 / 25 / 3 / 7 / 6 / 16** cases (KO policy / packaged-KO / APK packaging / APK content **7** / target graph / loader hash **16**); 25 packaged-KO cases include same-path arg failures, mutating objcopy via 755 launcher so cases 14a/14b actually execute, input immutability; 6 target-graph cases (case 5 proves wrong-pin failure and correct-pin recovery); stale verified `.so` and stale loader evidence removed before re-check (Phase A) | `tests/cmake/ko_hash_policy_test.cmake`, `tests/cmake/packaged_ko_test.cmake`, `tests/cmake/apk_packaging_gate_test.cmake`, `tests/cmake/apk_content_gate_test.cmake`, `tests/cmake/packaging_target_graph_test.cmake`, `tests/cmake/loader_hash_test.cmake`; `CHANGELOG.md` round 8 (historical round-6/round-8-reviewed counts were 23/25/3/3/6/5 and 23/25/3/3/6) |
 | 25 | Suite markers, unconditional host gating and publishing-only gates | **UNVALIDATED on device** — `host-gates` runs all suites with a checkout-SHA assertion on **every** event incl tags; both `build-dfroot` and `build-release` require it, `publish` requires `build-release`. Non-tag runs upload **no APK** (only the `DFRoot-CI-evidence` licence/notice bundle); 7/7 host markers asserted on every event; 3/3 release gates (`apk-gate`, `provenance-identity`, `release-evidence`) plus `distributable-evidence` and a single upload choke point on the `v*` tag path. Signing smoke uses an isolated identity and emits no distributable artifact | `.github/workflows/build.yml`; `CHANGELOG.md` round 6 |
 | 26 | Real release APK path with unchanged obsolete pre-CFI pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B) | **NOT VALIDATED on device / release withheld by policy** — no tag created by us; the byte gate rejects unknown bytes but accepts the two known obsolete pins; reviewed re-pin, P1-08 and device validation are required before a release; provenance is informational, not attestation | `app/src/main/jni/CMakeLists.txt`; `NOTICE`; `CHANGELOG.md` round 6 |
+| 27 | Current-increment loader-stage / helper-size host suites and per-APK loader-byte gate (Phase A/B) | **UNVALIDATED on device** — host-only: **40** loader-stage cases (`tests/native/loader_stage_test.c`) plus the helper-size suite (`tests/native/helper_size_test.c`); Phase B extracts both bundled loaders from every final signed APK and checks SHA-256 + size against the CMakeLists.txt pins via the real verifier, with a required nonempty per-APK loader index at the pre-upload choke (release markers 3/3, host markers 7/7). No device run validates the current head | `tests/native/loader_stage_test.c`, `tests/native/helper_size_test.c`, `.github/workflows/build.yml`; `CHANGELOG.md` round 8 |
 
 Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; every other CVE/module/persistence aspect remains unverified, and the current head has no device run at all.** A successful host build does not certify safe privileged execution.
 
@@ -696,8 +727,12 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
    **loader rebuild**, not just DFRoot-side edits. Those rebuilt loaders are
    now integrated (root-owned `/data/adb/.ksud-stage`, fd-validated), but the
    gate stays OPEN pending re-review and fresh on-device full-chain validation.
+   P1-02 and P1-07 also remain OPEN. P2-13 and P2-14 were addressed in this
+   round (Phase A `0832331` / Phase B `0ea022f`) after the round-8 review and
+   are **pending final comprehensive review**, not claimed finally closed.
    Auto Soft Reboot / Start on Boot also stay disabled by default and
-   unvalidated.
+   unvalidated. No device run validates the current head; no tag was created
+   and no release was published.
 
 ---
 
@@ -774,7 +809,8 @@ these changes. Do not read a passing host test as a device success claim.
   cleanup callback turns that into `pf.cleanup_failed`, and `main()` downgrades
   a success rc 0 to error rc 1. A partially failed write is still restored.
 - **Host verification only.** `make -C tests/native test` runs
-  `elf_parser_test` (26 fixtures) and `device_version_test` plus the two
+  `elf_parser_test` (26 fixtures — historical round-2 count; the current head
+  has **28**) and `device_version_test` plus the two
   existing status-protocol tests; `git diff --check` and standalone compiles
   of `elf_parser.c`, `device_version.c` and `exp.c` are clean. Device
   re-validation of the whole chain is still required before any reliability
@@ -833,7 +869,8 @@ round-4 cleanup timing, reserved bootfail channel and final test counts.
 - **Host verification only.** At this phase `make -C tests/native test` ran 34
   status protocol cases; the round-4 final suite runs **49** status cases, 13
   proc-scan verdict cases, real-file canonical publisher/bootfail/recovery
-  tests, 26 ELF cases and 16+14+10 device-version cases; standalone `-D_GNU_SOURCE` compiles
+  tests, 26 ELF cases (historical count for that head; the current head has
+  **28**) and 16+14+10 device-version cases; standalone `-D_GNU_SOURCE` compiles
   of `bootstrap.c`, `exp.c` (with a stub `DFROOT_SPLICEHELPER_PATH`) and the new
   pure modules, and `git diff --check`, are clean. Device re-validation of the
   whole chain — including the nonce path, the 85 s wait and the v2 token — is
@@ -904,7 +941,7 @@ payload, and no hardware run validates that head.
 | Native `status_protocol_test` | **49** cases: strict v2 parsing, lifecycle ordering/count, reserved bootfail token, strict recovery status, deadline boundaries |
 | Native `final_publish_test` | real temp files: 0644 under a hostile umask, atomic replace, symlink temp sabotage, reserved-nonce bootfail token, strict recovery-status reader |
 | Native `proc_scan_policy_test` | **13** cases |
-| Native `elf_parser_test` | **26** fixture cases |
+| Native `elf_parser_test` | **26** fixture cases (historical round-4 count; current head has **28**) |
 | Native `device_version_test` | **16 kernel + 14 token + 10 release** cases |
 | CMake `ko_hash_policy_test` | **23** cases (clean env; simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`; skip rejection; variant authority) |
 | CMake `packaged_ko_test` | **15** cases, including reused-path stale manifest/dump invalidation |
@@ -956,12 +993,12 @@ pre-rebase heads, never this head. No tag was created by us.
 | Native `status_protocol_test` | **61** cases: strict v2 parsing, lifecycle ordering/count, reserved bootfail token, nonce-bound recovery status, deadline boundaries |
 | Native `final_publish_test` | real temp files: canonical token / 0644 under a hostile umask / atomic replace / symlink temp sabotage / strict reader / bootfail / **bound + unbound recovery** checks |
 | Native `proc_scan_policy_test` | **13** cases |
-| Native `elf_parser_test` | **26** fixture cases |
+| Native `elf_parser_test` | **26** fixture cases (historical round-5 count; current head has **28**) |
 | Native `device_version_test` | **16 kernel + 14 token + 10 release** cases |
 | CMake `ko_hash_policy_test` | **23** cases (clean env; simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`; skip rejection; variant authority) |
 | CMake `packaged_ko_test` | **25** cases (same-path argument failures, mutating `objcopy`, original-input immutability) |
 | CMake `apk_packaging_gate_test` | **3** cases with a harmless deterministic ZIP fixture (not a real APK) |
-| CMake `apk_content_gate_test` | **3** cases (`libbootstrap.so` present / wrong ABI / missing) |
+| CMake `apk_content_gate_test` | **3** cases (`libbootstrap.so` present / wrong ABI / missing) — historical round-5 count; current head has **7** |
 | CMake `packaging_target_graph_test` | **6** cases (named target `dfroot_packaged` + `bootstrap`, `ALL`, raw bypass, cached, poisoned) |
 | JVM `:app:testDebugUnitTest` | **36 tests, 0 failures/errors/skips** — LaunchGate 4, ListenerLifecycle 7, PreferenceIntegrity 12, PreferencePersister 13; strict CI XML assertion of 36/0/0/0 |
 | Suite markers (every non-tag CI event) | **7/7**: `marker-native`, `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`, `marker-junit` |
@@ -1012,8 +1049,11 @@ not certify safe privileged execution.**
 ## 19. Round-6 repair (2026-11-25) — historical round-6 head (`d72838d`)
 
 > **Historical section.** It superseded §18 for the round-6 head only. The
-> current head (`413a5cb`; producer `2b59684`) is covered by the round-8/P1-08 note at the top of
-> this file and by `CHANGELOG.md` round 8.
+> current head (`0ea022f`; producer `2b59684`, loader integration `413a5cb`,
+> post-review Phase A/B increments `0832331` / `0ea022f`) is covered by the
+> round-8/P1-08 note at the top of this file and by `CHANGELOG.md` round 8.
+> Counts in §19.1 below are historical counts for the round-6 head, **not**
+> current-head counts.
 
 This section superseded §18 for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). Everything is **host-only**; no
@@ -1029,17 +1069,24 @@ top of `CHANGELOG.md`.
   directly. The fix generates a **755 launcher** that calls it with an explicit
   `python3`; cases **14a/14b now actually execute** and pass their strict
   SHA-256 mismatch and recovery assertions.
-- Current-head local host results: native **61** status cases plus
-  `final_publish` (canonical / permission / atomicity / reader / bootfail /
-  bound + unbound recovery), **13** proc-scan, **26** ELF, **16 + 14 + 10**
-  device-version; CMake **23 / 25 / 3 / 3 / 6**; JVM **39 tests, 0 failures,
+- Historical round-6-head local host results (**not** current-head counts; see
+  the top warning and `CHANGELOG.md` round 8 for `0ea022f`): native **61**
+  status cases plus `final_publish` (canonical / permission / atomicity / reader
+  / bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF (current
+  head: **28**), **16 + 14 + 10** device-version; CMake **23 / 25 / 3 / 3 / 6**
+  (current head: **23 / 25 / 3 / 7 / 6 / 16**); JVM **39 tests, 0 failures,
   0 errors, 0 skips** (LaunchGate 4, ListenerLifecycle 10,
   PreferenceIntegrity 12, PreferencePersister 13); workflow policy **85 tests /
-  202 subtests**. **7/7** host markers and **3/3** release markers (plus the
-  nonempty gate index and single upload choke point) are asserted. No required
-  gate uses `continue-on-error`.
-- All current CI runs, including old run 45523079469 and the RED pre-repair run
-  45558516540, are **historical**, not certification of this head.
+  202 subtests** (current head: **90 tests**). **7/7** host markers and **3/3**
+  release markers (plus the nonempty gate index and single upload choke point)
+  are asserted. No required gate uses `continue-on-error`.
+- All CI runs listed here, including old run 45523079469 and the RED pre-repair
+  run 45558516540, are **historical**, not certification of this head. At the
+  current code head `0ea022f`, run 45708004129 completed with conclusion
+  `success` at re-check — host-only evidence, **not** device validation or
+  certification; earlier completed-success runs 45706111735 (`0832331`),
+  45702366070 (`36a11bc`) and 45697296267 (`bb83849`) are earlier heads, not
+  current-head certification.
 
 ### 19.2 CI graph, distribution and smoke identity
 
@@ -1091,7 +1138,8 @@ top of `CHANGELOG.md`.
 
 *Original port document produced read-only; §17 (round-4) added 2026-11-25 as a
 documentation-only update, §18 (round-5) added 2026-11-25 to match the rebased
-head, and §19 (round-6) added 2026-11-25 to match the current head and PR #3.
-Sections §17–§18 are historical. No adb was run and no commit was made for
+head, and §19 (round-6) added 2026-11-25 to match the then-current head and PR #3.
+The current-head ledger above was updated to `0ea022f` (post-review Phase A/B)
+on 2026-11-26. Sections §16–§19 are historical. No adb was run and no commit was made for
 these documents. Log contents referenced by line range only. **Do not commit
 host logs or this device's raw dumps anywhere public.***

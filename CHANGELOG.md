@@ -1,12 +1,17 @@
 # Changelog — DFRoot GZIF
 
-## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; gate still OPEN
+## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; post-review hardening; gate still OPEN
 
 This section is authoritative for the current head of
-`fix/native-exploit-robustness` (`413a5cb`; producer change `2b59684`, loader
-integration `413a5cb`). Every earlier section, including
-round 6, is **historical** and describes earlier heads only. All evidence in
-this section is **host-only**; there was no device run, no tag and no release.
+`fix/native-exploit-robustness` (`0ea022fd4dac054ad37e1cf0809e56a8604eaaba`,
+Phase B). The round-8 review covered head `36a11bc`; two increments landed
+after that review: `0832331` (`fix(cmake): invalidate loader evidence before
+argument validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes
+inside every distributable APK`, Phase B). The producer change `2b59684` and
+loader integration `413a5cb` are earlier/mid-increment points, **not** the
+head. Every earlier section, including round 6, is **historical** and
+describes earlier heads only. All evidence in this section is **host-only**;
+there was no device run, no tag and no release.
 
 ### Root-owned staging contract and rebuilt loaders
 
@@ -55,11 +60,59 @@ the committed loader bytes. It rejects missing files, non-regular/symlinked
 paths, wrong sizes and wrong hashes with distinct fatal reasons, removes any
 prior verified manifest at entry, and writes a manifest only after both
 loaders pass. There is no skip option. The KO pins and KO gates are untouched.
-Host fixture suite `tests/cmake/loader_hash_test.cmake` covers 5 cases
-(reviewed pins pass, wrong hash, wrong size, missing file, reused output path).
-CMake host suites are now **23 / 25 / 3 / 3 / 6 / 5** cases (KO policy /
-packaged-KO / APK packaging / APK content / target graph / loader hash); the
-host-gates marker set stays **7/7** unchanged.
+At the reviewed round-8 head (`36a11bc`) the host fixture suite
+`tests/cmake/loader_hash_test.cmake` covered 5 cases (reviewed pins pass, wrong
+hash, wrong size, missing file, reused output path) and the six CMake suites
+stood at **23 / 25 / 3 / 3 / 6 / 5** cases (KO policy / packaged-KO / APK
+packaging / APK content / target graph / loader hash). Those are historical
+counts for that head: at the current head the loader-hash suite has **16**
+cases and the APK-content suite has **7**, giving **23 / 25 / 3 / 7 / 6 / 16**.
+The host-gates marker set stays **7/7** unchanged.
+
+### Post-review increments (Phase A / Phase B)
+
+- **`0832331` (Phase A, `fix(cmake): invalidate loader evidence before argument
+  validation`).** Stale verified loader evidence is invalidated before
+  required-argument validation, so a failed re-check cannot leave a prior
+  success behind. This is a host/CMake evidence-integrity fix, not device
+  validation.
+- **`0ea022f` (Phase B, `fix(ci): verify loader bytes inside every distributable
+  APK`).** A new release gate named `Verify bundled loader bytes in every
+  distributable APK` extracts **both** bundled loader entries from each final
+  signed APK and checks SHA-256 **and** size against the pins in
+  `app/src/main/jni/CMakeLists.txt` through the real verifier. A required
+  **per-APK loader index** (nonempty) is asserted at the pre-upload choke
+  point. Release markers stay **3/3** and host suite markers stay **7/7**.
+  This is a host/CI packaging gate, **not** device validation.
+- **P2-13 and P2-14** were addressed across these two post-review increments
+  (Phase A / Phase B) after the round-8 review. Both are **addressed in this
+  round, pending final comprehensive review**; this ledger does not claim
+  final closure before that review.
+
+### Current-increment host test shape and evidence scope
+
+Locally verified at the final increment (`0ea022f`; host-only):
+
+- Native: **61** status cases plus `final_publish` (canonical token /
+  permission / atomicity / strict reader / bootfail / bound + unbound
+  recovery), **13** proc-scan cases, **28** ELF cases, **16 + 14 + 10**
+  device-version cases, **40** loader-stage cases
+  (`tests/native/loader_stage_test.c`) and the helper-size suite
+  (`tests/native/helper_size_test.c`).
+- CMake: six suites at **23 / 25 / 3 / 7 / 6 / 16** cases (KO policy /
+  packaged-KO / APK packaging / APK content **7** cases / target graph /
+  loader hash **16** cases).
+- JVM: **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
+  ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13).
+- Workflow policy (`tests/workflow/test_policy.py`): **90 tests** (was 85);
+  **7/7** host markers and **3/3** release markers unchanged.
+- CI status re-checked before finalizing this ledger: run **45708004129** at
+  the current code head `0ea022f` **completed with conclusion `success`**
+  (host-only evidence, **not** device validation or a release claim); its log
+  confirms 23/25/3/7/6/16 CMake cases, 39 JVM tests and 7/7 markers. Runs
+  **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
+  **45697296267** (`bb83849`) are also completed `success`, but are **earlier
+  heads**. No exact current-head count is asserted from an earlier log.
 
 ### Disposition
 
@@ -68,9 +121,23 @@ host-gates marker set stays **7/7** unchanged.
   **pending re-review and fresh on-device full-chain validation**. No device
   run was performed for these binaries: do not consume or distribute unverified
   privileged content and do not claim the gate is closed from host evidence.
+- **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
+  DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
+  (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
+  intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+  `build-lkms` on every event; it is a build intermediate, not a DFRoot app
+  APK and not a release claim.
+- **APK loader gate is a host/CI gate.** Phase B checks bundled loader bytes
+  inside every distributable APK at the release path, with a required
+  per-APK loader index at the pre-upload choke; it does not validate device
+  behavior and does not close any open safety/release gate.
+- **Open gates:** P1-02, P1-07 and P1-08 remain **OPEN** safety/release gates.
+  P2-13 and P2-14 were addressed in this round (Phase A/B), **pending final
+  comprehensive review** — not claimed finally closed here.
 - run6 (classic, 2026-11-17) and run8 (Next, 2026-11-17) — and every earlier
   CI run — are **historical**: they validated the previous loaders and earlier
-  implementations, never these rebuilt binaries or this head.
+  implementations, never these rebuilt binaries or this head. No device run
+  validates the current head.
 - **Auto Soft Reboot and Start on Boot remain disabled by default and
   unvalidated.** No tag was created and no release was published; this head is
   not device-verified, not independently merge-ready and not release-ready.
@@ -110,7 +177,7 @@ launch tokens and whole-transaction lock) and **P2-09** (stale packaged evidence
 invalidated before required-argument validation). None of them constitutes
 device validation.
 
-### Post-fix CI status (current head)
+### Post-fix CI status (round-6 head; historical — see round-8 section above)
 
 - **The pre-repair head was RED.** At `4a81aa5`, CI run **45558516540** failed
   at `packaged_ko_test` case **14a** with "permission denied": the
@@ -119,9 +186,10 @@ device validation.
   launcher** that invokes the fixture with an explicit `python3`; cases
   **14a/14b now actually execute** and pass their strict SHA-256 mismatch and
   recovery assertions.
-- **Current head host results (local, host-only):** native **61** status cases
-  plus `final_publish` (canonical token / permission / atomicity / reader /
-  bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF,
+- **Round-6-head host results (local, host-only; historical counts — the
+  current head is tabulated in the round-8 section above):** native **61**
+  status cases plus `final_publish` (canonical token / permission / atomicity /
+  reader / bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF,
   **16 + 14 + 10** device-version; CMake **23 / 25 / 3 / 3 / 6** cases (KO
   policy / packaged-KO / APK packaging / APK content / target graph); JVM
   **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
@@ -142,7 +210,7 @@ device validation.
 ## Round-5 repair (2026-11-25) — historical (round-5 head)
 
 > **Historical section.** It was authoritative for the pre-round-6 head; the
-> round-6 section above is authoritative for the current head. Its counts,
+> round-8 section at the top is authoritative for the current head. Its counts,
 > CI shape and dispositions describe the round-5 implementation only.
 
 ### Stable-ID disposition (round-5, 9 findings carried forward)
@@ -172,9 +240,11 @@ PR #1 is merged into the base and PR #3 was rebased onto that head. PR #1's
 CI/signing/GPLv3-conveyance, Gradle 9.9.2 + AGP 9.5.0 version catalog, NDK/DKK
 digest pinning and Make/contract tests are integrated. Kept from PR #1: the
 version catalog, release-environment signing writer / `apksigner` / checksum /
-conveyance and the `publish` job. Non-tag events upload a Debug-only
-`DFRoot-UNVERIFIED-CI` artifact with PR #1's licence/notice bundle and **no
-release claim**; signed release remains tag-only and gated. run6/run8 and every
+conveyance and the `publish` job. Non-tag events at this historical round-5 head
+uploaded a Debug-only `DFRoot-UNVERIFIED-CI` artifact with PR #1's licence/notice
+bundle and **no release claim**; signed release remains tag-only and gated. At
+the current head non-tag events upload no DFRoot APK (only `DFRoot-CI-evidence`).
+run6/run8 and every
 older CI run (including 45523079469) validate only historical implementations
 or pre-rebase heads, never this head. No tag was created by us.
 
@@ -220,7 +290,7 @@ build is not a safety certificate.
 ## Historical — PR #1 hardening (CI build reliability), integrated into the rebased head
 
 > **Historical section.** It describes the PR #1 baseline as integrated before
-> round 6; the round-6 section at the top is authoritative for the current head.
+> round 6; the round-8 section at the top is authoritative for the current head.
 
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
@@ -294,7 +364,7 @@ distribution SHA-256; AGP **9.5.0** effective through
 ### Post-rebase integration
 
 PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
-head. The round-6 section at the top is authoritative for the current head; the
+head. The round-8 section at the top is authoritative for the current head; the
 round-5 section above and the host-suite counts, stable-ID disposition table and
 validation boundary in the round-4 section below are historical. run6/run8 and
 every prior CI run predate
@@ -307,7 +377,7 @@ the gated `v*` tag path.
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
 > **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
-> describe the round-4 implementation, not the current head. The round-6
+> describe the round-4 implementation, not the current head. The round-8
 > section at the top is authoritative for the current head.
 
 **All evidence in this section is host-only.** No hardware run validates the
@@ -385,10 +455,9 @@ build does not certify safe privileged execution.
 
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
 
-> Historical section. The round-5 section at the top of this file is
-> authoritative for current counts, cleanup timing and the recovery channel;
-> the round-6 section at the top of this file is now authoritative for the
-> current head. This section, the round-4 section above it and the phase
+> Historical section. The round-8 section at the top of this file is
+> authoritative for current counts, cleanup timing, the recovery channel and
+> the current head. This section, the round-4 section above it and the phase
 > sections below are kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**

@@ -200,17 +200,50 @@ historical implementations or pre-rebase heads, not this head.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
+- **Validation status at the current head (`0ea022f`; host-only).** The
+  round-8 review covered head `36a11bc`; the two post-review increments are
+  `0832331` (`fix(cmake): invalidate loader evidence before argument
+  validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes inside
+  every distributable APK`, Phase B). Producer `2b59684` and loader integration
+  `413a5cb` are earlier/mid-increment points, **not** the head. CI re-check:
+  run **45708004129** at `0ea022f` **completed with conclusion `success`**
+  (host-only, not device validation); runs **45706111735** (`0832331`),
+  **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
+  completed `success` but are **earlier heads**. The counts below are confirmed
+  by the current-head log; no current-head count is asserted from an earlier
+  log. No
+  device run validates the current head; no tag was created and no release was
+  published.
+- **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
+  DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
+  (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
+  intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+  `build-lkms` on every event; it is a build intermediate, not a DFRoot app APK
+  and not a release claim. The signing smoke emits only an isolated
+  `SigningSmoke-*.apk`, never a distributable artifact.
+- **Loader bytes verified in every distributable APK (Phase B host/CI gate).**
+  The gate `Verify bundled loader bytes in every distributable APK` extracts
+  **both** bundled loader entries from each final signed APK and checks SHA-256
+  and size against the pins in `app/src/main/jni/CMakeLists.txt` via the real
+  verifier; a nonempty per-APK loader index is required at the pre-upload
+  choke. Release markers remain **3/3** and host markers **7/7**. This is a
+  host/CI packaging check, **not** device validation, and it does not close any
+  open safety/release gate.
 - **All CI suites are asserted.** The host suites are **61** status cases plus
   the `final_publish` canonical/permission/atomicity/reader/bootfail/bound+unbound
-  recovery checks, 13 proc-scan, 26 ELF and 16+14+10 device-version cases;
-  CMake runs 23 KO-policy, 25 packaged-KO, 3 APK-packaging, 3 APK-content and 6
-  target-graph cases. Every suite writes a marker that CI checks (7/7 on
+  recovery checks, 13 proc-scan, **28 ELF**, **40 loader-stage** cases
+  (`tests/native/loader_stage_test.c`), the helper-size suite
+  (`tests/native/helper_size_test.c`) and 16+14+10 device-version cases;
+  CMake runs 23 KO-policy, 25 packaged-KO, 3 APK-packaging, **7 APK-content**
+  and 6 target-graph cases plus the **16-case loader-hash** suite
+  (**23/25/3/7/6/16** total). Every suite writes a marker that CI checks (7/7 on
   **every** event, including tags), the JUnit XML must report **39 tests** with
-  0 failures/errors/skips, and a release-evidence step cross-checks git SHA,
+  0 failures/errors/skips (4/10/12/13), and a release-evidence step cross-checks git SHA,
   skip OFF in every CMakeCache, the complete set of verified KO and packaged
   manifests with matching hashes, and every staged APK hash. The publishing
   path adds 3/3 distributable-evidence gates before a single upload choke point.
-  The workflow policy suite runs 85 tests / 202 subtests. The informational
+  The workflow policy suite (`tests/workflow/test_policy.py`) runs **90 tests**
+  (was 85). The informational
   provenance upload uses `if-no-files-found: error`; no required gate uses
   `continue-on-error`. The pre-repair head `4a81aa5` was RED at CI run
   45558516540 (mutating-objcopy fixture invoked directly with git mode 100644);
@@ -263,6 +296,15 @@ historical implementations or pre-rebase heads, not this head.
   UNVALIDATED; none of this is a substitute for on-device validation.
 - **Auto Soft Reboot / Start on Boot remain disabled by default and
   unvalidated** on S9180ZHU8GZIF.
+- **P1-02 release gate — still OPEN.** Reserved-channel token syntax is not
+  invocation proof, and absence of evidence is not proof that system activity
+  stopped; Android publication/access and on-device timing remain UNVALIDATED.
+- **P1-07 release gate — still OPEN.** Deadline checks are host-proven ordering
+  only; device quiescence and verified restoration are UNVALIDATED. This is a
+  release restriction, not a safety claim.
+- **P2-13 / P2-14** were addressed in this round (Phase A `0832331` / Phase B
+  `0ea022f`) after the round-8 review; both are **addressed in this round,
+  pending final comprehensive review**, not claimed finally closed.
 - **P1-08 release gate — still OPEN.** Both bundled loaders were rebuilt from
   the patched source to consume a root-owned stage at `/data/adb/.ksud-stage`
   (validated by fd before promotion to `/data/adb/ksud`), and the DFRoot

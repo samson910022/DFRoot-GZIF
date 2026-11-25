@@ -27,32 +27,55 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
 
 > [!WARNING]
-> **Validation boundary.** run6/run8 happened on 2026-11-17 against the
+> **Validation boundary.** The current head of `fix/native-exploit-robustness`
+> is `0ea022f` (Phase B, `fix(ci): verify loader bytes inside every
+> distributable APK`), landed after the round-8 reviewed head `36a11bc` and
+> Phase A `0832331` (`fix(cmake): invalidate loader evidence before argument
+> validation`). The producer change `2b59684` and loader integration `413a5cb`
+> are earlier/mid-increment points, **not** the head. CI status re-checked
+> before finalizing this ledger: run **45708004129** at `0ea022f` **completed
+> with conclusion `success`** (host-only, not device validation); its log
+> confirms the counts below. Runs **45706111735** (`0832331`),
+> **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
+> completed `success` but are **earlier heads**; no current-head count is
+> asserted from an earlier log. run6/run8 happened on 2026-11-17 against the
 > **historical implementation** (old multi-marker protocol, then-current KO
-> pins, old preference path); no hardware run validates the rebased head of
-> `fix/native-exploit-robustness`. That head is **host-tested only and
-> UNVALIDATED on device**; a successful build does not certify safe privileged
-> execution.
+> pins, old preference path); no hardware run validates the current head.
+> That head is **host-tested only and UNVALIDATED on device**; a successful
+> build does not certify safe privileged execution.
 > An **unconditional** `host-gates` job runs **all** host suites as required
 > gates on **every** event, including protected `v*` tag pushes, with a
 > checkout-SHA assertion; both `build-dfroot` and `build-release` require it,
-> and `publish` requires `build-release`. Non-tag events upload **no APK**: the
-> only upload is the `DFRoot-CI-evidence` bundle (`GPL-3.0.txt`, `LICENSE`,
-> `NOTICE`, `THIRD_PARTY_NOTICES.md`). The Debug APK is a compile/content gate
-> only. Only a `v*` tag push takes the protected `build-release` path, where the
-> signed APK is `apksigner`-verified and checksummed, then every distributable
-> APK is packaged-byte-verified with its own manifest and `so_sha256` binding,
-> every provenance record gets a required identity check, and release evidence
-> is asserted at a single pre-upload choke point before `publish` can run.
+> and `publish` requires `build-release`. Non-tag events upload **no DFRoot app
+> APK**: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
+> (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
+> intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+> `build-lkms` on every event; it is a build intermediate, not a DFRoot app APK
+> and not a release claim. The Debug APK is a compile/content gate only. Only a
+> `v*` tag push takes the protected `build-release` path, where the signed APK
+> is `apksigner`-verified and checksummed, then every distributable APK is
+> packaged-byte-verified with its own manifest and `so_sha256` binding **and
+> has both bundled loader entries extracted and checked for SHA-256 + size
+> against the CMakeLists.txt pins by the real verifier** (Phase B gate
+> `Verify bundled loader bytes in every distributable APK`); every provenance
+> record gets a required identity check, a nonempty per-APK loader index is
+> required at the pre-upload choke point, and release evidence is asserted at
+> a single pre-upload choke point before `publish` can run. This is a host/CI
+> packaging gate, **not** device validation; release markers stay 3/3 and host
+> markers stay 7/7.
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
-> Host suites: **61** status + 13 proc-scan + 26 ELF + 16/14/10 device-version
-> cases, CMake **23/25/3/3/6/5** cases (KO policy / packaged-KO / APK packaging
-> / APK content / target graph / loader hash), JVM **39 tests** (4/10/12/13 in LaunchGate /
-> ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
-> **39/0/0/0** XML assertion, **7/7** host suite markers on every event and
-> **3/3** release markers (plus the nonempty gate index and single upload choke
-> point) on the tag path. Workflow policy: **85 tests / 202 subtests**.
+> Host suites at the final increment (`0ea022f`, local verification): **61**
+> status + `final_publish` + 13 proc-scan + **28 ELF** + 16/14/10 device-version
+> + **40 loader-stage** cases (`tests/native/loader_stage_test.c`) and the
+> helper-size suite (`tests/native/helper_size_test.c`), CMake **23/25/3/7/6/16**
+> cases (KO policy / packaged-KO / APK packaging / APK content **7** cases /
+> target graph / loader hash **16** cases), JVM **39 tests** (4/10/12/13 in
+> LaunchGate / ListenerLifecycle / PreferenceIntegrity / PreferencePersister)
+> with a strict **39/0/0/0** XML assertion, **7/7** host suite markers on every
+> event and **3/3** release markers (plus the nonempty gate index, the required
+> per-APK loader index and single upload choke point) on the tag path. Workflow
+> policy (`tests/workflow/test_policy.py`): **90 tests** (was 85).
 > No required gate uses `continue-on-error`.
 > **KO pins:** the byte gate rejects unknown bytes but still accepts the two
 > known obsolete pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). Release is
@@ -86,8 +109,15 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > alone could not close it. It remains **OPEN pending re-review and fresh
 > on-device full-chain validation**: documentation is not a fix and unverified
 > privileged content must not be consumed or distributed. run6/run8 are
-> historical and validate only the old loaders. See `CHANGELOG.md` round 8
-> (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle detail.
+> historical and validate only the old loaders. **P1-02 and P1-07 also remain
+> OPEN safety/release gates**; P2-13 and P2-14 were addressed in this round
+> (Phase A/B) after the round-8 review and are **pending final comprehensive
+> review**, not claimed finally closed. Auto Soft Reboot and Start on Boot
+> remain disabled and unvalidated; no device run validates the current head,
+> no tag was created and no release was published, and this head is **not
+> device-verified, not independently merge-ready and not release-ready**. See
+> `CHANGELOG.md` round 8 (2026-11-26) and `PORTING-GZIF.md` §19 for the
+> test/lifecycle detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
