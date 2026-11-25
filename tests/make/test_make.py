@@ -219,9 +219,119 @@ class CredentialContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(ko_dir.exists())
 
-    def test_credentials_are_not_exported_globally(self) -> None:
+    def test_clean_recipe_environment_omits_credentials(self) -> None:
+        """Env-origin credentials must not leak into the (non-signing) clean recipe.
+
+        An `rm` shim first on PATH records SIGN_PASS/SIGN_ALIAS on every rm call,
+        then execs the real rm so we also prove the genuine recipe ran.
+        """
+        with tempfile.TemporaryDirectory(prefix="dfroot-make-clean-env-") as directory:
+            project = Path(directory)
+            ko_dir = project / "app" / "src" / "main" / "jni" / "ko"
+            ko_dir.mkdir(parents=True)
+            (ko_dir / "dfroot-android13-5.15.ko").write_bytes(b"placeholder\n")
+            capture = project / "rm.env"
+            shim_dir = project / "bin"
+            shim_dir.mkdir()
+            real_rm = shutil.which("rm")
+            self.assertIsNotNone(real_rm)
+            shim = shim_dir / "rm"
+            shim.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -u\n"
+                "{\n"
+                '  printf "SIGN_PASS=%s\\n" "${SIGN_PASS-<unset>}"\n'
+                '  printf "SIGN_ALIAS=%s\\n" "${SIGN_ALIAS-<unset>}"\n'
+                '} >> "$RM_CAPTURE"\n'
+                f'exec "{real_rm}" "$@"\n',
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            env = clean_env({
+                "PATH": f"{shim_dir}{os.pathsep}{clean_env().get('PATH', '')}",
+                "RM_CAPTURE": str(capture),
+                "SIGN_PASS": "SENTINEL-P",
+                "SIGN_ALIAS": "SENTINEL-A",
+            })
+            result = run_make("clean", cwd=project, env=env, dry_run=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(capture.exists(), "rm shim was not invoked by clean")
+            captured = capture.read_text(encoding="utf-8")
+            self.assertIn("SIGN_PASS=<unset>", captured)
+            self.assertIn("SIGN_ALIAS=<unset>", captured)
+            self.assertNotIn("SENTINEL-P", captured)
+            self.assertNotIn("SENTINEL-A", captured)
+            # The real rm ran, so the recipe really executed.
+            self.assertFalse(ko_dir.exists(), "real rm did not execute")
+
+    def test_ddk_wrapper_environment_omits_credentials(self) -> None:
+        """Env-origin credentials must not leak into the LKM/DDK wrapper recipe."""
+        with tempfile.TemporaryDirectory(prefix="dfroot-make-ddk-env-") as directory:
+            project = Path(directory)
+            (project / "scripts").mkdir()
+            (project / ".github" / "workflows").mkdir(parents=True)
+            shutil.copy2(IMAGE_SCRIPT, project / "scripts" / "ddk-image.sh")
+            shutil.copy2(WORKFLOW, project / ".github" / "workflows" / "build.yml")
+            (project / "lkm").mkdir()
+            (project / "lkm" / "dfroot.c").write_text(
+                "// stub LKM source\n", encoding="utf-8"
+            )
+            (project / "lkm" / "Makefile").write_text("all:\n\t@true\n", encoding="utf-8")
+            (project / "app" / "src" / "main" / "jni" / "ko").mkdir(parents=True)
+
+            capture = project / "engine.env"
+            engine = project / "fake-engine"
+            engine.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -u\n"
+                "{\n"
+                '  printf "ARGS=%s\\n" "$*"\n'
+                '  printf "SIGN_PASS=%s\\n" "${SIGN_PASS-<unset>}"\n'
+                '  printf "SIGN_ALIAS=%s\\n" "${SIGN_ALIAS-<unset>}"\n'
+                '} > "$ENGINE_CAPTURE"\n',
+                encoding="utf-8",
+            )
+            engine.chmod(0o755)
+
+            env = clean_env({
+                "ENGINE_CAPTURE": str(capture),
+                "SIGN_PASS": "SENTINEL-P",
+                "SIGN_ALIAS": "SENTINEL-A",
+            })
+            result = run_make(
+                f"ENGINE={engine}",
+                "app/src/main/jni/ko/dfroot-android13-5.15.ko",
+                cwd=project, env=env, dry_run=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(capture.exists(), "ENGINE stub was not invoked")
+            captured = capture.read_text(encoding="utf-8")
+            self.assertIn("ARGS=run --rm", captured)
+            self.assertIn("SIGN_PASS=<unset>", captured)
+            self.assertIn("SIGN_ALIAS=<unset>", captured)
+            self.assertNotIn("SENTINEL-P", captured)
+            self.assertNotIn("SENTINEL-A", captured)
+
+        # The APK dry run must never pass credentials into the container via -e.
+        dry = run_make("out/DFRoot.apk")
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertNotIn("-e SIGN_PASS", dry.stdout)
+        self.assertNotIn("-e SIGN_ALIAS", dry.stdout)
+
+    def test_unexport_is_global_and_no_global_export_exists(self) -> None:
         makefile = make_code()
+        # The old textual-only check was replaced by behavioral presence/absence
+        # tests below; this guard pins the structural shape they rely on.
         self.assertNotIn("CMDLINE_ORIGIN", makefile)
+        self.assertIn("unexport SIGN_PASS SIGN_ALIAS", makefile)
+        self.assertLess(
+            makefile.index("unexport SIGN_PASS SIGN_ALIAS"),
+            makefile.index(
+                "keystore.jks signing.properties verify-signing-permissions: "
+                "export SIGN_PASS"
+            ),
+        )
         for variable in ("SIGN_PASS", "SIGN_ALIAS"):
             self.assertNotIn(f"\nexport {variable}\n", makefile)
             export_line = (
@@ -229,6 +339,9 @@ class CredentialContractTests(unittest.TestCase):
                 f"export {variable} := $(value {variable})"
             )
             self.assertIn(export_line, makefile)
+        # No overrideable RAW_* helper was introduced (it could be bypassed with
+        # `make RAW_PASS=...`); raw values come from $(value ...) only.
+        self.assertNotIn("export RAW_", makefile)
 
     def test_no_recipe_echoes_credential_values(self) -> None:
         assert_no_credential_echo(make_code())
@@ -547,6 +660,35 @@ class StubJavaSigningRecipeTests(unittest.TestCase):
         self.assertIn("SIGN_PASS=stub-pass-123", captured)
         self.assertIn("SIGN_ALIAS=stub-alias-456", captured)
         self.assertIn("create-local", captured)
+
+    def test_signing_recipes_receive_credentials_after_unexport(self) -> None:
+        """Global unexport must not strip credentials at the signing boundary.
+
+        Both branches are covered: a new keystore (create-local) and an existing
+        keystore, where the prerequisite chain signing.properties ->
+        verify-signing-permissions -> keystore.jks must still receive them.
+        The full raw-byte matrix is covered by the two recipe-boundary tests
+        below; this test makes the R6 presence contract explicit.
+        """
+        password = "SENTINEL-P$raw$$tail"
+        alias = "SENTINEL-A$xy"
+
+        self.reset_byte_capture()
+        result = run_make(
+            "KMIS=", "keystore.jks", cwd=self.project,
+            env=self.stub_env(password, alias), dry_run=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_raw_credentials(password, alias, ("create-local",))
+
+        self.reset_byte_capture()
+        (self.project / "keystore.jks").write_bytes(b"dummy keystore\n")
+        result = run_make(
+            "KMIS=", "signing.properties", cwd=self.project,
+            env=self.stub_env(password, alias), dry_run=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_raw_credentials(password, alias, ("verify-local", "local"))
 
     def test_unset_credentials_fail_closed_without_invoking_java(self) -> None:
         env = clean_env({"JAVA": str(self.stub), "CAPTURE_FILE": str(self.capture)})

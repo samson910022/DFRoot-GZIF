@@ -50,13 +50,19 @@ $(error DDK_IMAGE must not be set; it is derived from .github/workflows/build.ym
 endif
 DDK_IMAGE ?= $(if $(strip $(KMIS)),$(shell bash scripts/ddk-image.sh $(KMIS)),)
 
-# Credentials are exported only into signing recipes (and inherited by their
-# prerequisites), never globally: clean, dry runs and LKM/DDK targets do not
-# need them.  Environment-origin variables are imported as recursively expanded,
-# so `:= $(SIGN_PASS)` would re-expand the value and corrupt literal `$` bytes.
-# `$(value ...)` takes the raw text instead, preserving it byte-for-byte.
-# Verification stays phony so it runs on every signing build, while order-only
-# prerequisites prevent needless rewriting of up-to-date material.
+# GNU Make auto-exports variables that originated in the environment into every
+# recipe, so simply dropping the old global `export` was not enough: clean, the
+# LKM/DDK wrapper and Gradle would still inherit SIGN_PASS/SIGN_ALIAS from the
+# caller's environment.  The explicit global `unexport` below removes that
+# implicit leak; the raw values are reintroduced only at the signing boundary
+# and the prerequisites it inherits.  Environment-origin variables are imported
+# as recursively expanded, so `:= $(SIGN_PASS)` would re-expand the value and
+# corrupt literal `$` bytes; `$(value ...)` takes the raw text instead,
+# preserving it byte-for-byte.  Verification stays phony so it runs on every
+# signing build, while order-only prerequisites prevent needless rewriting of
+# up-to-date material.
+unexport SIGN_PASS SIGN_ALIAS
+
 keystore.jks signing.properties verify-signing-permissions: export SIGN_PASS := $(value SIGN_PASS)
 keystore.jks signing.properties verify-signing-permissions: export SIGN_ALIAS := $(value SIGN_ALIAS)
 
