@@ -1,5 +1,49 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R6.4 second fix loop: guard-refusal lifetime + bounded render replay — PR #2
+
+Both reviewers of the remaining Required finding required two more fixes in
+`ExploitService`. (1) A main-thread start arriving while the flush guard is held
+whose express post is REFUSED now registers and resolves that start ID's own
+lifetime on the caller (correlated `REJECTED` plus exactly one `stopSelf` once
+the flush releases and the bounded deferral / post-winner sweep drain). The
+previous code only reported a correlated `REJECTED` and leaked the platform
+start ID; no `handleStartCommand`, `registerStart` or `stopSelf` ever ran for it.
+This is **host-only bookkeeping evidence, not device proof**, and no refusal path
+admits work, acquires a lease, starts the engine or claims completion. (2) The
+single `deferredRenderSnapshot` slot became a four-slot bounded queue of
+TERMINAL-only snapshots, replayed from BOTH `runDeferredFlushRedecision` and
+`runPostFlushSweep`; a terminal render refused after the three-deferral budget is
+spent is now still resolved. Non-terminal refusals and overflow are dropped with
+honest logs, and the queue is cleared on create/destroy. R5.4 epoch serialization,
+R6.3 deadline/deferral/sweep, admission gates, 64/64 bounds, owner token and
+`START_NOT_STICKY` are unchanged; no executor post holds `startsLock` or the new
+replay lock. Three deterministic host fixtures were added:
+`guardLevelExpressRefusalRegistersAndResolvesLifetimeExactlyOnce`,
+`postWinnerSweepReplaysTerminalRenderRefusedAfterDeferralCap`, and
+`refusedRenderReplayQueueIsBoundedTerminalOnlyAndClearedOnDestroy`. Focused
+three-class verification: 127 tests, 0 failures (47 + 32 + 48). No commit/stage/
+push; no device/ADB/payload/privileged-container/APK work.
+
+## 2026-11-26 — R6.4 Required fixes: start guard, render fallback, express attach — PR #2
+
+Short note (R6.5 consolidates): three architecture findings are addressed in
+`ExploitService` and its host fixtures. (1) A main-thread start arriving while
+`flushInProgress` is set now posts the whole start handling to the owned express
+worker as one task and returns `START_NOT_STICKY`, so the whole handling never
+takes `startsLock` behind a held flush. (The later second-fix-loop entry narrows
+this: an express REFUSAL does take only the short `registerStart`/`resolveStart`
+bookkeeping sections on the caller.) (2) A bounded general-host render refusal is
+remembered and the lost terminal resolution is re-applied by the existing
+bounded deferred re-decision; no completion is claimed on refusal. (3) Main-thread
+foreground attach uses a separate owned 16-slot express worker with AbortPolicy,
+so it is not queued behind 64 render/flush tasks; express refusal fails closed.
+The R5.4 attach/epoch serialization and all admission gates are unchanged.
+Honest residual: caller-side bookkeeping outside a flush and `onDestroy()` still
+take short `startsLock` sections; deferral is capped with a sweep backstop;
+device FGS-grace timing is an OS/hardware gate. R2-14 and R2-16 remain OPEN.
+Focused three-class verification: 124 tests, 0 failures. No commit/stage/push.
+
 ## 2026-11-26 — R6.3: bounded main-thread flush responsiveness (R2-18 residual) — PR #2
 
 Short note (R6.5 consolidates): replaced the unbounded foreground-flush wait
@@ -10,6 +54,32 @@ re-decisions are capped at three, singly queued, destroyed-aware and shut down
 on destroy. R5.4 serialization, admission gates and privileged engine are
 unchanged; R2-14/R2-16 remain OPEN gates. Focused three-class verification:
 115 tests, 0 failures. No commit/stage/push; no device/ADB/payload/
+privileged-container/APK work.
+
+## 2026-11-26 — R6.4: owned host workers for foreground UI latency (R2-18 residual) — PR #2
+
+Short note (R6.5 consolidates): main-thread foreground attach and request setup
+run on a small dedicated owned single daemon-thread **express** worker
+(`dfroot-express`, 16-slot bounded queue, AbortPolicy), separate from the
+general owned host worker (`dfroot-host`, 64-slot bounded queue) that carries
+observer render posts and the whole guarded flush side-effect phase. The flush
+guard is released in the posted task's finally, not on the UI caller. A
+main-thread start during a held flush offloads the entire start handling as one
+express task and returns `START_NOT_STICKY`; a refused observer render is
+remembered and re-applied by the bounded deferred re-decision; a refused express
+post fails closed (correlated `REJECTED` plus `resolveStart`, never admitted).
+`onDestroy()` gracefully drains both owned workers and refuses new work without
+interrupting a winner. Eight deterministic fake-platform-latency / refusal
+fixtures pin bounded host-side returns, unchanged stale-epoch serialization and
+per-ID stop-once, express-vs-general-worker separation and fail-closed refusal.
+This is bounded **host-only** evidence, not a claim that UI latency can never
+depend on foreground/notification timing: caller-side bookkeeping outside a
+flush and `onDestroy()` still take short `startsLock` sections, deferral is
+capped at three with a post-winner sweep backstop, up to 16 express tasks can
+precede an attach, and device FGS-grace timing remains an OS/hardware gate.
+Admission gates, owner token, privileged engine, 64/64 bounds, START_NOT_STICKY
+and the OPEN R2-14/R2-16 gates are untouched. Focused three-class verification:
+124 tests, 0 failures. No commit/stage/push; no device/ADB/payload/
 privileged-container/APK work.
 
 ## 2026-11-26 — R6.2: explicit eviction/absence contract (Javadoc + tests) — PR #2

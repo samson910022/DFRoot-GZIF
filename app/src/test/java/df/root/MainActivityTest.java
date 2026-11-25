@@ -7,6 +7,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): keep failure reports observable on the existing queue seam and pin Activity reconciliation when both dispatchers reject. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.1): cover the bounded, lifecycle-scoped read-only outcome watch on a continuously visible Activity. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.2): pin that an evicted/absent ledger record stays explicitly unconfirmed on the watch and a later start, with no replay, fabricated reason or durable mutation. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.4): install the deterministic inline foreground-host seam at every service creation so existing synchronous Activity assertions stay valid. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -305,6 +306,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> controller = Robolectric.buildService(
                 ExploitService.class).create().withIntent(firstRequest);
         serviceControllers.add(controller);
+        controller.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         controller.get().setAdmissionExecutorForTesting(Runnable::run);
         controller.startCommand(0, 201);
         coordinatorObservers.runAll();
@@ -338,6 +340,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> acceptedController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(firstRequest);
         serviceControllers.add(acceptedController);
+        acceptedController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         acceptedController.get().setAdmissionExecutorForTesting(Runnable::run);
         acceptedController.startCommand(0, 202);
         coordinatorObservers.runAll();
@@ -347,6 +350,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> rejectedController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(secondRequest);
         serviceControllers.add(rejectedController);
+        rejectedController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         rejectedController.get().setAdmissionExecutorForTesting(Runnable::run);
         rejectedController.startCommand(0, 203);
         coordinatorObservers.runAll();
@@ -400,6 +404,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(command -> {
             throw new RejectedExecutionException("admission full");
         });
@@ -448,6 +453,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> serviceController = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(command -> {
             throw new RejectedExecutionException("admission full");
         });
@@ -817,6 +823,7 @@ public class MainActivityTest {
         ServiceController<ExploitService> controller = Robolectric.buildService(
                 ExploitService.class).create().withIntent(request);
         QueueExecutor admission = new QueueExecutor();
+        controller.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         controller.get().setAdmissionExecutorForTesting(admission);
         coordinator.setOutcomeExecutorForTesting(admission);
         controller.startCommand(0, 204);
@@ -1155,6 +1162,7 @@ public class MainActivityTest {
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
         // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         serviceController.startCommand(0, 75);
         assertEquals(RunCoordinator.State.STARTING, coordinator.getSnapshot().getState());
@@ -1188,6 +1196,7 @@ public class MainActivityTest {
         // Admission and failure reports are normally off-main; drive the queued
         // work explicitly instead of relying on inline delivery.
         QueueExecutor admission = new QueueExecutor();
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(admission);
         coordinator.setOutcomeExecutorForTesting(admission);
         Shadows.shadowOf(serviceController.get()).setThrowInStartForeground(
@@ -1225,6 +1234,7 @@ public class MainActivityTest {
         // Admission and failure reports are normally off-main; drive the queued
         // work explicitly instead of relying on inline delivery.
         QueueExecutor admission = new QueueExecutor();
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(admission);
         coordinator.setOutcomeExecutorForTesting(admission);
         serviceController.get().setWakeLockSourceForTesting(ignored -> {
@@ -2066,6 +2076,7 @@ public class MainActivityTest {
                 ExploitService.class).create().withIntent(request);
         serviceControllers.add(serviceController);
         // Admission is normally off-main; run it inline for these deterministic tests.
+        serviceController.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         serviceController.get().setAdmissionExecutorForTesting(Runnable::run);
         serviceController.startCommand(0, startId);
         return serviceController;

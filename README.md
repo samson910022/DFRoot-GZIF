@@ -470,6 +470,73 @@ of the winner's platform call while it holds that lock. Admission gates, owner
 token, privileged engine and the OPEN R2-14/R2-16 gates are untouched. Host-only
 fixtures; no device/ADB/payload/APK work.
 
+### R6.4 note (2026-11-26) — owned host workers for foreground UI latency (R2-18 residual)
+
+Short contract note (R6.5 consolidates): for a main-thread caller, the foreground
+attach (and the rest of that request's owned setup) runs on a small dedicated
+owned single daemon-thread **express** worker (`dfroot-express`, bounded 16-slot
+queue, AbortPolicy), separate from the general owned single daemon-thread host
+worker (`dfroot-host`, bounded 64-slot queue) that carries observer render posts
+and the whole winning guarded-flush side-effect phase. Off-main paths remain
+inline. The flush guard is won before posting and released only in the posted
+task's `finally`, so a main-thread contender does not wait on platform calls.
+Host-only evidence, not a device guarantee:
+
+- A main-thread start arriving while a flush holds the guard offloads the
+  **entire** start handling (validation, `registerStart`, duplicate gate, setup)
+  as one express task and returns `START_NOT_STICKY`, so the caller never waits
+  behind the flush for the whole handling. If that express post is REFUSED, the
+  caller registers and resolves this start ID's own lifetime (correlated
+  `REJECTED`, then exactly one `stopSelf` via the existing bounded deferral /
+  post-winner sweep) instead of leaking the platform start ID. That refusal path
+  takes only the short `registerStart`/`resolveStart` bookkeeping sections; those
+  can still wait behind another contender's guarded platform call, so no "UI
+  latency can never depend on foreground/notification timing" claim is made.
+  Registering/resolving here is **host-only bookkeeping evidence, not device
+  proof**: no refusal path admits work, acquires a lease, starts the engine or
+  claims a completed operation.
+- A bounded render-post refusal is no longer silent when it carries a TERMINAL
+  outcome: only terminal snapshots enter a small bounded (four-slot) replay queue
+  that BOTH the bounded deferred re-decision and the post-winner sweep re-apply.
+  A terminal render refused after the three-deferral budget is spent is therefore
+  still resolved and retired exactly once. Non-terminal refusals carry nothing to
+  replay and are dropped with an honest log; the queue is cleared on destroy and
+  is never unbounded.
+- `shutdown()` in `onDestroy()` gracefully drains already-submitted host and
+  express work without interrupting a winner and refuses new work.
+- Host-only fixtures pin bounded main-thread returns, one `stopForeground`, one
+  `stopSelf` per ID, the unchanged R5.4 epoch/removal serialization, and
+  admission staying off both host workers.
+
+Residual, stated honestly: `startsLock` is still held across the single
+`stopForeground` call, so attach and removal remain mutually exclusive, and
+`onDestroy()` still performs its short bookkeeping on the destroying caller.
+Deferral is capped (three re-decisions per lifetime) with a post-winner sweep
+backstop, not an unbounded guarantee. Up to 16 express tasks can precede an
+attach, and a device FGS-grace deadline remains an OS/hardware gate that host
+tests cannot prove. Admission gates, owner token, privileged engine, 64/64
+bounds, R2-14/R2-16 OPEN gates and `START_NOT_STICKY` are unchanged. No
+device/ADB/payload/APK work; this is host-only evidence, not device safety proof.
+
+### R6.4 second fix loop (2026-11-26) — guard refusal lifetime + bounded render replay
+
+Both reviewers of PR #2 required one more fix. (1) When a main-thread start
+arrives while the flush guard is held and its express post is refused, the caller
+now registers and resolves a **host-only** lifetime for that start ID (correlated
+`REJECTED` plus exactly one `stopSelf` after the flush is released and deferrals /
+sweeps drain). No lease, admission, engine call or completion claim is made; the
+R6.3 deferral cap and post-winner sweep still retire the ID exactly once. (2) A
+single render-snapshot slot became a four-slot bounded queue of TERMINAL-only
+snapshots, replayed by both the bounded deferred re-decision and the post-winner
+sweep so a render refused after the three-deferral cap cannot strand an accepted
+start. Overflow and non-terminal refusals are dropped with honest logs; the queue
+is cleared on destroy. R5.4 epoch serialization, R6.3 deadline/deferral/sweep,
+all admission gates, 64/64 bounds, owner token and `START_NOT_STICKY` are
+unchanged; no new lock is taken while posting to any executor. Three deterministic
+fake-host fixtures pin these boundaries. No device/ADB/payload/APK work: this is
+host-only evidence, not device safety proof, and no refusal path admits or
+completes work.
+
 ### R5.5 note (2026-11-26) — final pre-engine gate ordering
 
 Short contract note (R5.9 consolidates): the final pre-engine gate in
