@@ -3,7 +3,7 @@
 # Run from anywhere:
 #   cmake -P tests/cmake/packaged_ko_test.cmake
 #
-# Cases (9):
+# Cases (12):
 #   1  valid pin verifies and writes a complete manifest
 #   2  ANY pin: a two-pin list verifies when the second pin matches
 #   3  mismatch against a different pin fails (SHA-256 MISMATCH reason)
@@ -13,6 +13,10 @@
 #   7  unavailable objcopy fails (objcopy-unavailable reason)
 #   8  skip flags cannot bypass the gate (no skip option exists)
 #   9  failures are fail-closed: no manifest is written
+#   10 ONE reused output path: success then corruption failure invalidates the
+#      previously verified manifest (no stale "status: verified" survives)
+#   11 poisoned stale section dump at that reused path is ignored/cleared
+#   12 failure then success at that path regenerates a fresh verified manifest
 #
 # Fixtures are produced by tests/cmake/fixtures/make_packaged_ko_fixture.py:
 # deterministic, harmless ELF64 objects with a .dfroot_ko data section. No
@@ -197,5 +201,69 @@ foreach(manifest IN ITEMS "${MANIFEST3}" "${MANIFEST4}" "${MANIFEST5}" "${MANIFE
     endif()
 endforeach()
 message(STATUS "PASS: 09 failures are fail-closed (no manifest written)")
+
+# Cases 10-12 reuse a SINGLE output path to prove stale evidence cannot survive.
+set(REUSE_MANIFEST "${WORK}/reuse.manifest")
+set(REUSE_DUMP "${REUSE_MANIFEST}.dfroot_ko.dump")
+
+# 10a. A success at the reused path writes verified evidence. The fixture .so
+# hash is read immediately before each run: objcopy --dump-section can rewrite
+# its input in place, and the manifest records the SO identity at entry.
+file(SHA256 "${GOOD_SO}" H_GOOD_SO)
+expect_case("10a success writes manifest at reused path"
+    "${GOOD_SO}" "${REUSE_MANIFEST}" "${PINS_ONE}")
+if(NOT EXISTS "${REUSE_MANIFEST}")
+    message(FATAL_ERROR "FAIL: case 10a did not write a manifest")
+endif()
+file(READ "${REUSE_MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "status: verified" OR
+   NOT manifest_text MATCHES "so_sha256: ${H_GOOD_SO}")
+    message(FATAL_ERROR "FAIL: case 10a manifest missing fields:\n${manifest_text}")
+endif()
+
+# 10b. A later failure at the SAME path must remove that manifest (no stale
+# "status: verified" left behind), and must still fail for the hash reason.
+expect_failure("10b corruption invalidates stale verified manifest" "${RE_MISMATCH}"
+    "${CORRUPT_SO}" "${REUSE_MANIFEST}" "${PINS_ONE}")
+if(EXISTS "${REUSE_MANIFEST}")
+    file(READ "${REUSE_MANIFEST}" stale_text)
+    message(FATAL_ERROR "FAIL: case 10b left stale verified manifest:\n${stale_text}")
+endif()
+
+# 11. Poison the dump at the reused path with well-formed but wrong bytes. A
+# success at the same path must ignore/remove it and write fresh evidence.
+file(READ "${OTHER_PAYLOAD}" poison_bytes)
+file(WRITE "${REUSE_DUMP}" "${poison_bytes}")
+file(SHA256 "${GOOD_SO}" H_GOOD_SO)
+expect_case("11 poisoned stale dump ignored at reused path"
+    "${GOOD_SO}" "${REUSE_MANIFEST}" "${PINS_ONE}")
+if(EXISTS "${REUSE_DUMP}")
+    message(FATAL_ERROR "FAIL: case 11 left a stale section dump behind")
+endif()
+file(READ "${REUSE_MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "status: verified" OR
+   NOT manifest_text MATCHES "sha256: ${H_GOOD}" OR
+   NOT manifest_text MATCHES "so_sha256: ${H_GOOD_SO}")
+    message(FATAL_ERROR "FAIL: case 11 manifest not freshly verified:\n${manifest_text}")
+endif()
+
+# 12. Failure then success at the same path regenerates a complete manifest.
+expect_failure("12a section-missing failure at reused path" "${RE_SECTION}"
+    "${NOSECTION_SO}" "${REUSE_MANIFEST}" "${PINS_ONE}")
+if(EXISTS "${REUSE_MANIFEST}")
+    message(FATAL_ERROR "FAIL: case 12a left a manifest after a failure")
+endif()
+file(SHA256 "${GOOD_SO}" H_GOOD_SO)
+expect_case("12b success regenerates fresh manifest at reused path"
+    "${GOOD_SO}" "${REUSE_MANIFEST}" "${PINS_ONE}")
+file(READ "${REUSE_MANIFEST}" manifest_text)
+if(NOT manifest_text MATCHES "status: verified" OR
+   NOT manifest_text MATCHES "sha256: ${H_GOOD}" OR
+   NOT manifest_text MATCHES "bytes: 256" OR
+   NOT manifest_text MATCHES "so_sha256: ${H_GOOD_SO}" OR
+   NOT manifest_text MATCHES "accepted_pins: 1" OR
+   NOT manifest_text MATCHES "timestamp_utc: [0-9]")
+    message(FATAL_ERROR "FAIL: case 12b fresh manifest missing fields:\n${manifest_text}")
+endif()
 
 message(STATUS "packaged_ko_test: all cases passed")

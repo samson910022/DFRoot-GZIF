@@ -76,7 +76,12 @@ set(KO_EXPECTED_SIZES
     13384
 )
 
-option(DFROOT_SKIP_KO_HASH_CHECK "Skip the pinned dfroot.ko SHA-256 check (local experiments only)" OFF)
+# DEPRECATED / UNSUPPORTED: a source-only local experiment that disables just
+# the .ko-on-disk pin check before .incbin. It cannot bypass the ALWAYS-RUN
+# packaged-KO byte gate below, cannot affect any distributable artifact, and an
+# unknown blob may pass this source-only check but still fails the build at the
+# final byte gate. Never use it for CI, release or publishing builds.
+option(DFROOT_SKIP_KO_HASH_CHECK "DEPRECATED, unsupported source-only local KO pin-check skip (cannot bypass packaged-byte gate)" OFF)
 set(DFROOT_SKIP_REASON "" CACHE STRING "Required local justification when DFROOT_SKIP_KO_HASH_CHECK=ON")
 
 # CMake can be driven without CMAKE_BUILD_TYPE (multi-config generators); pass
@@ -129,9 +134,11 @@ if(DFROOT_SKIP_KO_HASH_CHECK)
             "variant (DFROOT_ANDROID_VARIANT=${DFROOT_ANDROID_VARIANT})")
     endif()
     message(WARNING
-        "DFROOT_SKIP_KO_HASH_CHECK=ON: the pinned dfroot.ko SHA-256 check is "
-        "DISABLED. The resulting binary may embed an unverified LKM. "
-        "Use this only for local experiments; never for CI or release builds. "
+        "DFROOT_SKIP_KO_HASH_CHECK=ON is DEPRECATED and UNSUPPORTED: only the "
+        "source-tree .ko SHA-256 pin check is DISABLED for a local experiment. "
+        "It cannot bypass the ALWAYS-RUN final packaged-KO byte gate, cannot "
+        "affect any distributable artifact, and an unknown blob still fails "
+        "the build there. Never use it for CI, release or publishing builds. "
         "Reason: '${DFROOT_SKIP_REASON}'")
 endif()
 
@@ -241,9 +248,20 @@ target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 
 # Final packaged-byte gate: dump the dedicated .dfroot_ko section from the
 # LINKED .so and compare it with the SAME reviewed pins (and expected sizes)
-# used for the source KO. POST_BUILD guarantees we inspect the exact bytes AGP
-# will put in the APK. No skip option: failure fails the build, no manifest.
-add_custom_command(TARGET dfroot POST_BUILD
+# used for the source KO. A POST_BUILD hook only ran when the link target was
+# relinked, so it is replaced by an ALWAYS-RUN custom target that touches a real
+# force file: the manifest rule re-runs on EVERY build, even when libdfroot.so
+# is up to date. The rule depends on the dfroot target so the .so exists first.
+# No skip option: failure fails the build and leaves no manifest. CI repeats
+# this gate on the bytes extracted from EVERY APK it uploads.
+set(PACKAGED_KO_FORCE_FILE "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.verify.force")
+add_custom_target(dfroot_packaged_ko_force
+    COMMAND "${CMAKE_COMMAND}" -E touch "${PACKAGED_KO_FORCE_FILE}"
+    BYPRODUCTS "${PACKAGED_KO_FORCE_FILE}"
+    COMMENT "Scheduling packaged-KO byte re-check"
+)
+add_custom_command(
+    OUTPUT "${PACKAGED_KO_MANIFEST}"
     COMMAND "${CMAKE_COMMAND}"
             "-DPACKAGED_SO=$<TARGET_FILE:dfroot>"
             "-DKO_OBJCOPY=${CMAKE_OBJCOPY}"
@@ -252,9 +270,15 @@ add_custom_command(TARGET dfroot POST_BUILD
             "-DKO_MANIFEST=${PACKAGED_KO_MANIFEST}"
             "-DDFROOT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../../.."
             -P "${PACKAGED_KO_VERIFY_SCRIPT}"
+    DEPENDS dfroot
+            "${PACKAGED_KO_VERIFY_SCRIPT}"
+            "${CMAKE_CURRENT_LIST_FILE}"   # re-verify if the pin itself is edited
+            "${PACKAGED_KO_FORCE_FILE}"
+            dfroot_packaged_ko_force       # target-level ordering: force runs first
     COMMENT "Verifying packaged .dfroot_ko bytes in libdfroot.so"
     VERBATIM
 )
+add_custom_target(dfroot_packaged_ko_check ALL DEPENDS "${PACKAGED_KO_MANIFEST}")
 
 add_executable(bootstrap bootstrap.c status_protocol.c final_status_publish.c proc_scan_policy.c)
 set_target_properties(bootstrap PROPERTIES

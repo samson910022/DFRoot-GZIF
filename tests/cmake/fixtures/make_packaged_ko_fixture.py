@@ -8,17 +8,22 @@ real objcopy-based packaged-byte verifier without an Android/NDK build.
 
 Usage:
   make_packaged_ko_fixture.py --so OUT.so --payload-out OUT.bin
-                              [--size N] [--no-section] [--corrupt]
+                              [--size N] [--no-section] [--corrupt] [--apk OUT.apk]
 
   --size N       override the payload length (default 256)
   --no-section   omit the .dfroot_ko section (section-not-found case)
   --corrupt      flip one payload byte after writing --payload-out-equivalent
                  bytes, so the .so hash differs from the clean payload hash
+  --apk OUT.apk  also write a deterministic ZIP with the same fixture ELF at
+                 lib/arm64-v8a/libdfroot.so, to exercise APK extraction tests.
+                 It is a harmless test archive, not an Android APK or a signed
+                 distributable artifact.
 """
 
 import argparse
 import hashlib
 import struct
+import zipfile
 
 SECTION_NAME = ".dfroot_ko"
 SHSTRTAB_NAME = ".shstrtab"
@@ -115,6 +120,10 @@ def main():
                         help="omit the .dfroot_ko section")
     parser.add_argument("--corrupt", action="store_true",
                         help="flip one byte in the embedded section")
+    parser.add_argument("--apk", metavar="OUT.apk",
+                        help="also write a deterministic ZIP containing the "
+                             "fixture ELF at lib/arm64-v8a/libdfroot.so "
+                             "(harmless test archive, not a real APK)")
     args = parser.parse_args()
 
     if args.size <= 0:
@@ -127,8 +136,19 @@ def main():
     if args.corrupt:
         embedded[len(embedded) // 2] ^= 0x01
 
+    elf = build_elf(bytes(embedded), not args.no_section)
     with open(args.so, "wb") as fh:
-        fh.write(build_elf(bytes(embedded), not args.no_section))
+        fh.write(elf)
+
+    if args.apk:
+        # Fixed timestamp, fixed mode, stored (uncompressed) data and a single
+        # deterministic entry keep the archive byte-for-byte reproducible.
+        info = zipfile.ZipInfo("lib/arm64-v8a/libdfroot.so",
+                               date_time=(1980, 1, 1, 0, 0, 0))
+        info.compress_type = zipfile.ZIP_STORED
+        info.external_attr = (0o100644 << 16)
+        with zipfile.ZipFile(args.apk, "w") as zf:
+            zf.writestr(info, elf)
 
 
 if __name__ == "__main__":

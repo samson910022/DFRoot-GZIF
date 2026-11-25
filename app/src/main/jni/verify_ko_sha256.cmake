@@ -10,6 +10,11 @@
 #         [-DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON=<local reason>]
 #         -P verify_ko_sha256.cmake
 #
+# -DDFROOT_SKIP=ON is DEPRECATED and UNSUPPORTED: a source-only local experiment
+# that disables just the .ko-on-disk pin check before .incbin. It cannot bypass
+# the final packaged-KO byte gate in verify_packaged_ko.cmake, cannot affect any
+# distributable artifact, and is forbidden for CI/release/publishing builds.
+#
 # KO_EXPECTED_SHA256S is a CMake (semicolon-separated) list of accepted
 # SHA-256 pins; the blob passes if its hash matches ANY entry. Two pins are
 # kept because the local lkm/Makefile artifact and the CI artifact (CI strips
@@ -50,7 +55,8 @@ include("${script_dir}/ko_pin_policy.cmake")
 
 # The blob must exist even when the hash check is skipped: exp.c still .incbin's
 # it, so a missing/unreadable KO can never silently produce an artifact. Check
-# this before the DFROOT_SKIP branch so skip mode is fail-closed too.
+# this before the DFROOT_SKIP branch so the source-only experiment is
+# fail-closed too (the packaged-byte gate still rejects unknown bytes).
 if(NOT EXISTS "${KO_FILE}")
     message(FATAL_ERROR
         "dfroot.ko SHA-256 verification FAILED: blob not found:\n"
@@ -58,8 +64,10 @@ if(NOT EXISTS "${KO_FILE}")
         "The LKM is gitignored and must be supplied before the Gradle build "
         "(CI downloads the DDK artifact into app/src/main/jni/ko/). Restore "
         "the blob there. Even with -DDFROOT_SKIP_KO_HASH_CHECK=ON the blob must "
-        "exist; skipping only disables the hash check, never the .incbin input. "
-        "Never use skip mode for CI/release builds.")
+        "exist; this deprecated, unsupported source-only experiment disables "
+        "just the .ko-on-disk hash check, never the .incbin input, and cannot "
+        "affect distributable artifacts. Never use skip mode for CI/release "
+        "builds or publishing runs.")
 endif()
 if(IS_DIRECTORY "${KO_FILE}")
     message(FATAL_ERROR
@@ -74,6 +82,9 @@ dfroot_validate_ko_pins("${KO_EXPECTED_SHA256S}" "verify_ko_sha256" expected_lis
 list(LENGTH expected_list accepted_pins)
 
 if(DFROOT_SKIP)
+    # DEPRECATED / UNSUPPORTED source-only local experiment. It only skips the
+    # check of the .ko before .incbin; the final packaged-KO byte gate still
+    # compares the linked/distributed bytes and is unaffected by this flag.
     # Skip policy is enforced here (not only in CMakeLists.txt) so a direct
     # `cmake -P` invocation cannot bypass it. Presence of any automation /
     # release environment marker, a Release build type, an Android release
@@ -110,10 +121,12 @@ if(DFROOT_SKIP)
 
     set(skip_status "skipped")
     set(actual_hash "not-computed (skip enabled)")
-    set(stamp_text "SKIPPED: KO hash check disabled (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}\n")
+    set(stamp_text "SKIPPED: source-only KO hash check disabled (DFROOT_SKIP_KO_HASH_CHECK=ON) for ${KO_FILE}\n")
     message(STATUS
-        "dfroot.ko SHA-256 check SKIPPED (DFROOT_SKIP_KO_HASH_CHECK=ON) for "
-        "${KO_FILE}; reason: ${DFROOT_SKIP_REASON}")
+        "dfroot.ko source SHA-256 check SKIPPED (DEPRECATED, unsupported "
+        "source-only local experiment; DFROOT_SKIP_KO_HASH_CHECK=ON) for "
+        "${KO_FILE}; reason: ${DFROOT_SKIP_REASON}. This cannot bypass the "
+        "final packaged-KO byte gate or affect distributable artifacts.")
 else()
     file(SHA256 "${KO_FILE}" actual)
     string(TOLOWER "${actual}" actual_hash)
@@ -140,7 +153,10 @@ else()
             "DDK image, verify the result out of band, then add its hash to "
             "KO_EXPECTED_SHA256S in app/src/main/jni/CMakeLists.txt and update "
             "README.md / PORTING-GZIF.md in a reviewed commit. Adding a third hash "
-            "requires review. Local experiments only: -DDFROOT_SKIP_KO_HASH_CHECK=ON.")
+            "requires review. -DDFROOT_SKIP_KO_HASH_CHECK=ON is a deprecated, "
+            "unsupported source-only local experiment: it cannot bypass the "
+            "final packaged-KO byte gate, cannot affect distributable artifacts, "
+            "and unknown blobs still fail the build.")
     endif()
 
     set(skip_status "verified")

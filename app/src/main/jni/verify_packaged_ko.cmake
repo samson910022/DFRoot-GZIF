@@ -1,7 +1,9 @@
 # verify_packaged_ko.cmake -- final-byte gate for the KO embedded in libdfroot.so.
 #
-# Invoked by app/src/main/jni/CMakeLists.txt (POST_BUILD on the dfroot target)
-# and by the release/tag CI job against the .so extracted from the real APK:
+# Invoked by app/src/main/jni/CMakeLists.txt (an ALWAYS-RUN custom target so the
+# check cannot be skipped on an up-to-date link) and by CI against the .so
+# extracted from every distributable release APK (not just tag builds).
+# It is also exercised against harmless fixtures by host-only tests:
 #
 #   cmake -DPACKAGED_SO=<libdfroot.so> \
 #         -DKO_OBJCOPY=<path to objcopy / llvm-objcopy> \
@@ -16,15 +18,30 @@
 # used by verify_ko_sha256.cmake. Pin validation is shared via ko_pin_policy.cmake;
 # nothing here adds, relaxes or generates a pin. There is deliberately NO skip
 # option: any skip flag is rejected, so a packaged artifact can never be
-# "verified" without comparing its bytes. A manifest is written only on success
-# (failure is fail-closed: no manifest, non-zero exit). The manifest is evidence
-# of what this check observed, not an independent reproducibility proof.
+# "verified" without comparing its bytes. The output manifest and the temporary
+# section dump are INVALIDATED at entry (removed before any work / extraction),
+# so a previous success at the same output path can never survive a later
+# failure as stale "status: verified" evidence. A manifest is written only on
+# success (failure is fail-closed: no manifest, non-zero exit). The size and
+# SHA-256 comparisons below are unchanged. The manifest's so_sha256 is captured
+# before objcopy runs (some objcopy builds rewrite their input in place). The
+# manifest is evidence of what this check observed, not an independent
+# reproducibility proof.
 
 foreach(required IN ITEMS PACKAGED_SO KO_OBJCOPY KO_EXPECTED_SHA256S KO_MANIFEST)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "verify_packaged_ko: missing -D${required}=... argument")
     endif()
 endforeach()
+
+# Entry invalidation: any manifest at this output path belongs to a previous
+# invocation. Drop it before doing any work so a later failure cannot leave
+# stale "status: verified" evidence behind. This never weakens a check.
+file(REMOVE "${KO_MANIFEST}")
+# The temporary section dump belongs to this output path too; invalidate it at
+# entry so an early failure can never leave bytes from an earlier extraction.
+set(dump_file "${KO_MANIFEST}.dfroot_ko.dump")
+file(REMOVE "${dump_file}")
 
 get_filename_component(verify_script "${CMAKE_CURRENT_LIST_FILE}" ABSOLUTE)
 get_filename_component(script_dir "${verify_script}" DIRECTORY)
@@ -67,6 +84,13 @@ if(NOT EXISTS "${PACKAGED_SO}" OR IS_DIRECTORY "${PACKAGED_SO}")
         "verify_packaged_ko: packaged SO not found or not a file: ${PACKAGED_SO}")
 endif()
 
+# Capture the identity of the SO AS PASSED IN before objcopy runs: some objcopy
+# implementations rewrite their input in place when --dump-section is used.
+# Recording the hash afterwards would describe mutated bytes instead of the
+# file CI extracted from the APK and hashed.
+file(SHA256 "${PACKAGED_SO}" so_hash_raw)
+string(TOLOWER "${so_hash_raw}" so_hash)
+
 # Shared pin policy: normalizes to lowercase, rejects malformed entries, and
 # never accepts a new hash. The same pins are used for source and packaged KO.
 include("${script_dir}/ko_pin_policy.cmake")
@@ -96,8 +120,6 @@ endif()
 
 get_filename_component(manifest_dir "${KO_MANIFEST}" DIRECTORY)
 file(MAKE_DIRECTORY "${manifest_dir}")
-set(dump_file "${KO_MANIFEST}.dfroot_ko.dump")
-
 # Extract only the dedicated section. objcopy's --dump-section writes nothing
 # useful when the section is absent; treat a failure, a missing file or an
 # empty result as "section not found" (distinct from a hash mismatch).
@@ -169,8 +191,6 @@ if(NOT hash_matched)
         "app/src/main/jni/CMakeLists.txt with a reviewed commit and docs.")
 endif()
 
-file(SHA256 "${PACKAGED_SO}" so_hash_raw)
-string(TOLOWER "${so_hash_raw}" so_hash)
 string(REPLACE ";" ";" pins_display "${expected_list}")
 if(expected_sizes)
     string(REPLACE ";" ";" size_display "${expected_sizes}")

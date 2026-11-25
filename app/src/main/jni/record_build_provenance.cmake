@@ -1,11 +1,13 @@
-# record_build_provenance.cmake -- informational, best-effort build record.
+# record_build_provenance.cmake -- informational audit record, not an
+# attestation and not a release gate.
 #
 # Invoked by app/src/main/jni/CMakeLists.txt (add_custom_command) after both
-# splicehelper and the KO hash gate have run. It records what the build actually
-# used (toolchain, inputs, hashes, git HEAD, KO gate outcome) so a release can
-# be audited. It is NOT an independent reproducible-build proof: it reports
-# toolchain identity and hashes, it does not reproduce or compare a second
-# build. Nothing here adds or relaxes a hash pin.
+# splicehelper and the KO hash gate have run. It records what the build observed
+# (toolchain identity, input paths and hashes, git HEAD, KO gate outcome) so
+# that identity can be checked against a distributed artifact. It does NOT
+# attest that the artifact came from this build, and it is NOT a reproducible-
+# build proof: nothing here rebuilds, compares a second build, adds or relaxes
+# a hash pin, or makes any device/validation claim.
 #
 # Required -D arguments:
 #   PROVENANCE_OUTPUT=<file>
@@ -154,13 +156,14 @@ endif()
 
 string(TIMESTAMP provenance_timestamp "%Y-%m-%dT%H:%M:%SZ" UTC)
 
-set(report "# DFRoot build provenance (informational, not a reproducible-build proof)\n")
+set(report "# DFRoot build provenance (informational audit record; not an attestation, not a reproducible-build proof, not a release gate)\n")
 string(APPEND report
     "timestamp_utc: ${provenance_timestamp}\n"
     "git_head: ${git_head}\n"
     "build_type: ${DFROOT_BUILD_TYPE}\n"
     "android_variant: ${DFROOT_ANDROID_VARIANT}\n"
     "cmake_version: ${DFROOT_CMAKE_VERSION}\n"
+    "splicehelper_binary: ${SPLICEHELPER}\n"
     "splicehelper_sha256: ${splicehelper_hash}\n"
     "splicehelper_source_sha256: ${splicehelper_src_hash}\n"
     "splicehelper_source: ${SPLICEHELPER_SRC}\n"
