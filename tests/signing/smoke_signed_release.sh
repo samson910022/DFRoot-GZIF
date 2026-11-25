@@ -51,8 +51,8 @@ trap cleanup EXIT
 git -C "$ROOT" ls-files -c -o --exclude-standard -z | tar -C "$ROOT" --null -T - -cf - | tar -C "$SMOKE" -xf -
 cd "$SMOKE"
 
-mkdir -p app/src/main/jni/ko
-printf 'disposable placeholder KO for signing smoke\n' > app/src/main/jni/ko/dfroot-android13-5.15.ko
+# No placeholder KO: this smoke exercises signing only and explicitly opts out
+# of the native build. A real/distributable APK must still pass the KO byte gate.
 printf 'sdk.dir=%s\n' "$SDK" > local.properties
 
 # Exercise Make's atomic local-keystore creation. Credentials stay in the environment.
@@ -74,24 +74,22 @@ make signing.properties
 [[ $(stat -c '%a' signing.properties) == 600 ]]
 [[ $(stat -c '%a' keystore.jks) == 600 ]]
 
-./gradlew :app:assembleRelease --no-daemon --console=plain
+./gradlew :app:assembleRelease --no-daemon --console=plain -Pdfroot.signingSmokeSkipNative=true
 SIGNED_APK=app/build/outputs/apk/release/DFRoot_4.8-gzif.apk
 [[ -f $SIGNED_APK ]]
 "$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK"
 
-# A fresh configuration without signing.properties must produce an unsigned release.
-rm -f signing.properties keystore.jks
-./gradlew :app:clean :app:assembleRelease --no-daemon --console=plain
-UNSIGNED_APK=app/build/outputs/apk/release/DFRoot_4.8-gzif.apk
-[[ -f $UNSIGNED_APK ]]
-if "$APKSIGNER" verify --verbose "$UNSIGNED_APK" >unsigned-apksigner.log 2>&1; then
-    printf 'ERROR: apksigner accepted the unsigned release.\n' >&2
+# With no real signing material, PR #3 disables the release variant outright:
+# a fresh configuration must emit NO unsigned or dummy-signed release APK.
+rm -f signing.properties keystore.jks "$SIGNED_APK"
+if ./gradlew :app:clean :app:assembleRelease --no-daemon --console=plain \
+    -Pdfroot.signingSmokeSkipNative=true >unsigned-release.log 2>&1; then
+    printf 'ERROR: assembleRelease succeeded without real signing material.\n' >&2
+    cat unsigned-release.log >&2
     exit 1
 fi
-if ! grep -Eqi 'No signatures found|Number of signers: 0|ERROR: Missing META-INF/MANIFEST.MF' unsigned-apksigner.log; then
-    cat unsigned-apksigner.log >&2
-    printf 'ERROR: unsigned APK lacked an unsigned-specific diagnostic.\n' >&2
+if compgen -G 'app/build/outputs/apk/release/*.apk' >/dev/null; then
+    printf 'ERROR: an unsigned/dummy release APK was produced without real signing material.\n' >&2
     exit 1
 fi
-printf 'Unsigned APK rejected as expected: '
-grep -Ei 'No signatures found|Number of signers: 0|ERROR: Missing META-INF/MANIFEST.MF' unsigned-apksigner.log | head -n 1
+printf 'Unsigned/dummy release rejected as expected: no release APK was produced.\n'

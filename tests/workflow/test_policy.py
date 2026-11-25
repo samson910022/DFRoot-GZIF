@@ -1936,6 +1936,20 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_strict_yaml_allowlist_accepts_the_workflow(self) -> None:
         self.assertEqual(strict_violations(self.raw), [])
 
+    def test_signing_smoke_is_compatible_with_fail_closed_release(self) -> None:
+        """The required smoke must not rely on a placeholder KO or emit an
+        unsigned release: PR #3 disables that variant and pins KO bytes.
+        """
+        smoke = (ROOT / "tests" / "signing" / "smoke_signed_release.sh").read_text(encoding="utf-8")
+        gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        self.assertIn("-Pdfroot.signingSmokeSkipNative=true", smoke)
+        self.assertIn("dfroot.signingSmokeSkipNative", gradle)
+        self.assertNotIn("disposable placeholder KO", smoke)
+        self.assertNotIn("dfroot-android13-5.15.ko", smoke)
+        self.assertNotIn("unsigned-apksigner.log", smoke)
+        self.assertIn("no release APK was produced", smoke)
+        self.assertIn("if ./gradlew :app:clean :app:assembleRelease", smoke)
+
     def test_top_level_triggers_are_an_exact_allowlist(self) -> None:
         assert_exact_triggers(self.raw)
         self.assertEqual(parse_triggers(self.raw), EXPECTED_TRIGGERS)

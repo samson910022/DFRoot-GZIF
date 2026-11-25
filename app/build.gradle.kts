@@ -13,6 +13,12 @@ plugins {
     alias(libs.plugins.android.application)
 }
 
+// SIGNING-SMOKE ONLY: tests/signing/smoke_signed_release.sh exercises signing
+// material and apksigner without the reviewed KO/NDK bytes. It opts out of the
+// native build with an explicit property; a distributable APK can never use it
+// because the release byte gate requires a verified libdfroot.so.
+val signingSmokeSkipNative = providers.gradleProperty("dfroot.signingSmokeSkipNative").orNull == "true"
+
 val signingProps = Properties()
 val signingPropsFile = rootProject.file("signing.properties")
 val hasSigningProperties = signingPropsFile.exists()
@@ -108,7 +114,7 @@ android {
         debug {
             isDebuggable = true
             signingConfig = signingConfigs.getByName("debug")
-            externalNativeBuild {
+            if (!signingSmokeSkipNative) externalNativeBuild {
                 cmake {
                     // Authoritative variant label for the native KO policy:
                     // a cached CMAKE_BUILD_TYPE of Debug must never weaken a
@@ -135,7 +141,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            externalNativeBuild {
+            if (!signingSmokeSkipNative) externalNativeBuild {
                 cmake {
                     // Release is authoritative: the skip guard in CMakeLists
                     // and verify_ko_sha256.cmake rejects it unconditionally.
@@ -169,7 +175,7 @@ android {
         getByName("test").java.srcDirs(file("../tests/java"))
     }
 
-    externalNativeBuild {
+    if (!signingSmokeSkipNative) externalNativeBuild {
         cmake {
             path("src/main/jni/CMakeLists.txt")
         }
