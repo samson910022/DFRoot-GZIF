@@ -387,7 +387,9 @@ reviews after this consolidation. The APPROVE outcomes recorded for R4 were at
 `74d35f5` and are historical; `tasks/plan.md` and `tasks/todo.md` keep the
 final 6.1–6.6 checkboxes UNCHECKED. Residual optional items recorded, not
 silently accepted: R5.3 reporter-overflow UX until `onStart()`, R5.4
-`stopForeground`-under-`startsLock` ANR risk and interrupted-waiting flush, R5.8
+`stopForeground`-under-`startsLock` ANR risk (R6.3 bounded the waiting flush and
+removed the unbounded/interruptibility gap, but the winner's platform call still
+holds that lock), R5.8
 optional `if: always()` upload-bypass guard, benign duplicate correlated
 rejection, the signed-release packaged-pin gate inherited from PR #1, recovery
 UI out of scope, `/dev` marker-root trust, AES key in argv, `BOOT_COUNT`
@@ -451,6 +453,22 @@ single-flight admission, owner token, OFF gates, the durable barrier and
 operation ownership are unchanged. Host-only gate seams; no device, ADB,
 payload or APK work was performed. This is host-only bookkeeping evidence, not
 device safety proof; no R2-14 or R2-16 closure is claimed here.
+
+### R6.3 note (2026-11-26) — bounded foreground-flush wait (R2-18 residual)
+
+Short contract note (R6.5 consolidates): a losing foreground flush no longer
+waits without bound. A main-thread contender does not wait at all — it queues
+one bounded off-thread host re-decision and returns. Other contenders wait only
+to a 200 ms monotonic deadline; expiry or interruption is logged honestly and
+deferred with **no** `stopForeground`/`stopSelf` completion claim. Re-decisions
+are capped at three per lifetime, at most one is queued, the task only re-runs
+host bookkeeping, and the owned daemon worker is shut down on destroy.
+Interruption is re-asserted, never treated as proof that cleanup completed.
+The R5.4 `startsLock` serialization, epoch recheck, per-ID stop-once, 64/64
+bounds and eviction retirement are unchanged — including the residual exposure
+of the winner's platform call while it holds that lock. Admission gates, owner
+token, privileged engine and the OPEN R2-14/R2-16 gates are untouched. Host-only
+fixtures; no device/ADB/payload/APK work.
 
 ### R5.5 note (2026-11-26) — final pre-engine gate ordering
 

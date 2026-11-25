@@ -1,5 +1,17 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R6.3: bounded main-thread flush responsiveness (R2-18 residual) — PR #2
+
+Short note (R6.5 consolidates): replaced the unbounded foreground-flush wait
+with a 200 ms monotonic deadline and a main-thread no-wait path that queues one
+bounded host-only re-decision. Deadline expiry and interruption log honestly,
+re-assert interruption and claim no `stopForeground`/`stopSelf` completion;
+re-decisions are capped at three, singly queued, destroyed-aware and shut down
+on destroy. R5.4 serialization, admission gates and privileged engine are
+unchanged; R2-14/R2-16 remain OPEN gates. Focused three-class verification:
+115 tests, 0 failures. No commit/stage/push; no device/ADB/payload/
+privileged-container/APK work.
+
 ## 2026-11-26 — R6.2: explicit eviction/absence contract (Javadoc + tests) — PR #2
 
 Short note (R6.5 consolidates): `RunCoordinator` Javadoc now states that a
