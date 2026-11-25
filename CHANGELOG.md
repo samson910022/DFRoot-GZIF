@@ -1,5 +1,20 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.5: final pre-engine gate ordering (liveness half of R2-20) — PR #2
+
+Short contract note (R5.9 consolidates): `RunCoordinator.start()` now reads
+unattended authorization **before** owner-token liveness inside the same lock
+that sets `engineStarted`. The authorization read may block while that lock is
+held, so an `onDestroy()` that invalidates the owner token during the read is
+still observed before the not-yet-started request is authorized: it is denied
+as a proven pre-effect `PRECHECK_FAILED` with an honest offender-specific reason
+(`FOREGROUND_OWNER_GONE_BEFORE_ENGINE` / `UNATTENDED_AUTH_CHANGED`), a checked
+attempt clear and no engine call. Honest boundary: an invalidation arriving
+after the recheck but before `engine.run()` is intentionally **not** revoked —
+once `engineStarted` is set the coordinator owns the work and never cancels it.
+Deterministic latches/fakes only; no engine behavior, rc, `/dev`, persistence,
+recovery, device, ADB, payload or APK changes.
+
 ## 2026-11-26 — R5.4: foreground side effects serialized with the lifetime decision (foreground half of R2-20) — PR #2
 
 Short contract note (R5.9 consolidates): `ExploitService` adds a monotonic

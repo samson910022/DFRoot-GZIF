@@ -329,6 +329,21 @@ operation ownership are unchanged. Host-only gate seams; no device, ADB,
 payload or APK work was performed. This is host-only bookkeeping evidence, not
 device safety proof; no R2-14 or R2-16 closure is claimed here.
 
+### R5.5 note (2026-11-26) — final pre-engine gate ordering
+
+Short contract note (R5.9 consolidates): the final pre-engine gate in
+`RunCoordinator.start()` now reads unattended authorization **before** owner
+liveness, both inside the same lock that sets `engineStarted`. The authorization
+read may block while holding that lock; an `onDestroy()` invalidating the owner
+token during that read is therefore still observed and the not-yet-started
+request is denied (honest `FOREGROUND_OWNER_GONE_BEFORE_ENGINE` /
+`UNATTENDED_AUTH_CHANGED` reason, checked attempt clear, no engine call). The
+boundary is honest: an invalidation after the recheck but before `engine.run()`
+is intentionally not revoked — started work is never cancelled. Deterministic
+latch/fake tests only; no other gate, rc, `/dev`, recovery or hardware claim
+changes. No device, ADB, payload or APK work was performed; this is host-only
+evidence, not device safety proof, and no R2-14/R2-16 closure is claimed.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`

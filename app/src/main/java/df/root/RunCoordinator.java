@@ -16,6 +16,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R4.9): Javadoc only — state the limits of engineFinished and remove the app-data-reset recovery claim. No behavior change. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): bounded replayable request-outcome ledger with a separate outcome lock and off-main async reporting; no operation replay or ownership change. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): bound the outcome-report executor queue with an explicit reject policy and expose read-only queue seams; a rejected post cannot lose the caller-written ledger record. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.5): order the final pre-engine gate so the blocking authorization read precedes the owner liveness check; a host destroyed during that read cannot authorize a not-yet-started engine, and started work is never revoked. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -1042,15 +1043,21 @@ public final class RunCoordinator {
             boolean ownerGoneBeforeEngine;
             boolean authLostBeforeEngine;
             synchronized (lock) {
-                // Final, atomic recheck under the same lock as engineStarted:
-                // neither an OFF toggle nor a destroyed foreground host can
-                // slip between the read and engine.run(). A token is only a
-                // denial seam BEFORE engine start; once engineStarted is set the
-                // coordinator keeps exclusive ownership and never cancels
-                // privileged work, regardless of what the host does.
+                // Final, atomic recheck under the same lock as engineStarted.
+                // The authorization read MUST come first: it may block while
+                // holding this lock, and onDestroy() can invalidate the owner
+                // token independently during that read. Reading owner liveness
+                // afterwards observes such an invalidation before the request
+                // is authorized to start. A token is only a denial seam BEFORE
+                // engine start; once engineStarted is set the coordinator keeps
+                // exclusive ownership and never cancels privileged work.
+                // Honest boundary: an invalidation arriving AFTER this recheck
+                // but BEFORE engine.run() is intentionally not revoked — that
+                // request was already authorized and started work is never
+                // blindly terminated.
+                authLostBeforeEngine = unattendedAuthorizationLostLocked(operation);
                 ownerGoneBeforeEngine = !operation.engineStarted
                         && operation.ownerToken != null && !operation.ownerToken.isAlive();
-                authLostBeforeEngine = unattendedAuthorizationLostLocked(operation);
                 if (!ownerGoneBeforeEngine && !authLostBeforeEngine) {
                     operation.engineStarted = true;
                 }

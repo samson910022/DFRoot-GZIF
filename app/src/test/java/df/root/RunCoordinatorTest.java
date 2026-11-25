@@ -9,6 +9,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): pin bounded outcome-ledger replay, lock isolation and best-effort async delivery. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin that the async ledger write is lock-free while the posted publication takes the durable lock off-caller. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): pin the bounded outcome-reporter queue, its reject policy and the caller-written ledger under overflow. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.5): pin that an owner destroyed during the blocking final authorization read cannot authorize a not-yet-started engine, with fail-closed, honest denial and no revocation of started work. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -1440,6 +1441,144 @@ public class RunCoordinatorTest {
         assertNotNull(store.load());
     }
 
+    /**
+     * R2-20 liveness: onDestroy() can invalidate the owner token independently
+     * while the coordinator holds its monitor inside a blocking authorization
+     * read. Owner liveness must be sampled AFTER that read returns, so a dead
+     * host cannot authorize a not-yet-started engine. No privileged work is
+     * started here, so there is nothing to cancel.
+     */
+    @Test
+    public void ownerInvalidatedDuringBlockingFinalAuthorizationIsNotAuthorized()
+            throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        // Read #1 is submit's gate, #2 the post-publish recheck, #3 the final gate.
+        BlockingFinalAuthorization authorization = new BlockingFinalAuthorization(3, true);
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                authorization);
+        coordinator.initialize();
+        engine.immediatePlan(NativeResultMapper.map(0));
+        RunCoordinator.OwnerToken token = new RunCoordinator.OwnerToken();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                lease, null, "owner-died-during-final-auth", token).isAccepted());
+        assertNotNull("the attempt was published at admission", store.load());
+
+        // The worker blocks inside the third authorization read (the final gate).
+        // Assert state only AFTER the latch proves the worker reached that gate;
+        // a fast worker may already have moved from STARTING to RUNNING here.
+        assertTrue(authorization.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        assertEquals(RunCoordinator.State.RUNNING, coordinator.getSnapshot().getState());
+        token.invalidate(); // independent onDestroy() seam, while the read blocks
+        authorization.release.countDown();
+        awaitTerminal(coordinator);
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.TERMINAL, terminal.getState());
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertEquals(RunResult.Detail.PREFLIGHT_REJECTION, terminal.getResult().getDetail());
+        assertNotNull(terminal.getReason());
+        assertTrue(terminal.getReason().contains(
+                "foreground owner was destroyed before engine start"));
+        assertEquals("no engine was authorized to start", 0, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+        assertNull("a proven pre-effect rejection clears the durable attempt", store.load());
+        assertEquals(3, authorization.reads());
+    }
+
+    /**
+     * Reverse interleaving: the host dies while the EARLIER post-publish recheck
+     * blocks, so the token is already dead when the final authorization read
+     * runs. The owner check after that read still denies the start.
+     */
+    @Test
+    public void ownerInvalidatedBeforeFinalAuthorizationIsNotAuthorized() throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        BlockingFinalAuthorization authorization = new BlockingFinalAuthorization(2, true);
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                authorization);
+        coordinator.initialize();
+        engine.immediatePlan(NativeResultMapper.map(0));
+        RunCoordinator.OwnerToken token = new RunCoordinator.OwnerToken();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                lease, null, "owner-died-before-final-auth", token).isAccepted());
+
+        assertTrue(authorization.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        token.invalidate();
+        authorization.release.countDown();
+        awaitTerminal(coordinator);
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertNotNull(terminal.getReason());
+        assertTrue(terminal.getReason().contains(
+                "foreground owner was destroyed before engine start"));
+        assertEquals(0, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+        assertNull(store.load());
+    }
+
+    /** OFF observed at the final recheck denies with an honest, specific reason. */
+    @Test
+    public void unattendedAuthOffAtFinalAuthorizationIsDeniedWithHonestReason()
+            throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        BlockingFinalAuthorization authorization = new BlockingFinalAuthorization(3, false);
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                authorization);
+        coordinator.initialize();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                lease, null, "auth-off-at-final-gate").isAccepted());
+        assertTrue(authorization.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        authorization.release.countDown();
+        awaitTerminal(coordinator);
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertNotNull(terminal.getReason());
+        assertTrue(terminal.getReason().contains(
+                "unattended authorization changed before engine start"));
+        assertEquals(0, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+        assertNull("a proven pre-effect rejection clears the durable attempt", store.load());
+    }
+
+    /** An unreadable/throwing gate at the final recheck fails closed. */
+    @Test
+    public void unattendedAuthThrowingAtFinalAuthorizationFailsClosed() throws Exception {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        BlockingFinalAuthorization authorization = new BlockingFinalAuthorization(3, true,
+                new IllegalStateException("component state unavailable"));
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                authorization);
+        coordinator.initialize();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                lease, null, "auth-unreadable-at-final-gate").isAccepted());
+        assertTrue(authorization.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        authorization.release.countDown();
+        awaitTerminal(coordinator);
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertNotNull(terminal.getReason());
+        assertTrue(terminal.getReason().contains(
+                "unattended authorization changed before engine start"));
+        assertEquals(0, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+        assertNull(store.load());
+    }
+
     /** The ledger is bounded: the least-recently used oldest record is evicted. */
     @Test
     public void outcomeLedgerIsBoundedAndEvictsOldestRecords() throws Exception {
@@ -1796,6 +1935,50 @@ public class RunCoordinatorTest {
         @Override
         public boolean isUnattendedEnabled() {
             return enabled;
+        }
+    }
+
+    /**
+     * Harmless, deterministic authorization seam: one chosen read signals
+     * entry and blocks, then returns a fixed value (or throws). This pins the
+     * final-gate read ordering without sleeps, devices or privileged work.
+     */
+    private static final class BlockingFinalAuthorization
+            implements RunCoordinator.UnattendedAuthorization {
+        private final AtomicInteger reads = new AtomicInteger();
+        private final int targetRead;
+        private final boolean resultAtTarget;
+        private final RuntimeException failureAtTarget;
+        final CountDownLatch entered = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+
+        BlockingFinalAuthorization(int targetRead, boolean resultAtTarget) {
+            this(targetRead, resultAtTarget, null);
+        }
+
+        BlockingFinalAuthorization(int targetRead, boolean resultAtTarget,
+                                   RuntimeException failureAtTarget) {
+            this.targetRead = targetRead;
+            this.resultAtTarget = resultAtTarget;
+            this.failureAtTarget = failureAtTarget;
+        }
+
+        @Override
+        public boolean isUnattendedEnabled() {
+            int read = reads.incrementAndGet();
+            if (read != targetRead) {
+                return true;
+            }
+            entered.countDown();
+            await(release);
+            if (failureAtTarget != null) {
+                throw failureAtTarget;
+            }
+            return resultAtTarget;
+        }
+
+        int reads() {
+            return reads.get();
         }
     }
 
