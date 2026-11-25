@@ -11,6 +11,19 @@ bundled loader or other third-party component was modified by the 2026-11-25
 PR #2 work; only this repository's GPL-2.0-only application/native sources were
 changed, each with a dated per-file notice.
 
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `d8b7d30`..`543c431`):
+the dependency inventory is **unchanged** — no dependency was added or removed;
+JUnit 4 and Robolectric remain test-only, and the new `buildSrc` loader-pin
+verification tasks are Gradle build logic, not shipped/runtime components.
+Loader provenance and SHA-256 pins were re-checked against `app/build.gradle.kts`
+and `app/src/main/jniLibs/arm64-v8a/*.so` and still match
+(`aab76943…fc940` / `679504dd…dca1d`). **No bundled loader binary or other
+third-party component was modified by this round**; only this repository's own
+GPL-2.0-only sources changed, with dated per-file notices added where missing.
+Host verification only (484 JVM tests / 44 suites, 135 host CTest cases, lint 0
+errors / 21 warnings); no hardware/device/privileged/APK validation, and a fresh
+GitHub CI green run including the negative pin fixture remains a POST-PUSH gate.
+
 | Component | Role | Licence | Source |
 |---|---|---|---|
 | diabl0w/DFRoot @ `7a6513a` | upstream baseline | GPL-2.0-only | https://github.com/diabl0w/DFRoot |

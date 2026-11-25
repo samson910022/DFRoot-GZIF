@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): deterministic clean/tampered synthetic APK pin-fixture guard. See NOTICE.
 package dfroot
 
 import org.gradle.api.DefaultTask

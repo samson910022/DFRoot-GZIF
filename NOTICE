@@ -36,9 +36,27 @@ changed. **No bundled loader binary, upstream component, or third-party artifact
 was modified by this work**, and no device/privileged/APK validation was
 performed for it.
 
-Loader-pin verification (2026-11-25): the SHA-256 pins in
-`app/build.gradle.kts` were checked against the on-disk bundled binaries and
-match byte-for-byte:
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `d8b7d30`..`543c431`):
+a second repair round changed **only this repository's own GPL-2.0-only
+application, native, build-logic, and test sources** — restored packaged-loader
+pin verification with a harmless negative fixture (`buildSrc` tasks + CI),
+descriptor-pinned conservative staged-entry cleanup, atomic run-scoped terminal
+marker publication with rc=7 as an indeterminate channel, bounded non-killing
+waits and a durable unconfirmed-attempt barrier with explicit owner recovery,
+an independently disableable Start-at-Boot toggle, an honest already-hooked
+result message, and a read-only availability diagnostic. Newly touched
+GPL-covered files carry dated 2026-11-25 per-file notices; existing notices were
+**not removed**. **No bundled loader binary, upstream component, or third-party
+artifact was modified by this round**; no device, payload, ADB,
+privileged-container, or APK-assembly validation was performed. Host verification
+for this round: 484 JVM tests (44 suites), 135 host CTest cases, lint 0 errors /
+21 warnings, `git diff --check` clean. A fresh GitHub CI green run (including the
+negative fixture) is a POST-PUSH gate, not a local result.
+
+Loader-pin verification (2026-11-25; re-verified again for the re-review round):
+the SHA-256 pins in `app/build.gradle.kts` were checked against the on-disk
+bundled binaries and both still match byte-for-byte (the bundled binaries were
+not rewritten by either 2026-11-25 round):
 
 - `libksud.so` → `aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`
 - `libksudnext.so` → `679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`

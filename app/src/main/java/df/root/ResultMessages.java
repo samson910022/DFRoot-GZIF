@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): extract pure typed-result user messages from the Activity. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): relabel already-hooked success with unverified root status. See NOTICE.
 package df.root;
 
 /** Pure user-facing mapping for typed run outcomes. */

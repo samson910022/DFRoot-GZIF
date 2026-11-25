@@ -6,6 +6,7 @@ import java.util.Properties
 // Modified 2026-11-24 (DFRoot GZIF): signing.properties is now optional at configuration time.
 // Reason: PR CI / fresh clones have no signing.properties. Reading it unconditionally made
 // file(null) throw during Gradle configuration, breaking every task, including assembleDebug.
+// Modified 2026-11-25 (DFRoot GZIF): move loader-pin verification into buildSrc and add the harmless negative fixture guard. See NOTICE.
 
 plugins {
     // Modified 2026-11-24 (DFRoot GZIF): use the version catalog alias so the AGP

@@ -46,27 +46,33 @@ device validation; see `PORTING-GZIF.md`.
 
 `/dev/dfm6` remains the owner-visible **late-load SUCCESS progress diagnostic**;
 when that legacy marker is observed the app still prints `ksud start: SUCCESS`.
-It is progress only. Native now returns **only after a run-scoped terminal marker
-bound to the admitted operation ID** is observed (or the reader deadline expires),
-so a global marker alone can no longer end a run.
+It is progress only. Native returns **only after a run-scoped terminal marker
+bound to the admitted operation ID** is observed; if the reader deadline expires
+without a confirmed marker it returns **rc=7 indeterminate** — never success and
+never a definitive failure. A global marker alone can no longer end a run.
 
 | Code | Meaning |
 |---|---|
 | `0` | normal terminal success: the admitted run published its success marker |
-| `1` | bootstrap/terminal error — run-config, module, staging, marker conflict, or **late-load timeout** |
-| `2` | native setup/marker timeout — no valid terminal marker within the reader deadline, including a failed terminal write (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
+| `1` | bootstrap/terminal error — run-config, module, staging, marker conflict, or an **observed nonzero late-load exit** (`run_status_late_load_wait_code`); an unobserved exit or timeout is rc=7, not rc=1 |
+| `2` | native `setup()` failure before any operation starts (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
 | `3` | native patch failure |
 | `4` | soft-reboot command returned success |
 | `6` | soft-reboot command failed |
+| `7` | **indeterminate** — completion could not be confirmed: bounded writer wait or reader deadline expiry, unconfirmed/failed terminal publication, or pre-admission uncertainty. Never a success. |
 
-A late-load timeout is a rc=1 bootstrap/terminal error, never a success. **No root
+A late-load timeout, an unobserved child exit, an unconfirmed publication, and a
+reader deadline expiry are all rc=7 indeterminate: privileged children may still
+be running, so the app keeps ownership until explicit owner recovery. **No root
 probe is added**: the app does not run `su` or inspect root state to decide a
 result. Verify root yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
 
 ## Operation ownership, boot, and soft reboot
 
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death.
-- **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. Foreground-service start eligibility from boot still requires hardware validation.
+- **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state, so a queued boot request cannot contradict OFF. Foreground-service start eligibility from boot still requires hardware validation.
+- **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. Turning it ON still requires verified configuration, an idle coordinator, and consent; a rejected component change is surfaced in the UI with the state actually applied.
+- **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until explicit owner recovery, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API.
 - **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
 
 ## FAQ
@@ -227,7 +233,77 @@ if it is absent, release builds are unsigned and still configure. The file is
 gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 `SIGN_ALIAS` (no default credentials); CI uses the `KEYSTORE` secrets.
 
-## Validation status (2026-11-25)
+## Re-review 1 repair (2026-11-25)
+
+This section records the **new repair round** on top of the first 2026-11-25
+repair (commits `d8b7d30` → `543c431` on `fix/app-correctness-safety`). It closes
+tracking findings **R2-10 through R2-16** and the still-open parts of
+**R2-02/03/04/07/09**. The earlier "Validation status" section below remains the
+record of the first repair round; the counts in this section are the current
+ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
+
+- **Gradle pin gate restored (`d8b7d30`).** Loader-pin verification moved from
+  the build script into Gradle-supported `buildSrc` tasks, fixing the
+  non-static-inner-class failure that broke `:app:tasks --all`. The strict
+  two-pin, one-APK, packaged-entry SHA-256 checks are retained, and a
+  deterministic harmless synthetic-fixture guard now proves that a clean APK
+  passes while a one-byte-tampered `libksud.so` is rejected; it is wired into
+  CI (`loader-pin-fixtures`). No real APK path or device is touched.
+- **Conservative descriptor-based staging cleanup (`c3c9854`).** The created
+  staged inode is pinned by a descriptor and verified with `fstat`/`lstat`
+  before any unlink. If the path no longer names that inode, cleanup never
+  unlinks the replacement, still restores the directory mode, and reports a
+  diagnostic. The `O_WRONLY` pin is converted through `/proc/self/fd` to a
+  non-writing pin before `install()` returns, so the loader can be exec'd
+  without `ETXTBSY`; an unavailable conversion fails closed.
+- **Atomic terminal marker publication (`caf8c9e`).** The full marker payload is
+  written to an unpredictable same-directory temp file (`O_EXCL|O_NOFOLLOW`,
+  full write, `fsync`, `fchmod 0644`, checked close) and only then atomically
+  linked to the run-scoped final name, with temp unlink and directory fsync.
+  A failed publication leaves no complete marker at the final path, so a reader
+  cannot observe success from a failed write. On an unconfirmed post-link
+  failure the indeterminate channel is published **before** retracting the
+  intended marker; rc=7 outranks success and conflicts in the classifier.
+- **rc=7 indeterminate contract for missing confirmation (`caf8c9e`, `3aaefdf`,
+  `42ba1d5`).** Bounded, non-killing native waits map timeouts and unobserved
+  exits to rc=7 (late-load and soft-reboot); the reader's own deadline expiry
+  is rc=7 ("privileged child may still be running"); a failed/unconfirmed
+  publication cannot report success; and a valid reserved pre-admission rc=1
+  marker with no terminal marker for the admitted operation yields rc=7 with
+  an explicit "completion unverified" diagnostic. Current-operation markers
+  stay authoritative, foreign/stale markers never become success, and rc=2 is
+  only a pre-operation `setup()` failure.
+- **Durable unconfirmed-attempt barrier (`f0cc8e5`).** The operation attempt is
+  persisted in device-protected storage before privileged work or `run_config`
+  publication; a new process rejects manual and boot requests until explicit
+  owner recovery, regardless of boot count. Boot claims are suppressed while an
+  attempt is unconfirmed, clearing is compare-and-clear by operation ID, and
+  the coordinator keeps ownership on indeterminate results.
+- **Independent Start-at-Boot OFF (`83d93b5`).** OFF is reachable from ERROR
+  configuration and active/indeterminate operations without disturbing the
+  current run; ON keeps the verified-config, idle-coordinator, and consent
+  gates. The claim re-checks the component state and fails closed when it is
+  unreadable.
+- **Honest already-hooked wording (`543c431`).** The result message is now
+  `DFRoot: SUCCESS (already attempted/hooked; root status unverified)`; the
+  SUCCESS code and the one-shot no-reentry guard are unchanged.
+- **Read-only availability diagnostic (`543c431`).** The UI shows the
+  authoritative `RunPreflight` reason in its own view, from the same environment
+  source the runner uses. It never starts work, stages files, or substitutes a
+  manager/loader, and unreadable observations are never reported as available.
+
+**Validation status (current round, non-privileged host only):** **484 JVM unit
+tests across 44 suites**, **135 host CTest cases**, lint **0 errors / 21
+warnings**, `git diff --check` clean, loader SHA-256 pins match `app/build.gradle.kts`
+and the bundled `jniLibs` binaries, and no generated/build/secret files are
+tracked. **No device, hardware, ADB, payload execution, privileged-container,
+cold-boot, soft-reboot, or APK-assembly validation was performed for this
+revision** (the KO is gitignored/absent). A fresh GitHub CI green run — including
+the negative pin fixture — is a **POST-PUSH gate** that cannot be executed
+locally; it is not claimed here. The 2026-11-17 hardware runs remain historical
+evidence only.
+
+## Validation status (2026-11-25 — first repair round; counts superseded above)
 
 Non-privileged host verification only:
 

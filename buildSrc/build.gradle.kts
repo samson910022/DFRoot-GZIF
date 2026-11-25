@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): add Gradle-owned build logic for loader-pin verification. See NOTICE.
 // Gradle-owned build logic for loader-pin verification.
 //
 // `kotlin-dsl` is Gradle's own build-logic plugin (Gradle API + embedded Kotlin).

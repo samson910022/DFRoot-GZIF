@@ -6,6 +6,7 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record Slice 4B2 hardened loader-staging implementation, harmless host race tests, and mutation evidence; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record Phase 5 Task 5.1-5.5 progress, durable BOOT_COUNT claim protocol, verification, and mutation evidence; Checkpoint 5 remains unchecked pending independent review. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Phase 5 review-fix test round, deterministic finish assertions, real DE-store restart coverage, and mutation evidence; Checkpoint 5 remains unchecked. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the re-review 1 repair round (R2-10..R2-16), findings closure, verification numbers, and open post-push/hardware gates. Round checkpoint and final comprehensive review remain unchecked. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -538,6 +539,63 @@
     APK-assembly validation and no commit or push.
 
 - [x] Checkpoint 6: Documentation matches code; non-privileged verification green; independent reviews approved; commit created by this change.
+
+<!-- Modified 2026-11-25 (DFRoot GZIF): re-review 1 repair round committed locally (d8b7d30..543c431); documentation/hygiene only; Checkpoint R1 and final comprehensive review remain unchecked. See NOTICE. -->
+
+## Re-review 1 repair round (2026-11-25, R2-10..R2-16)
+
+New repair round on `fix/app-correctness-safety` after the first repair round.
+Commits: `d8b7d30` (pin gate), `c3c9854` (staging identity), `caf8c9e` (atomic
+publication + rc7), `3aaefdf` (indeterminate ownership), `f0cc8e5` (durable
+attempt barrier), `42ba1d5` (pre-admission uncertainty), `83d93b5` (independent
+Boot OFF), `543c431` (honest hook result + availability diagnostic). HEAD
+`543c431`. Findings closed: **R2-10..R2-16**, plus the remaining parts of
+**R2-02/03/04/07/09**. The final documentation/notices/hygiene commit set is
+left uncommitted.
+
+- [x] R1.1 Pin gate (`d8b7d30`, R2-10): buildSrc loader-pin verifier tasks,
+  clean/tampered synthetic fixture guard, CI fixture job and `:app:tasks --all`
+  regression. Locally verified: tasks resolve, fixtures pass/reject as intended.
+- [x] R1.2 Staging identity (`c3c9854`, R2-11): descriptor-pinned fstat/lstat
+  identity, conservative no-unlink of replacements, non-writing pin via
+  `/proc/self/fd` to avoid `ETXTBSY`. **117/117 local CTest, 115/115 CI-like.**
+- [x] R1.3 Atomic publication (`caf8c9e`, R2-12): temp + fsync + `link()`
+  publication, rc=7 indeterminate channel, `NativeResultMapper` maps only to
+  `RESULT_INDETERMINATE`. **123/123 CTest, 26 mapper tests.**
+- [x] R1.4 Indeterminate ownership (`3aaefdf`, R2-13 / partial R2-03): bounded
+  non-killing waits, reader rc=7, lease/config/single-flight retained until
+  single-claim owner recovery. **131/131 CTest, 428 JVM tests, lint 0 errors.**
+- [x] R1.5 Durable barrier (`f0cc8e5`, R2-14 / partial R2-02): DE-persisted
+  operation attempt before work, process-restart admission rejection, boot
+  claims suppressed until recovery, compare-and-clear. **459 JVM, 131 CTest,
+  lint 0 errors.**
+- [x] R1.6 Pre-admission uncertainty (`42ba1d5`, R2-15 / partial R2-07): pure
+  decision helper + reserved diagnostic, admitted markers authoritative.
+  **135/135 CTest**; Java mapping unchanged.
+- [x] R1.7 Independent Boot OFF (`83d93b5`, R2-15 / partial R2-09): OFF reachable
+  in ERROR and active/indeterminate states, ON gates retained, claim-time
+  component recheck, UI surfaces failures. **471 JVM, 135 CTest, lint 0 errors.**
+- [x] R1.8 Honest hook result + availability (`543c431`, R2-16 / partial R2-04):
+  `SUCCESS (already attempted/hooked; root status unverified)` with unchanged
+  code/no-reentry guard, read-only availability diagnostic from the authoritative
+  preflight plan. **484 JVM tests (44 suites), 135 host CTest cases, lint 0
+  errors / 21 warnings.**
+- [x] R1.9 Documentation/notices/hygiene: README re-review section, CHANGELOG
+  phase table, PORTING §16 + stale-contract corrections, NOTICE and
+  THIRD_PARTY_NOTICES dated notes, plan/todo updates; per-file 2026-11-25 notices
+  added where missing (none removed); pins re-verified; `.gitignore` and tracked
+  files audited; secret scan benign-hit-only; `git diff --check` clean.
+- [ ] Checkpoint R1: comprehensive review approval and final verification are
+  pending; main agent updates this item after approval. No CI green result is
+  claimed locally.
+
+Open gates recorded for the main agent: fresh GitHub CI green run including the
+negative fixture is a **POST-PUSH gate**; hardware gates remain Direct Boot FGS
+eligibility and real soft-reboot safety; security limitations remain the
+sticky-bit `/data/local/tmp` owner and `/dev` marker-root trust; AES-key argv
+redesign and recovery-UI delivery are out of scope; `BOOT_COUNT` as a new-boot
+boundary still needs owner acknowledgement. No device/hardware/ADB/payload/
+privileged-container/APK-assembly validation was performed.
 
 ## Final Comprehensive Review
 

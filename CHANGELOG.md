@@ -86,6 +86,105 @@ APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
 
+## 2026-11-25 — Re-review 1 repair (R2-10..R2-16; locally committed, not pushed)
+
+Second 2026-11-25 repair round on `fix/app-correctness-safety`, commits
+`d8b7d30` → `543c431` (HEAD `543c431`), on top of the first repair round
+recorded below. `versionCode`/`versionName` remain 408 / `4.8-gzif`. No runtime
+payload, firmware target, bundled binary, dependency, or SUCCESS/root-probe
+policy was widened. The tracking-comment IDs below are mapped by subject area to
+the repair commits (the authoritative finding text lives on the GitHub PR).
+
+| Finding | Subject closed by this round | Commit |
+|---|---|---|
+| R2-10 | packaged loader pin gate broken / no negative fixture | `d8b7d30` |
+| R2-11 | staged-entry cleanup identity and exec pin | `c3c9854` |
+| R2-12 | atomic terminal publication and indeterminate channel | `caf8c9e` |
+| R2-13 | indeterminate completion must keep ownership (partial R2-03) | `3aaefdf` |
+| R2-14 | unconfirmed attempt not durable across process death (partial R2-02) | `f0cc8e5` |
+| R2-15 | pre-admission uncertainty + independently disableable Start at Boot (partial R2-07/09) | `42ba1d5`, `83d93b5` |
+| R2-16 | already-hooked wording and availability honesty (partial R2-04) | `543c431` |
+
+Phase-by-phase (each phase is one commit, with the **exact locally recorded
+counts** at that point — these are intermediate, not final totals):
+
+- **Re-review Phase 1 — Gradle pin gate (`d8b7d30`, R2-10).** Moved pin
+  verification out of the build script into Gradle-supported `buildSrc` tasks
+  (`LoaderPinVerifier`, `VerifyPackagedLoaderPinsTask`,
+  `VerifyLoaderPinFixturesTask`), fixing the non-static-inner-class failure that
+  broke `:app:tasks --all`. Strict two-pin, one-APK, packaged-entry SHA-256
+  checks retained; deterministic clean/tampered synthetic ZIP fixtures guarded
+  the verifier itself; CI gained the `loader-pin-fixtures` job and a
+  `:app:tasks --all` regression step. Locally: `:app:tasks --all` resolves,
+  debug/release pin tasks configure, clean fixture passes and tampered fixture
+  is rejected. No full-suite count was recorded in this commit; a fresh GitHub
+  CI green run is a **POST-PUSH gate** that cannot be executed locally and is
+  **not** claimed here.
+- **Re-review Phase 2 — staging cleanup identity (`c3c9854`, R2-11).** Pinned
+  the created staged inode with a descriptor; `fstat`/`lstat` identity recheck
+  before unlink, conservative no-unlink of replacements, directory-mode restore
+  and diagnostic retained. Converted the `O_WRONLY` pin through
+  `/proc/self/fd/<n>` to an `O_RDONLY` pin before `install()` returns so the
+  loader can be exec'd without `ETXTBSY`; unavailable conversion fails closed.
+  Added exec/replacement/churn/unrelated-entry fixtures. **117/117 local CTest
+  cases and 115/115 CI-like cases**, 0 failures.
+- **Re-review Phase 3 — atomic terminal publication (`caf8c9e`, R2-12).** Full
+  payload written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`,
+  EINTR-safe full write, fsync, fchmod 0644, checked close) then atomically
+  linked to the run-scoped final path, temp unlinked and directory fsynced; a
+  failed publication cannot leave a complete final marker. Added writer rc=7
+  for unconfirmed publication and Java `NativeResultMapper` → `RESULT_INDETERMINATE`
+  only. Conflict detection, operation-ID binding, progress-only `/dev/dfm*`
+  markers, and soft-reboot rc=4/6 preserved. **123/123 host CTest cases** and
+  **26 `NativeResultMapperTest` cases**.
+- **Re-review Phase 4 — ownership when unconfirmed (`3aaefdf`, R2-13; partial
+  R2-03).** Bounded late-load/soft-reboot waits without killing children or
+  lengthening deadlines; timeout or unobserved exit is rc=7. Reader deadline
+  expiry is rc=7 within the single shared late-load budget.
+  `RunCoordinator` retains lease, frozen configuration, and single-flight
+  rejection on indeterminate results and exits only via a single-claim explicit
+  recovery API. **131/131 CTest cases, 428 JVM tests, lint 0 errors.**
+- **Re-review Phase 5 — durable attempt barrier (`f0cc8e5`, R2-14; partial
+  R2-02).** New `OperationAttempt` / `OperationAttemptStore` /
+  `SharedPreferencesOperationAttemptStore` boundary persists an unconfirmed
+  attempt in device-protected storage before privileged work or `run_config`
+  publication; a new process rejects manual and boot requests fail-closed until
+  explicit recovery regardless of boot count, and boot claims are suppressed
+  while unconfirmed. Clearing is compare-and-clear by operation ID. **459 JVM
+  tests, 131 CTest cases, lint 0 errors.**
+- **Re-review Phase 6 — pre-admission uncertainty (`42ba1d5`, R2-15; partial
+  R2-07).** Pure reader decision helper plus narrowly scoped reserved-identity
+  diagnostic scan: a valid pre-admission rc=1 marker with no admitted terminal
+  marker yields rc=7 with an explicit "completion unverified" diagnostic;
+  admitted markers (rc=0 success included) remain authoritative and no stale or
+  foreign marker can become success. **135/135 CTest cases**; Java result
+  mapping and all prior SUCCESS/soft-reboot semantics unchanged.
+- **Re-review Phase 7 — independent Start-at-Boot OFF (`83d93b5`, R2-15;
+  partial R2-09).** OFF is reachable from ERROR configuration and
+  active/indeterminate operations without disturbing the current operation;
+  ON keeps the verified-config, idle-coordinator, and consent gates. The
+  receiver component is re-checked at claim time (unreadable/default fails
+  closed), and component-setting failures surface in the UI. **471 JVM tests,
+  135 CTest cases, lint 0 errors.**
+- **Re-review Phase 8 — honest hook result and availability (`543c431`, R2-16;
+  partial R2-04).** Already-hooked success is relabelled
+  `SUCCESS (already attempted/hooked; root status unverified)` with the SUCCESS
+  code and no-reentry guard preserved; a read-only availability diagnostic is
+  built from the same authoritative preflight plan in its own view and never
+  starts, stages, or substitutes anything. **484 JVM tests across 44 suites,
+  135 fresh host CTest cases, lint 0 errors (21 warnings).**
+
+Final local verification for this round: **484 JVM tests (44 suites), 135 host
+CTest cases**, lint **0 errors / 21 warnings**, `git diff --check` clean, loader
+SHA-256 pins match `app/build.gradle.kts` and `app/src/main/jniLibs`, zero
+secret-pattern hits (benign `printf '%s'` placeholder in `Makefile` only), and
+no generated/build/KO/secret files tracked. **No hardware, device, ADB, payload,
+privileged-container, cold-boot, soft-reboot, or APK-assembly validation was
+performed.** A fresh GitHub CI green run, including the negative pin fixture,
+is a **POST-PUSH gate** that cannot be executed locally and is **not** claimed
+here. Per-file dated notices were added only where missing; no existing notice
+was removed. Documentation/notices/hygiene-only changes are left uncommitted.
+
 ## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (locally committed, not yet pushed)
 
 Architecture repairs on top of `4.8-gzif`; `versionCode`/`versionName` are

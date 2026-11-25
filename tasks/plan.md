@@ -51,6 +51,13 @@ The final branch must be buildable, testable without privileged execution, lifec
 | R2-07 rc=4 absent / rc=1 too narrow | integrated native terminal protocol and complete result mapping | 1, 4 |
 | R2-08 legacy soft reboot / consent | versioned safe-off migration and modal durable acknowledgement | 2 |
 | R2-09 loader precheck / fallback | exact selection-aware asset preflight; no implicit fallback | 1 |
+| R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`d8b7d30`) |
+| R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`c3c9854`) |
+| R2-12 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; no success from failed write | Re-review 3 (`caf8c9e`) |
+| R2-13 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`3aaefdf`) |
+| R2-14 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`f0cc8e5`) |
+| R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`42ba1d5`, `83d93b5`) |
+| R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | Re-review 8 (`543c431`) |
 | Duplicate boot broadcasts | durable BOOT_COUNT claim before service start | 5 |
 | WakeLock released before bootstrap completes | terminal completion marker; service owns lock for full session | 3, 4 |
 | Shell-writable root staging race | sticky-bit + exclusive nofollow descriptor staging; restore mode | 4 |
@@ -193,6 +200,57 @@ For every phase:
 4. If any Required/Critical finding remains, assign a fix subagent and repeat review.
 5. Commit only after reviewers approve and verification is green.
 6. Update `tasks/todo.md` before moving to the next phase.
+
+## Re-review 1 repair round — release gates (2026-11-25)
+
+Second repair round on `fix/app-correctness-safety`, commits `d8b7d30`..`543c431`
+(HEAD `543c431`), closing R2-10..R2-16 and the remaining parts of
+R2-02/03/04/07/09. Documentation/notices/hygiene only for the final commit set;
+no runtime behavior change is introduced by the documentation work itself.
+
+Completed local gates for this round:
+
+- [x] R2-10 Gradle pin gate: `buildSrc` verifier tasks resolve `:app:tasks --all`;
+  clean and tampered synthetic fixtures behave correctly; CI fixture job added.
+- [x] R2-11 staging cleanup: descriptor identity pin, conservative replacement
+  handling, non-writing exec pin; 117/117 local and 115/115 CI-like CTest cases.
+- [x] R2-12 atomic publication: 123/123 CTest, 26 mapper tests; rc=7 only maps
+  to `RESULT_INDETERMINATE`.
+- [x] R2-13 indeterminate ownership: 131/131 CTest, 428 JVM tests, lint 0 errors.
+- [x] R2-14 durable attempt barrier: 459 JVM tests, 131 CTest, lint 0 errors.
+- [x] R2-15 pre-admission uncertainty (135/135 CTest) and independent boot OFF
+  (471 JVM tests, 135 CTest, lint 0 errors).
+- [x] R2-16 honest hook result and read-only availability diagnostic:
+  484 JVM tests across 44 suites, 135 host CTest cases, lint 0 errors / 21 warnings.
+- [x] Hygiene: loader pins match `app/build.gradle.kts` and `jniLibs`;
+  `.gitignore` covers generated/KO/secrets; no generated/secret/build files
+  tracked; secret scan has only benign `printf '%s'` placeholder hits;
+  `git diff --check` clean; per-file dated notices added only where missing.
+
+Remaining release gates (not satisfied locally, not claimed as done):
+
+- [ ] **POST-PUSH CI gate:** a fresh full GitHub Actions run must be green,
+  including `loader-pin-fixtures` (negative fixture must be rejected),
+  `:app:tasks --all`, unit tests, lint, and the packaged-loader pin checks.
+  This cannot be executed locally and is not claimed.
+- [ ] **Hardware gate — Direct Boot FGS eligibility:** boot-start foreground
+  service/notification behavior on a real locked device.
+- [ ] **Hardware gate — real soft-reboot safety:** the historical full hard
+  reboot on this model is still unresolved; rc=4/6/7 are code-level only.
+- [ ] **Security gate — sticky-bit owner limitation:** `/data/local/tmp` owner
+  (`shell`) can still rename/delete entries; descriptor identity checks mitigate
+  but are not a security boundary.
+- [ ] **Security gate — marker-root trust:** `/dev` marker root and admitted-ID
+  path trust need on-device/SELinux validation; host tests inject harmless roots.
+- [ ] **Residual risk — AES key in argv:** parsing hardened, key presence in argv
+  not redesigned; owner acknowledgement required.
+- [ ] **Out of scope — recovery UI delivery:** the recovery API and durable
+  barrier exist, but an owner-facing recovery screen is not part of this round.
+- [ ] **Owner acknowledgement — `BOOT_COUNT` as new-boot boundary:** treating a
+  strictly greater boot count as a safe retry point needs explicit owner
+  acknowledgement/validation.
+- [ ] APK assembly remains blocked by the gitignored, absent `ko/*.ko` and would
+  require a privileged DDK container; no device/ADB/payload validation in this round.
 
 ## Final Gate
 

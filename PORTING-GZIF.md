@@ -18,8 +18,10 @@
 > where it described the old manager-APK `libksud.so` spinner check and the
 > `/dev/dfm6` marker as verification, those steps have been corrected below to
 > match the current code. §4/§6/§8.4/§9/§10 have been updated to match the
-> current code, and **§15** documents the current architecture and residual
-> risks. No device or privileged validation was done for the current revision.
+> current code, **§15** documents the first 2026-11-25 repair architecture and
+> residual risks, and **§16** documents the re-review 1 repair round and the
+> hardware gates that remain open. No device or privileged validation was done
+> for either 2026-11-25 revision.
 
 ---
 
@@ -107,7 +109,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - `set_partitions_ro()` — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` is set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
 - **hardened staging (§15)**: `mkdir("/data/adb", 0755)` then `loader_stage_install()` copies the staged daemon to `/data/local/tmp/.ksud-stage` with sticky-bit protection, `O_EXCL|O_NOFOLLOW`, a verified descriptor copy and fsync; execs **`/data/local/tmp/.ksud-stage late-load --package-name <pkg>`** as uid 0, `u:r:init:s0`, Seccomp: 0; the staging directory mode is restored whether or not late-load succeeds;
-- on **exit 0** → `touch /dev/dfm6` (progress only), then a **run-scoped terminal marker** rc=0 (or, when enabled, a bounded soft-reboot command → rc=4/rc=6); on any error or **late-load timeout (60 s)** → a run-scoped rc=1 terminal marker. `dfme2` is retained as a legacy progress marker.
+- on **exit 0** → `touch /dev/dfm6` (progress only), then a **run-scoped terminal marker** rc=0 (or, when enabled, a bounded soft-reboot command → rc=4/rc=6); on any **plain error** → a run-scoped rc=1 terminal marker, but on a **late-load wait timeout (60 s) or unobserved child exit** → **rc=7 indeterminate** (§16; no definitive failure and no forced kill), with the marker atomically published. `dfme2` is retained as a legacy progress marker.
 
 **(7) Samsung-patched ksud late-load.** The bundled loader (classic FZG1 v3.3.0 — log tag **`KernelSU`**; or Next generic 3.4.2 — log tag **`KernelSU Next`**):
 - logs `ksud::cli: command: LateLoad {… package_name: "…"}` (`ksud::late_load: late-load command triggered!` … `Detected KMI: android13-5.15` — **2-part KMI always**, verified);
@@ -135,13 +137,15 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 | `/dev/dfme1` | disable-modules failed (progress) |
 | `/dev/dfme2` | legacy `.ksud-stage`/ksud failure marker (progress) |
 | `/dev/dfmw0`/`dfmw1` | zygote-env / partitions-ro warnings (non-fatal progress) |
-| **run-scoped `/dev/dfroot_terminal_<op>_rc<code>`** | **terminal marker** bound to the admitted operation ID (e.g. `/dev/dfroot_terminal_<op>_rc0`): `rc0` success, `rc1` bootstrap/terminal error (incl. late-load timeout), `rc4` soft-reboot command success, `rc6` soft-reboot command failure |
+| **run-scoped `/dev/dfroot_terminal_<op>_rc<code>`** | **terminal marker** bound to the admitted operation ID (e.g. `/dev/dfroot_terminal_<op>_rc0`), published atomically via a same-directory temp + `link()`: `rc0` success, `rc1` bootstrap/terminal error, `rc4` soft-reboot command success, `rc6` soft-reboot command failure, `rc7` indeterminate channel (unconfirmed publication; outranks success and conflicts). A late-load wait timeout is indeterminate, not `rc1`. |
 
 > [!NOTE]
 > **All global `/dev/*` markers, including `/dev/dfm6` and its `ksud start: SUCCESS`
 > message, are progress-only.** Native returns only after a run-scoped terminal
-> marker (or the reader deadline) is observed, so an early/global SUCCESS can no
-> longer terminate a run. Historically, SUCCESS only meant `.ksud-stage late-load`
+> marker is observed; if the reader deadline expires first it returns **rc=7
+> indeterminate** (privileged children may still be running), never SUCCESS and
+> never a definitive failure. An early/global SUCCESS can no longer terminate a
+> run. Historically, SUCCESS only meant `.ksud-stage late-load`
 > exited 0 and did **not** prove `kernelsu.ko` finished loading (runs 2 and 3
 > printed SUCCESS *before* `init_module()` and then panicked). No root probe was
 > added: verify root with `su -c id` / `su -v` / `getenforce` via adb or
@@ -405,8 +409,9 @@ and `libdfroot.so` is exec'd with the IpSec SPI/key args plus `--run-config`,
 to `/data/adb/ksud` and `init_module()`s its embedded
 `android13-5.15_kernelsu.ko`, (h) `/dev/dfm6` prints the owner-visible
 **progress** line **`ksud start: SUCCESS`**, and (i) native returns only after the
-**run-scoped terminal marker** (`0`/`1`/`4`/`6`) is observed. Activity rotation
-or destruction at any point detaches observation but does not cancel the run.
+**run-scoped terminal marker** (`0`/`1`/`4`/`6`/`7`) is observed — a reader
+deadline expiry is `7`, indeterminate. Activity rotation or destruction at any
+point detaches observation but does not cancel the run.
 
 ---
 
@@ -414,22 +419,30 @@ or destruction at any point detaches observation but does not cancel the run.
 
 ### 9.1 LAUNCH ROOT button is disabled
 Current code: the button is enabled only by `MainActivity.isRunEligible()`
-(`MainActivity.java:207-213`) — a confirmed `RunConfig` with a selected SU
+(`MainActivity.java:219`) — a confirmed `RunConfig` with a selected SU
 manager, controls writable, and an idle/terminal `RunCoordinator`.
 
-Separately, if `/dev/df` exists (`HookMarkerProbe.java:14`) the exploit already
-ran on **this** boot: `RunOrchestrator.run()` short-circuits to
+Separately, if `/dev/df` exists (`HookMarkerProbe.java:14`) the exploit was
+already attempted on **this** boot: `RunOrchestrator.run()` short-circuits to
 `RunResult.alreadyHooked()` before preflight (`RunOrchestrator.java:17-23`, via
 `ExploitRunner.RunSeams.isHookPresent()` at `ExploitRunner.java:222-224`). `/dev`
 is devtmpfs and is wiped at every boot, so this cannot be residue from a previous
-one. Reboot to re-arm.
+one. Reboot to re-arm. Since the re-review repair, the message reads
+`DFRoot: SUCCESS (already attempted/hooked; root status unverified)`: the
+SUCCESS code and no-reentry guard are unchanged, but the wording no longer
+implies that root was verified. A separate read-only availability view now
+surfaces the authoritative preflight reason ("Run unavailable: …") without
+starting, staging, or substituting anything.
 
 ### 9.2 Toast "DFRoot: Error - ksud nonzero exit" / log `ksud start: ERROR - ksud nonzero exit`
 Historical field semantics (2026-11-17 run ledger): `/dev/dfme2` exists,
 `/dev/dfm6` does not (the old `run_ctx` branch). In current code all global
 markers — including `dfme2` and `dfm6` — are **progress only**; the authoritative
-outcome is the run-scoped terminal marker mapped to rc=0/1/4/6, and bootstrap
-failures (including a 60 s late-load timeout) publish rc=1. This section's
+outcome is the run-scoped terminal marker mapped to rc=0/1/4/6/7. Plain
+bootstrap failures publish rc=1, but a late-load wait timeout, an unobserved
+child exit, an unconfirmed publication, or reader deadline expiry is **rc=7
+indeterminate** (owner recovery required), never a definitive success/failure.
+This section's
 causes are retained from the historical hardware runs and have **not** been
 re-validated against the current architecture. Causes seen in the field, in
 probability order:
@@ -462,25 +475,44 @@ The classic manager therefore cannot manage root on this firmware **even on a fu
   campaign record §6.6 ("a full kernel reboot — /proc/uptime resets, Enforcing
   remains"); upstream FAQ points the same way (diabl0w Discussion #69).
   Current code still issues the command but bounds its wait (30 s), reports
-  rc=4 only on command success and rc=6 on failure, and **never force-kills** the
-  child. Unattended boot soft reboot is **disabled** regardless of manual
-  acknowledgement, and no soft-reboot hardware validation was performed for the
-  current revision. Do not enable it on this device.
+  rc=4 only on an **observed** command success and rc=6 on an observed failure,
+  maps a timeout/unobserved exit to **rc=7 indeterminate**, and **never
+  force-kills** the child. Unattended boot soft reboot is **disabled** regardless
+  of manual acknowledgement, and no soft-reboot hardware validation was
+  performed for either 2026-11-25 revision. Do not enable it on this device.
 - **Start on Boot** re-runs the whole chain at most **once per boot** via a durable
   `Settings.Global.BOOT_COUNT` claim in device-protected storage; missing/failed
   claims abort, and the foreground service returns `START_NOT_STICKY` so a
-  process death never replays indeterminate work. Risks: (a) a broken KSU module
-  can bootloop — mitigate with Safe Mode (hold Vol-Down), DFRoot Settings →
-  "Disable KSU Modules", or uninstalling DFRoot; (b) **foreground-service start
-  eligibility from boot requires separate hardware validation** and was not
-  validated here. Leave off unless you have a specific reason and recovery plan.
-- Both are controlled by `BootReceiver` (disabled by default; manifest
-  `android:enabled="false"`) and the versioned, acknowledged `soft_reboot`
-  setting in `SettingsFragment`.
+  process death never replays indeterminate work. An unconfirmed attempt is a
+  separate durable barrier: it blocks manual **and** boot admission in a new
+  process until explicit owner recovery, regardless of boot count; boot claims
+  are suppressed while it is unconfirmed. **OFF is reachable in every state**
+  (including configuration ERROR and active/indeterminate operations) without
+  touching the current operation; turning **ON** still requires verified
+  configuration, an idle coordinator, and consent. The claim re-checks the
+  `BootReceiver` component state at claim time and fails closed on
+  unreadable/default state; a rejected component change is shown in the UI with
+  the state actually applied. Risks: (a) a broken KSU module can bootloop —
+  mitigate with Safe Mode (hold Vol-Down), DFRoot Settings → "Disable KSU
+  Modules", or uninstalling DFRoot; (b) **foreground-service start eligibility
+  from boot requires separate hardware validation** and was not validated here;
+  (c) treating `BOOT_COUNT` as a new-boot boundary still requires owner
+  acknowledgement — see §16. Leave off unless you have a specific reason and
+  recovery plan.
+- `BootReceiver` ships disabled by default (manifest `android:enabled="false"`)
+  and is toggled by `SettingsFragment` through the PackageManager component
+  setting; soft reboot uses the versioned, acknowledged `soft_reboot` setting in
+  `SettingsFragment`.
 
 ### 9.7 Other failure modes & logcat tags
 - Tags to capture: **`dfroot`** (exploit + app; line markers `* app version`, `=== setup ===`, `=== exploit ===`, `=== init ===`, `=== cleanup ===`), **`KernelSU`** (classic ksud), **`KernelSU Next`** (Next ksud), and (for manager UX) the manager's own tags. Always capture both KSU tags or none (`next-failure-evidence.txt` is a negative example).
-- "DFRoot: Error - check logcat & dmesg" (rc=2) → `./gradlew`-era guard tripped: either IpSec setup failed or the marker poll timed out (10 000 iterations × 10 ms = 100 s); look at `dfroot` lines; `dmesg` requires root (unavailable exactly when you need it).
+- "DFRoot: Error - native setup/timeout (see logcat & dmesg)" (rc=2) → native
+  `setup()` (argv/run-config/patch-input validation) failed **before any
+  operation started**. It is no longer used for reader timeout: the reader polls
+  in 10 ms steps up to the shared 100 000 ms budget and reports **rc=7
+  indeterminate** ("outcome indeterminate (see output)") if no confirmed marker
+  appears; privileged children may still be running. Look at `dfroot` lines;
+  `dmesg` requires root (unavailable exactly when you need it).
 - Log buffer size Off → DFRoot refuses ("Log buffer size is set to Off") — set it to anything else in Developer Options.
 - `/dev/df` lingering after a failed run: press the button again is refused — **reboot is the only re-arm**.
 - Intermittent: `Failed to set feature 5: ksuctl failed: Operation not supported on transport endpoint (os error 95)` (seen run8) — non-fatal; KSU continued and loaded 5 other features. Do not chase it.
@@ -598,7 +630,7 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 10. Patch 2 (historical) used `cp` to stage `/data/local/tmp/.ksud-stage`; **current code** uses hardened in-process staging (sticky bit, `O_EXCL|O_NOFOLLOW`, descriptor copy/fsync, mode restoration) and publishes run-scoped terminal markers.
 11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle wrapper **9.9.2** with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease`, `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
-13. Troubleshooting (historical markers, §9): `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dfme2` ⇒ legacy ksud failure; Not installed ⇒ module never resident. **Current code:** all `/dev/dfm*` markers are progress only, including `/dev/dfm6` → `ksud start: SUCCESS`; the authoritative result is the run-scoped terminal marker (`0`/`1`/`4`/`6`). Dual-tag logcat capture is mandatory: `KernelSU` **and** `KernelSU Next`.
+13. Troubleshooting (historical markers, §9): `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dfme2` ⇒ legacy ksud failure; Not installed ⇒ module never resident. **Current code:** all `/dev/dfm*` markers are progress only, including `/dev/dfm6` → `ksud start: SUCCESS`; the authoritative result is the run-scoped terminal marker (`0`/`1`/`4`/`6`/`7`), where `7` is indeterminate and requires owner recovery. Dual-tag logcat capture is mandatory: `KernelSU` **and** `KernelSU Next`.
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
 
@@ -656,14 +688,18 @@ privileged-container, or APK-assembly validation was performed for this revision
   to the admitted operation ID (checked exclusive write, no-follow, regular
   file, `write`/`fsync`/`close` verified). Foreign IDs and malformed payloads
   are ignored; conflicting codes resolve to terminal error.
-- Codes: `0` normal success, `1` bootstrap/terminal error (including the 60 s
-  late-load timeout and marker conflicts), `4` soft-reboot command success,
-  `6` soft-reboot command failure. The Java `NativeResultMapper` consumes
-  exactly these values with collision-free unknown handling.
+- Codes in the first repair round: `0` normal success, `1` bootstrap/terminal
+  error (then including the 60 s late-load timeout and marker conflicts), `4`
+  soft-reboot command success, `6` soft-reboot command failure. **Superseded by
+  §16:** a late-load wait timeout is now rc=7 indeterminate, and rc=7 is a
+  dedicated indeterminate channel; rc=2 is only a pre-operation `setup()`
+  failure. The Java `NativeResultMapper` consumes these values with
+  collision-free unknown handling.
 - All legacy global `/dev/df*` markers — **including `/dev/dfm6` and its owner-
   visible `ksud start: SUCCESS` message** — are progress-only diagnostics.
-  Native returns only after a run-scoped terminal marker (or the 100 s reader
-  deadline). No root probe is added to decide a result.
+  Native returns only after a run-scoped terminal marker; **the reader deadline
+  (100 000 ms) now expires as rc=7 indeterminate**, not a definitive failure.
+  No root probe is added to decide a result.
 
 ### 15.5 Hardened staging
 - `loader_stage.c` replaces the old `system("cp …")`: it lstats and mode-saves
@@ -709,8 +745,119 @@ privileged-container, or APK-assembly validation was performed for this revision
 
 ---
 
+## 16. Re-review 1 repair round (2026-11-25) — architecture and open gates
+
+This section covers the **new** repair round on `fix/app-correctness-safety`,
+commits `d8b7d30` → `543c431` (HEAD `543c431`), closing tracking findings
+**R2-10..R2-16** plus the remaining parts of R2-02/03/04/07/09. It is
+documentation analysis only: no device, payload, ADB, privileged container, or
+APK assembly was performed. Host verification for this round: **484 JVM tests
+(44 suites), 135 host CTest cases, lint 0 errors / 21 warnings**,
+`git diff --check` clean, loader pins match, no generated/secret files tracked.
+A fresh GitHub CI green run (including the negative pin fixture) is a
+**POST-PUSH gate** and is not claimed. Where §15 described the first repair
+round's contracts, §16 supersedes them as noted below.
+
+### 16.1 Architecture changes in this round
+
+- **Packaged-loader pin gate (R2-10, `d8b7d30`).** Verification moved from a
+  Gradle build script into supported `buildSrc` tasks so task configuration no
+  longer fails on a non-static inner class; strict two-pin/one-APK checks remain
+  and a deterministic clean/tampered synthetic ZIP fixture proves the check
+  itself (a one-byte-tampered `libksud.so` must be rejected). CI gained the
+  fixture job and a `:app:tasks --all` regression step.
+- **Staged-entry identity (R2-11, `c3c9854`).** The created staged inode is
+  pinned by a descriptor; cleanup verifies `fstat`/`lstat` identity before
+  unlink and is conservative if the path was replaced: it never unlinks a
+  replacement, still restores the directory mode, and reports a diagnostic.
+  The write pin is converted through `/proc/self/fd/<n>` to a non-writing pin
+  before `install()` returns so the loader is exec-able without `ETXTBSY`;
+  failure to convert fails closed.
+- **Atomic terminal publication (R2-12, `caf8c9e`).** A complete marker payload
+  is written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`, full
+  EINTR-safe write, fsync, fchmod 0644, checked close) and atomically linked to
+  the run-scoped final path, then the temp is unlinked and the directory
+  fsynced. A failed publication leaves no complete final marker. On an
+  unconfirmed post-link failure the indeterminate channel is published **first**,
+  then the intended marker is retracted, so a concurrent reader can never
+  return SUCCESS; rc=7 outranks success and conflicts in the classifier.
+- **Bounded, non-killing waits (R2-13 / partial R2-03, `3aaefdf`).** Late-load
+  and soft-reboot command waits share one 60 s late-load budget and never signal
+  or kill a child. Observed exits map to rc=0/1 and rc=4/6; timeouts and
+  unobserved exits map to rc=7. The reader's 100 000 ms budget covers writer
+  worst case; its expiry is rc=7, not a definitive failure.
+- **Durable attempt barrier (R2-14 / partial R2-02, `f0cc8e5`).** An
+  `OperationAttempt` is persisted in device-protected storage before privileged
+  work or `run_config` publication. A new process rejects manual and boot
+  requests fail-closed until explicit owner recovery, regardless of
+  `BOOT_COUNT`; boot claims are suppressed while unconfirmed; clearing is
+  compare-and-clear by operation ID.
+- **Pre-admission uncertainty (R2-15 / partial R2-07, `42ba1d5`).** A pure
+  decision helper plus a narrowly scoped reserved-identity scan turns a valid
+  pre-admission rc=1 marker into rc=7 "completion unverified" **only** when no
+  terminal marker exists for the admitted operation. Admitted markers (rc=0
+  included) remain authoritative; stale/foreign markers can never become
+  success.
+- **Independent boot toggle and honesty (R2-15/16, `83d93b5`, `543c431`).**
+  Start-at-Boot OFF is reachable in ERROR and active/indeterminate states
+  without touching the current operation; ON keeps its gates; the receiver
+  component is re-checked at claim time and unreadable state fails closed.
+  The already-hooked message is now
+  `SUCCESS (already attempted/hooked; root status unverified)`, and a read-only
+  availability diagnostic reuses the authoritative preflight plan in its own
+  view.
+
+### 16.2 Indeterminate / recovery policy (supersedes §15.4)
+
+rc=7 means **completion was not confirmed**, not "the operation failed". It is
+produced by: a writer timeout or unobserved child exit (both waits bounded and
+non-killing), a failed or unconfirmed terminal publication, pre-admission
+uncertainty with no admitted marker, and reader deadline expiry while
+privileged children may still be alive. Java maps rc=7 only to
+`RESULT_INDETERMINATE`; never to SUCCESS. `RunCoordinator` retains the resource
+lease, frozen configuration, and single-flight rejection, and features are
+locked while indeterminate. The **only** exit is an explicit single-claim
+owner-caller recovery that also clears the durable barrier. rc=2 is now only a
+pre-operation `setup()` failure; a late-load timeout is **not** rc=1 anymore.
+
+### 16.3 Hardware and release gates that remain open
+
+None of the following was validated for either 2026-11-25 revision; they are
+gates, not claims:
+
+1. **Direct Boot foreground-service eligibility.** The `specialUse`
+   Direct Boot-aware service, notification channel, and boot-start exemption are
+   covered by JVM tests only; no cold boot was performed.
+2. **Real soft-reboot safety.** The historical full hard reboot on this model
+   still stands. Bounded waits and distinct rc=4/6/7 are code-level facts, not
+   device evidence; do not enable soft reboot on GZIF.
+3. **Sticky-bit owner limitation.** The sticky bit on `/data/local/tmp` does not
+   defend against the directory owner (`shell`); descriptor identity checks
+   mitigate but do not remove that trust assumption.
+4. **Marker-root trust.** Terminal markers live under `/dev` (`RUN_STATUS_ROOT_DEFAULT`);
+   the reader trusts that path/root for admitted operation IDs. Host tests inject
+   harmless roots; no on-device marker-root trust/SELinux validation was done.
+5. **AES key in argv.** Parsing was hardened and is range-checked, but the
+   key's presence in the payload argv was not redesigned; it remains an
+   accepted residual risk.
+6. **Recovery UI delivery is out of scope.** The single-claim recovery API and
+   durable barrier exist, but shipping an owner-facing recovery screen (and
+   validating it on hardware) is not part of this round.
+7. **`BOOT_COUNT` as a new-boot boundary needs owner acknowledgement.** The
+   boot claim treats a strictly greater count as a new boot, but the hardware
+   meaning of that boundary (and the owner's acceptance of it as a safe retry
+   point) has not been acknowledged/validated on the device.
+8. **Fresh GitHub CI green run, including the negative synthetic fixture, is a
+   POST-PUSH gate.** It cannot be executed locally and is not claimed here.
+
+The **2026-11-17 hardware ledger in §5/§11/§12 remains historical evidence only**
+(two successful cold runs, run6/run8). It does not validate the §15 or §16
+architecture, and no new device run was performed for either 2026-11-25 round.
+
+---
+
 *Original document produced read-only for the 2026-11-17 GZIF port (no adb or
-git operations). The 2026-11-25 updates above (status note, §4/§6/§8/§9/§10/§14
-and §15) were documentation/hygiene only; no device, payload, ADB, privileged,
+git operations). The 2026-11-25 updates above (status note, §4/§6/§8/§9/§10/§14,
+§15 and §16) were documentation/hygiene only; no device, payload, ADB, privileged,
 or APK operation was performed. Log contents are referenced by line range only.
 **Do not commit host logs or this device's raw dumps anywhere public.***

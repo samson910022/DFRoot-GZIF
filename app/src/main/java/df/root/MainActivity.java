@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): observe confirmed configuration, gate controls, and preserve off-thread preflight. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): request service-owned manual work and detach all execution/observation from the Activity lifecycle. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): add a read-only availability diagnostic from the authoritative preflight plan. See NOTICE.
 package df.root;
 
 import android.app.Activity;

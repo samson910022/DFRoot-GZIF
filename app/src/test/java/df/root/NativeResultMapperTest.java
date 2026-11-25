@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify every native code maps to a complete typed result. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): verify native rc=7 maps only to indeterminate, never success. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;

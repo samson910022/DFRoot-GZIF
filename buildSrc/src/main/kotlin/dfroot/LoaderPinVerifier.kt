@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): shared strict loader SHA-256 pin verification for repository and packaged loaders. See NOTICE.
 package dfroot
 
 import org.gradle.api.GradleException

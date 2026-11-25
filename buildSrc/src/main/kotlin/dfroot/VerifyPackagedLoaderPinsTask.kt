@@ -1,3 +1,4 @@
+// Modified 2026-11-25 (DFRoot GZIF): Gradle-supported packaged loader-pin verification task. See NOTICE.
 package dfroot
 
 import org.gradle.api.DefaultTask
