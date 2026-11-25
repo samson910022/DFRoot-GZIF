@@ -5,6 +5,8 @@
 # Modified 2026-11-25 (DFRoot GZIF): cover shared progress markers, composed deadlines, exact fault branches, and malformed markers. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): add nonprivileged hardened loader-staging race tests with injectable directories. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): pin staged inodes by descriptor, add deterministic identity-churn and exec-before-restore cases. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): cover atomic publication, rc=7, and a gated concurrent reader. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): add the post-link rc7-before-retraction gated reader case. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -192,6 +194,7 @@ foreach(status_case IN ITEMS
         rc1
         rc4
         rc6
+        rc7
         missing
         conflict
         foreign_id
@@ -207,6 +210,11 @@ foreach(status_case IN ITEMS
         fault_close
         fault_write_close
         fault_fsync_close
+        fault_dir_fsync
+        indeterminate_precedence
+        publication_failure_protocol
+        concurrent_failed_publish
+        post_link_gated_reader
         bounded_wait
         deadline_composition
         shared_budget_wiring

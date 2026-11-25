@@ -1,5 +1,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): exercise run-scoped terminal markers and the classifier with harmless host files. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): assert the shared progress table, composed deadlines, exact failure branches, and malformed-marker cases. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): assert atomic publication, no final path on failure, the rc=7 channel, and a gated concurrent reader. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): gate the post-link rc7-before-retraction window and verify a transient temp-unlink retry. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -10,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char OUR_ID[] = "op-9d50d1d4-51af-4de5-8d68-2819df6f1201";
@@ -101,6 +105,47 @@ static void write_text(const char *path, const char *text)
         perror("close fixture");
         exit(1);
     }
+}
+
+/* A failed publication must leave neither a final marker nor a temp file that
+ * could ever be mistaken for one. The temp prefix is deliberately different
+ * from the classifier prefix, but debris is still a protocol violation. */
+static void expect_no_final(const char *operation_id, int code)
+{
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc%d", operation_id, code) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("marker name is too long");
+    }
+    char path[PATH_MAX];
+    make_path(path, sizeof(path), name);
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+        fprintf(stderr, "final marker was left behind: %s\n", path);
+        exit(1);
+    }
+    if (errno != ENOENT) {
+        perror("lstat final marker");
+        exit(1);
+    }
+}
+
+static void expect_no_temp_files(void)
+{
+    DIR *directory = opendir(root);
+    if (directory == NULL) {
+        perror("opendir root");
+        exit(1);
+    }
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strstr(entry->d_name, "dfroot_tmp_") != NULL) {
+            fprintf(stderr, "temporary publication file was left behind: %s\n",
+                    entry->d_name);
+            exit(1);
+        }
+    }
+    closedir(directory);
 }
 
 static struct run_status_result classify(void)
@@ -196,8 +241,13 @@ static void test_valid_code(int code)
         die("marker payload does not include the operation ID");
     }
 
-    /* A second write of the same code must fail: O_EXCL is enforced. */
-    expect_write_fail(code, "terminal marker open failed");
+    expect_no_temp_files();
+
+    /* A second write of the same code must fail at the atomic link step: the
+     * final path is exclusive, so an existing marker is never overwritten. */
+    expect_write_fail(code, "terminal marker link failed");
+    expect_no_temp_files();
+    expect_terminal(code);
 }
 
 static void test_conflict(void)
@@ -326,7 +376,10 @@ static void test_no_follow(void)
         perror("symlink fixture");
         exit(1);
     }
-    expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker open failed");
+    /* The symlink is the final path; the temp open is fresh, so the refusal is
+     * enforced by the atomic link (EEXIST) and no temp file survives. */
+    expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker link failed");
+    expect_no_temp_files();
     expect_no_terminal();
 }
 
@@ -336,6 +389,11 @@ static void test_fault(int fault, const char *expected_reason)
     run_status_inject_fault(fault);
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, expected_reason);
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
+    /* Every injected fault happens before link(): the reader must see no
+     * final marker and no complete payload at all. */
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_no_terminal();
 }
 
 static void test_first_diagnostic_wins(int fault, const char *expected_reason)
@@ -345,6 +403,9 @@ static void test_first_diagnostic_wins(int fault, const char *expected_reason)
     run_status_inject_fault(fault | RUN_STATUS_FAULT_CLOSE);
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, expected_reason);
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_no_terminal();
 }
 
 static void test_bounded_wait(void)
@@ -457,6 +518,10 @@ static void test_shared_budget_wiring(void)
     expect_contains(e, "run_status_wait_continues( now - start, "
                        "RUN_STATUS_TERMINAL_READ_WAIT_MS)");
     expect_contains(e, "run_status_progress_markers[");
+    /* The writer must route every terminal publication through the shared
+     * success/failure mapping; no code may return its intended value after a
+     * failed publication. */
+    expect_contains(b, "run_status_publication_exit_code(write_result, code)");
     if (strstr(bootstrap, "kill(") != NULL
         || strstr(bootstrap, "LATE_LOAD_WAIT_LIMIT_MS") != NULL
         || strstr(exp, "progress_markers[]") != NULL
@@ -526,6 +591,312 @@ static void test_unconfigured(void)
     }
 }
 
+/* A post-link directory fsync failure is unconfirmed. The writer retracts its
+ * own final link and publishes the rc=7 channel, so the reader reports
+ * indeterminate rather than the intended success. */
+static void test_directory_fsync_failure(void)
+{
+    configure(OUR_ID);
+    run_status_inject_fault(RUN_STATUS_FAULT_FSYNC_DIR);
+    expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS,
+                      "terminal marker directory fsync failed");
+    run_status_inject_fault(RUN_STATUS_FAULT_NONE);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+
+    struct run_status_result result = classify();
+    if (result.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || result.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || strstr(result.diagnostic, "indeterminate") == NULL) {
+        fprintf(stderr, "unconfirmed publication was not indeterminate: verdict=%d code=%d\n",
+                (int)result.verdict, result.code);
+        exit(1);
+    }
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc7", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("indeterminate marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("indeterminate reader channel was not published");
+    }
+}
+
+/* Even a concurrently present success marker cannot override the indeterminate
+ * publication-failure channel. */
+static void test_indeterminate_precedence(void)
+{
+    configure(OUR_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
+    expect_write_ok(RUN_STATUS_TERMINAL_INDETERMINATE);
+    struct run_status_result result = classify();
+    if (result.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || result.code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("indeterminate publication channel did not outrank success");
+    }
+}
+
+/* End-to-end protocol check without executing bootstrap: an injected pre-link
+ * failure maps to rc=7 on the writer side and NONE (-1) on the reader side. */
+static void test_publication_failure_protocol(void)
+{
+    configure(OUR_ID);
+    run_status_inject_fault(RUN_STATUS_FAULT_WRITE);
+    int write_result = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+    run_status_inject_fault(RUN_STATUS_FAULT_NONE);
+    int writer_exit = run_status_publication_exit_code(write_result,
+                                                       RUN_STATUS_TERMINAL_SUCCESS);
+    if (write_result == 0 || writer_exit != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("a failed publication was mapped to its intended success code");
+    }
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_no_terminal();
+
+    /* The confirmed path still returns the intended code. */
+    expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
+    if (run_status_publication_exit_code(0, RUN_STATUS_TERMINAL_SUCCESS)
+        != RUN_STATUS_TERMINAL_SUCCESS) {
+        die("a confirmed publication was not mapped to its intended code");
+    }
+    expect_terminal(RUN_STATUS_TERMINAL_SUCCESS);
+}
+
+/* Deterministic gated fixture: the writer is paused after creating the temp
+ * file and before its failing write, while an independent reader polls 16
+ * times. The reader must never observe a complete payload. No sleeps and no
+ * scheduling luck: every poll is issued and acknowledged over a pipe. */
+#define READER_POLLS 8
+
+static void test_concurrent_failed_publish(void)
+{
+    configure(OUR_ID);
+    int gate[2], observed[2], release[2], paused[2];
+    if (pipe(gate) != 0 || pipe(observed) != 0
+        || pipe(release) != 0 || pipe(paused) != 0) {
+        die("gated reader pipe failed");
+    }
+    run_status_set_writer_pause(release[0], paused[1]);
+
+    pid_t writer = fork();
+    if (writer < 0) die("gated writer fork failed");
+    if (writer == 0) {
+        close(gate[0]); close(gate[1]);
+        close(observed[0]); close(observed[1]);
+        close(release[1]);
+        close(paused[0]);
+        run_status_inject_fault(RUN_STATUS_FAULT_WRITE);
+        int rc = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+        _exit(rc == 0 ? 0 : RUN_STATUS_TERMINAL_INDETERMINATE);
+    }
+
+    pid_t reader = fork();
+    if (reader < 0) die("gated reader fork failed");
+    if (reader == 0) {
+        close(gate[1]);
+        close(observed[0]);
+        close(release[0]); close(release[1]);
+        close(paused[0]); close(paused[1]);
+        char command;
+        char saw = 'G';
+        for (int i = 0; i < 2 * READER_POLLS; i++) {
+            ssize_t count = read(gate[0], &command, 1);
+            if (count != 1) _exit(2);
+            struct run_status_result result;
+            if (run_status_classify(&result) == 0
+                && result.verdict != RUN_STATUS_VERDICT_NONE) {
+                saw = 'B';
+            }
+            if (write(observed[1], &saw, 1) != 1) _exit(3);
+        }
+        if (write(observed[1], &saw, 1) != 1) _exit(4);
+        _exit(0);
+    }
+
+    close(gate[0]); close(observed[1]); close(release[0]); close(paused[1]);
+
+    char byte;
+    if (read(paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("writer never reached its checked pause point");
+    }
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("gated reader handshake failed while writer was paused");
+        }
+        if (byte == 'B') die("reader saw a marker before the payload was written");
+    }
+    if (write(release[1], "g", 1) != 1) die("writer release failed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("gated reader handshake failed after the failing write");
+        }
+        if (byte == 'B') die("reader saw a complete payload from a failed publication");
+    }
+    if (read(observed[0], &byte, 1) != 1 || byte == 'B') {
+        die("concurrent reader observed a terminal marker");
+    }
+
+    int status = 0;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status)
+        || WEXITSTATUS(status) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("gated writer did not exit with indeterminate rc=7");
+    }
+    if (waitpid(reader, &status, 0) != reader || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("gated reader fixture failed");
+    }
+    close(gate[1]); close(observed[0]); close(release[1]); close(paused[0]);
+    run_status_set_writer_pause(-1, -1);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_no_terminal();
+}
+
+/* Post-link failure with a gated concurrent reader. The writer is paused by
+ * the retract hook, which fires AFTER the rc=7 channel is published but BEFORE
+ * the intended rc=0 marker is retracted. At that point both markers coexist;
+ * the classifier scans them all before choosing a verdict and rc=7 outranks
+ * success, so the reader must never report SUCCESS. After release the steady
+ * state is rc=7 only. A second phase injects a one-shot temp-unlink failure so
+ * the unconfirmed path's retry is exercised deterministically. */
+static void test_post_link_gated_reader(void)
+{
+    char original_root[PATH_MAX];
+    if (snprintf(original_root, sizeof(original_root), "%s", root) < 0
+        || strlen(original_root) >= sizeof(original_root)) {
+        die("case root path is too long");
+    }
+
+    /* Phase A: injected directory-fsync failure plus a gated reader. */
+    configure(OUR_ID);
+    int gate[2], observed[2], release[2], paused[2];
+    if (pipe(gate) != 0 || pipe(observed) != 0
+        || pipe(release) != 0 || pipe(paused) != 0) {
+        die("post-link reader pipe failed");
+    }
+    run_status_set_retract_pause(release[0], paused[1]);
+
+    pid_t writer = fork();
+    if (writer < 0) die("post-link writer fork failed");
+    if (writer == 0) {
+        close(gate[0]); close(gate[1]);
+        close(observed[0]); close(observed[1]);
+        close(release[1]);
+        close(paused[0]);
+        run_status_inject_fault(RUN_STATUS_FAULT_FSYNC_DIR);
+        int rc = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+        _exit(rc == 0 ? 0 : RUN_STATUS_TERMINAL_INDETERMINATE);
+    }
+
+    pid_t reader = fork();
+    if (reader < 0) die("post-link reader fork failed");
+    if (reader == 0) {
+        close(gate[1]);
+        close(observed[0]);
+        close(release[0]); close(release[1]);
+        close(paused[0]); close(paused[1]);
+        char command;
+        char saw_success = 'G';
+        char saw_indeterminate = 'N';
+        for (int i = 0; i < 2 * READER_POLLS; i++) {
+            ssize_t count = read(gate[0], &command, 1);
+            if (count != 1) _exit(2);
+            struct run_status_result result;
+            if (run_status_classify(&result) == 0
+                && result.verdict == RUN_STATUS_VERDICT_TERMINAL) {
+                if (result.code == RUN_STATUS_TERMINAL_SUCCESS) saw_success = 'B';
+                if (result.code == RUN_STATUS_TERMINAL_INDETERMINATE) {
+                    saw_indeterminate = 'R';
+                }
+            }
+            if (write(observed[1], &saw_success, 1) != 1) _exit(3);
+        }
+        if (write(observed[1], &saw_indeterminate, 1) != 1) _exit(4);
+        _exit(0);
+    }
+
+    close(gate[0]); close(observed[1]); close(release[0]); close(paused[1]);
+
+    char byte;
+    if (read(paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("post-link writer never reached the retract pause");
+    }
+    /* Prove the gate really is the coexistence window: both the intended rc=0
+     * marker and the rc=7 channel are present, yet classification is rc=7. */
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc0", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("intended rc=0 marker was missing before retraction");
+    }
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc7", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("rc=7 channel was not published before retraction");
+    }
+    struct run_status_result at_gate = classify();
+    if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || at_gate.code != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        fprintf(stderr, "rc7 did not outrank coexisting rc0: verdict=%d code=%d\n",
+                (int)at_gate.verdict, at_gate.code);
+        exit(1);
+    }
+
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("post-link reader handshake failed in coexistence window");
+        }
+        if (byte == 'B') die("reader reported SUCCESS while rc7 was published");
+    }
+    if (write(release[1], "g", 1) != 1) die("post-link writer release failed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("post-link reader handshake failed after retraction");
+        }
+        if (byte == 'B') die("reader reported SUCCESS after retraction");
+    }
+    if (read(observed[0], &byte, 1) != 1 || byte != 'R') {
+        die("post-link reader never observed the rc7 indeterminate channel");
+    }
+
+    int status = 0;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status)
+        || WEXITSTATUS(status) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("post-link writer did not exit with indeterminate rc=7");
+    }
+    if (waitpid(reader, &status, 0) != reader || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("post-link reader fixture failed");
+    }
+    close(gate[1]); close(observed[0]); close(release[1]); close(paused[0]);
+    run_status_set_retract_pause(-1, -1);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+
+    /* Phase B: a transient temp-unlink failure must be retried, leaving no
+     * debris and preserving the first diagnostic. */
+    reset_root(original_root);
+    configure(OUR_ID);
+    run_status_inject_fault(RUN_STATUS_FAULT_UNLINK_TEMP);
+    expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker unlink failed");
+    run_status_inject_fault(RUN_STATUS_FAULT_NONE);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+}
+
 static void run_case(const char *name)
 {
     if (!strcmp(name, "rc0")) {
@@ -536,6 +907,8 @@ static void run_case(const char *name)
         test_valid_code(RUN_STATUS_TERMINAL_SOFT_REBOOT_OK);
     } else if (!strcmp(name, "rc6")) {
         test_valid_code(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    } else if (!strcmp(name, "rc7")) {
+        test_valid_code(RUN_STATUS_TERMINAL_INDETERMINATE);
     } else if (!strcmp(name, "missing")) {
         configure(OUR_ID);
         expect_no_terminal();
@@ -564,7 +937,22 @@ static void run_case(const char *name)
         }
         make_path(marker_path, sizeof(marker_path), name_buffer);
         write_text(marker_path, "pre-existing\n");
-        expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker open failed");
+        /* The temp file is fresh; the conflict is detected atomically at link(). */
+        expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker link failed");
+        expect_no_temp_files();
+        char after[64];
+        int fd = open(marker_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0) {
+            perror("open pre-existing marker");
+            exit(1);
+        }
+        ssize_t length = read(fd, after, sizeof(after) - 1);
+        close(fd);
+        if (length < 0 || (size_t)length != strlen("pre-existing\n")
+            || memcmp(after, "pre-existing\n", strlen("pre-existing\n")) != 0) {
+            die("a failed publication overwrote the pre-existing final path");
+        }
+        expect_no_terminal();
     } else if (!strcmp(name, "no_follow")) {
         test_no_follow();
     } else if (!strcmp(name, "fault_write")) {
@@ -579,6 +967,16 @@ static void run_case(const char *name)
     } else if (!strcmp(name, "fault_fsync_close")) {
         test_first_diagnostic_wins(RUN_STATUS_FAULT_FSYNC,
                                    "terminal marker fsync failed");
+    } else if (!strcmp(name, "fault_dir_fsync")) {
+        test_directory_fsync_failure();
+    } else if (!strcmp(name, "indeterminate_precedence")) {
+        test_indeterminate_precedence();
+    } else if (!strcmp(name, "publication_failure_protocol")) {
+        test_publication_failure_protocol();
+    } else if (!strcmp(name, "concurrent_failed_publish")) {
+        test_concurrent_failed_publish();
+    } else if (!strcmp(name, "post_link_gated_reader")) {
+        test_post_link_gated_reader();
     } else if (!strcmp(name, "bounded_wait")) {
         test_bounded_wait();
     } else if (!strcmp(name, "deadline_composition")) {

@@ -3,6 +3,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): publish checked run-scoped terminal markers and bound the late-load wait. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): use the shared composed deadlines and bound the soft-reboot command wait without killing. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): replace shell cp with hardened sticky-bit exclusive staging and unconditional mode restoration. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): never report an unconfirmed publication as its intended success/error code. See NOTICE. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -128,15 +129,20 @@ static int64_t monotonic_ms(void)
     return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
-/* Publish the run-scoped terminal outcome and exit with exactly that code.
- * A marker write failure is reported but never downgrades the outcome. */
+/* Publish the run-scoped terminal outcome and exit with that code only when
+ * the publication is fully confirmed. A failed or unconfirmed publication is
+ * indeterminate (rc=7): the intended code is never returned, so a write/fsync/
+ * close/link/directory-fsync failure can never be observed as success. */
 static int terminal(int code)
 {
-    if (run_status_write(code) != 0) {
-        fprintf(stderr, "bootstrap: terminal marker write failed: %s\n",
-                run_status_last_error());
+    int write_result = run_status_write(code);
+    int result = run_status_publication_exit_code(write_result, code);
+    if (write_result != 0) {
+        fprintf(stderr,
+                "bootstrap: terminal marker publication unconfirmed: %s; reporting rc=%d\n",
+                run_status_last_error(), result);
     }
-    return code;
+    return result;
 }
 
 static int run_ctx(const char *ctx, char *const argv[])

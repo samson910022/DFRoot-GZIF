@@ -2,6 +2,8 @@
 package df.root;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -43,7 +45,9 @@ public class NativeResultMapperTest {
                 RunResult.Type.SOFT_REBOOT_PENDING, RunResult.Detail.NATIVE_EXIT, null});
         cases.add(new Object[] {6, ExploitRunner.RESULT_SOFT_REBOOT_FAILED,
                 RunResult.Type.SOFT_REBOOT_FAILED, RunResult.Detail.NATIVE_EXIT, null});
-        for (int unknown : new int[] {5, 7, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
+        cases.add(new Object[] {7, ExploitRunner.RESULT_INDETERMINATE,
+                RunResult.Type.INDETERMINATE, RunResult.Detail.NATIVE_EXIT, null});
+        for (int unknown : new int[] {5, 8, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
             cases.add(new Object[] {unknown, ExploitRunner.RESULT_UNKNOWN, RunResult.Type.UNKNOWN,
                     RunResult.Detail.NATIVE_EXIT, "native exit code " + unknown});
         }
@@ -59,5 +63,22 @@ public class NativeResultMapperTest {
         assertEquals(expectedDetail, result.getDetail());
         assertEquals(expectedReason, result.getReason());
         assertEquals(expectedType == RunResult.Type.SUCCESS, result.isSuccess());
+    }
+
+    /** rc=7 owns the indeterminate contract and cannot alias any other native rc. */
+    @Test
+    public void indeterminateCodeIsCollisionFree() {
+        RunResult indeterminate = NativeResultMapper.map(7);
+        assertEquals(ExploitRunner.RESULT_INDETERMINATE, indeterminate.getCode());
+        assertEquals(RunResult.Type.INDETERMINATE, indeterminate.getType());
+        assertFalse(indeterminate.isSuccess());
+        // It is the Java indeterminate code (-2), not the raw native value 7.
+        assertNotEquals(7, indeterminate.getCode());
+        assertEquals(ExploitRunner.RESULT_OK, NativeResultMapper.map(0).getCode());
+        assertEquals(ExploitRunner.RESULT_NATIVE_SETUP_FAILED, NativeResultMapper.map(2).getCode());
+        for (int code : new int[] {0, 1, 2, 3, 4, 5, 6, 8, 255, -1}) {
+            assertNotEquals("native rc=" + code + " collided with indeterminate",
+                            indeterminate.getCode(), NativeResultMapper.map(code).getCode());
+        }
     }
 }

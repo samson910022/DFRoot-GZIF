@@ -1,5 +1,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): define the run-scoped terminal marker protocol. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): share the progress-marker table and composed deadlines across both native binaries. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): publish markers atomically and reserve rc=7 for indeterminate outcomes. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): distinguish writer exit rc7 from the reader rc7 channel and document the pre-link timeout path. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
@@ -19,12 +21,22 @@
 #define RUN_STATUS_PAYLOAD_MAX 256
 #define RUN_STATUS_DIAGNOSTIC_MAX 192
 
-/* Terminal codes. The Java NativeResultMapper consumes exactly these values. */
+/* Terminal codes. The Java NativeResultMapper consumes exactly these values.
+ * rc=7 is reserved and has two DISTINCT roles that must not be conflated:
+ *   (a) the writer's process exit code when a publication fails or cannot be
+ *       confirmed (run_status_publication_exit_code), and
+ *   (b) a run-scoped rc=7 marker, the reader's dedicated indeterminate channel.
+ * A PRE-LINK publication failure leaves NO marker at all, so the reader cannot
+ * propagate a writer rc=7 to itself: it surfaces its own bounded-wait timeout
+ * as rc=2 (NATIVE_SETUP_FAILED). A POST-LINK unconfirmed publication publishes
+ * the rc=7 marker, which the reader maps to RESULT_INDETERMINATE. In neither
+ * case can either channel report SUCCESS. */
 enum run_status_code {
     RUN_STATUS_TERMINAL_SUCCESS = 0,
     RUN_STATUS_TERMINAL_ERROR = 1,
     RUN_STATUS_TERMINAL_SOFT_REBOOT_OK = 4,
-    RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL = 6
+    RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL = 6,
+    RUN_STATUS_TERMINAL_INDETERMINATE = 7
 };
 
 /* Shared timing budget (ms). The terminal reader must outlive the writer's
@@ -55,13 +67,36 @@ struct run_status_result {
 int run_status_configure(const char *root, const char *operation_id);
 const char *run_status_last_error(void);
 
-/* Checked, exclusive terminal marker write. Returns 0 only on a fully
- * verified write (type, no-follow, write, fsync, close). */
+/* Checked, exclusive terminal marker publication. The complete payload is
+ * first written to an unpredictable same-directory temp file (O_EXCL,
+ * O_NOFOLLOW, O_CLOEXEC, regular-file type, full EINTR-safe write, fsync,
+ * fchmod 0644 while still open, checked close). Only then is it linked
+ * atomically to the run-scoped final path, the temp link removed, and the
+ * directory fsynced. Returns 0 only when every step succeeded; any failure
+ * before link() leaves no final path and no temp debris.
+ *
+ * A post-link failure (temp unlink or directory fsync) is unconfirmed. The
+ * indeterminate (rc=7) reader channel is published FIRST, then our own intended
+ * final link is retracted, and the temp unlink is retried. Publishing rc=7
+ * before retraction closes the coexistence window: the classifier scans all
+ * markers before deciding, and rc=7 outranks success, so a concurrent reader
+ * can never return SUCCESS once the indeterminate channel exists. The caller
+ * MUST NOT report the intended code on failure. */
 int run_status_write(int code);
+
+/* The single source of truth for the writer's exit mapping: a confirmed
+ * publication returns the intended code; any publication failure returns
+ * RUN_STATUS_TERMINAL_INDETERMINATE (7), never a success code. */
+int run_status_publication_exit_code(int write_result, int intended_code);
 
 /* Classify markers for the configured operation. Foreign operation IDs and
  * malformed payloads are ignored; conflicting codes are a terminal error with
- * a stable diagnostic. Returns 0 when *out is filled, -1 on internal error. */
+ * a stable diagnostic. The whole directory is scanned before any verdict is
+ * chosen, and an rc=7 indeterminate marker takes precedence over every other
+ * code (including success and conflicts), independent of readdir order. Thus a
+ * reader can never read SUCCESS while the indeterminate channel is present,
+ * even before the intended marker is retracted. Returns 0 when *out is filled,
+ * -1 on internal error. */
 int run_status_classify(struct run_status_result *out);
 
 /* ---- Pure protocol helpers shared by bootstrap and exp (host-tested) ---- */
@@ -106,9 +141,24 @@ enum run_status_fault {
     RUN_STATUS_FAULT_NONE = 0,
     RUN_STATUS_FAULT_WRITE = 1 << 0,
     RUN_STATUS_FAULT_FSYNC = 1 << 1,
-    RUN_STATUS_FAULT_CLOSE = 1 << 2
+    RUN_STATUS_FAULT_CLOSE = 1 << 2,
+    RUN_STATUS_FAULT_FSYNC_DIR = 1 << 3,
+    /* Fail one temp unlink (the post-link one) with EIO, then auto-clear so the
+     * unconfirmed path's retry can succeed. Models a transient unlink failure. */
+    RUN_STATUS_FAULT_UNLINK_TEMP = 1 << 4
 };
 void run_status_inject_fault(int fault);
+
+/* Deterministic reader/writer handshakes for host tests. The writer announces
+ * on notify_fd that it is paused, then blocks reading one byte from wait_fd.
+ * Both fds may be -1 to disable a seam.
+ *   - set_writer_pause: just before the first payload write (temp exists).
+ *   - set_retract_pause: in the unconfirmed path, AFTER the rc=7 channel is
+ *     published but BEFORE the intended final marker is retracted. Both
+ *     markers are visible at this point, so a reader that classifies here
+ *     exercises the rc=7-over-success precedence directly. */
+void run_status_set_writer_pause(int wait_fd, int notify_fd);
+void run_status_set_retract_pause(int wait_fd, int notify_fd);
 #endif
 
 #endif

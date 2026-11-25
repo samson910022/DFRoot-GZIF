@@ -1,5 +1,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): implement checked, run-scoped terminal markers and their classifier. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): export the shared progress-marker table and route injected faults through the real write/fsync error branches. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): publish via temp+link, reserve rc=7, and never confirm an unfsynced publication. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): publish rc7 before retraction, retry temp unlink, and chmod only fully written payloads. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -9,17 +11,48 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 static char status_root[RUN_STATUS_ROOT_MAX];
 static char status_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
 static int status_configured;
 static char status_error[RUN_STATUS_DIAGNOSTIC_MAX];
+static unsigned long status_temp_counter;
 
 #ifdef RUN_STATUS_TEST_HOOKS
 static int injected_fault;
+static int writer_wait_fd = -1;
+static int writer_notify_fd = -1;
+static int retract_wait_fd = -1;
+static int retract_notify_fd = -1;
 void run_status_inject_fault(int fault) { injected_fault = fault; }
+void run_status_set_writer_pause(int wait_fd, int notify_fd)
+{
+    writer_wait_fd = wait_fd;
+    writer_notify_fd = notify_fd;
+}
+void run_status_set_retract_pause(int wait_fd, int notify_fd)
+{
+    retract_wait_fd = wait_fd;
+    retract_notify_fd = notify_fd;
+}
 #endif
+
+/* Remove a temp link. The test seam fails one attempt with EIO and clears
+ * itself, so the unconfirmed path's retry is deterministic. Production builds
+ * have no seam and simply call unlink(). */
+static int status_unlink_temp(const char *temp_path)
+{
+#ifdef RUN_STATUS_TEST_HOOKS
+    if ((injected_fault & RUN_STATUS_FAULT_UNLINK_TEMP) != 0) {
+        injected_fault &= ~RUN_STATUS_FAULT_UNLINK_TEMP;
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return unlink(temp_path);
+}
 
 static int status_fail(const char *message)
 {
@@ -37,6 +70,40 @@ const char *run_status_last_error(void)
 {
     return status_error;
 }
+
+#ifdef RUN_STATUS_TEST_HOOKS
+/* Shared one-shot pipe handshake for both host-only pause sites. */
+static int status_gated_pause(int *wait_fd, int *notify_fd,
+                              const char *notify_error, const char *wait_error)
+{
+    if (*wait_fd < 0) {
+        return 0;
+    }
+    int wait = *wait_fd;
+    int notify = *notify_fd;
+    *wait_fd = -1;
+    *notify_fd = -1;
+    if (notify >= 0) {
+        const char byte = 'p';
+        ssize_t sent;
+        do {
+            sent = write(notify, &byte, 1);
+        } while (sent < 0 && errno == EINTR);
+        if (sent != 1) {
+            return status_fail_errno(notify_error);
+        }
+    }
+    char byte;
+    ssize_t received;
+    do {
+        received = read(wait, &byte, 1);
+    } while (received < 0 && errno == EINTR);
+    if (received != 1) {
+        return status_fail_errno(wait_error);
+    }
+    return 0;
+}
+#endif
 
 int run_status_configure(const char *root, const char *operation_id)
 {
@@ -65,14 +132,17 @@ int run_status_configure(const char *root, const char *operation_id)
 static int code_index(int code)
 {
     switch (code) {
-        case RUN_STATUS_TERMINAL_SUCCESS:       return 0;
-        case RUN_STATUS_TERMINAL_ERROR:         return 1;
-        case RUN_STATUS_TERMINAL_SOFT_REBOOT_OK: return 2;
-        case RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL: return 3;
-        default:                                return -1;
+        case RUN_STATUS_TERMINAL_SUCCESS:            return 0;
+        case RUN_STATUS_TERMINAL_ERROR:              return 1;
+        case RUN_STATUS_TERMINAL_SOFT_REBOOT_OK:     return 2;
+        case RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL:   return 3;
+        case RUN_STATUS_TERMINAL_INDETERMINATE:      return 4;
+        default:                                     return -1;
     }
 }
 
+/* Decision order matters only for conflict diagnostics: rc=7 is handled by an
+ * explicit precedence check in run_status_classify and is not ranked here. */
 static const int code_order[] = {
     RUN_STATUS_TERMINAL_SUCCESS,
     RUN_STATUS_TERMINAL_ERROR,
@@ -83,11 +153,12 @@ static const int code_order[] = {
 static const char *code_suffix(int code)
 {
     switch (code) {
-        case RUN_STATUS_TERMINAL_SUCCESS:       return "rc0";
-        case RUN_STATUS_TERMINAL_ERROR:         return "rc1";
-        case RUN_STATUS_TERMINAL_SOFT_REBOOT_OK: return "rc4";
-        case RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL: return "rc6";
-        default:                                return NULL;
+        case RUN_STATUS_TERMINAL_SUCCESS:            return "rc0";
+        case RUN_STATUS_TERMINAL_ERROR:              return "rc1";
+        case RUN_STATUS_TERMINAL_SOFT_REBOOT_OK:     return "rc4";
+        case RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL:   return "rc6";
+        case RUN_STATUS_TERMINAL_INDETERMINATE:      return "rc7";
+        default:                                     return NULL;
     }
 }
 
@@ -171,6 +242,8 @@ static int parse_payload(char *payload, size_t length, char *operation_id_out, i
         code = RUN_STATUS_TERMINAL_SOFT_REBOOT_OK;
     } else if (strcmp(code_value, "6\n") == 0) {
         code = RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL;
+    } else if (strcmp(code_value, "7\n") == 0) {
+        code = RUN_STATUS_TERMINAL_INDETERMINATE;
     } else {
         return -1;
     }
@@ -249,7 +322,8 @@ int run_status_classify(struct run_status_result *out)
         char marker_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
         int code = -1;
         /* Malformed payloads, foreign IDs, links, and non-regular entries are
-         * all ignored: only valid markers for the admitted operation count. */
+         * all ignored: only valid markers for the admitted operation count.
+         * Unlinked temp files use the dfroot_tmp_ prefix and never count. */
         if (read_marker(path, marker_operation_id, &code) != 0
             || strcmp(marker_operation_id, status_operation_id) != 0) {
             continue;
@@ -260,6 +334,17 @@ int run_status_classify(struct run_status_result *out)
         }
     }
     closedir(directory);
+
+    /* The indeterminate publication-failure channel outranks every other
+     * code, including success and a conflict. A reader can therefore never
+     * report success for a publication the writer did not confirm. */
+    if ((found & (1u << code_index(RUN_STATUS_TERMINAL_INDETERMINATE))) != 0) {
+        out->verdict = RUN_STATUS_VERDICT_TERMINAL;
+        out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "indeterminate terminal publication for operation %s", status_operation_id);
+        return 0;
+    }
 
     int count = 0;
     for (size_t i = 0; i < sizeof(code_order) / sizeof(code_order[0]); i++) {
@@ -306,32 +391,82 @@ int run_status_classify(struct run_status_result *out)
     return 0;
 }
 
-int run_status_write(int code)
+/* Fill the unpredictable part of a temp-file name from /dev/urandom. If the
+ * kernel source cannot be read, fall back to clock/PID/counter mixing; O_EXCL
+ * retries still prevent any collision from becoming an overwrite. */
+static void status_temp_entropy(unsigned char *out, size_t length)
 {
-    if (code_index(code) < 0) {
-        return status_fail("terminal code is unsupported");
+    size_t filled = 0;
+    int fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        while (filled < length) {
+            ssize_t count = read(fd, out + filled, length - filled);
+            if (count < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (count == 0) {
+                break;
+            }
+            filled += (size_t)count;
+        }
+        close(fd);
     }
-    if (!status_configured) {
-        return status_fail("marker protocol is not configured");
+    if (filled == length) {
+        return;
     }
-    char path[RUN_STATUS_PATH_MAX];
-    char payload[RUN_STATUS_PAYLOAD_MAX];
-    if (marker_path(path, sizeof(path), status_root, status_operation_id, code) != 0
-        || make_payload(payload, sizeof(payload), status_operation_id, code) != 0) {
-        return status_fail("terminal marker path or payload is too long");
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        now.tv_sec = 0;
+        now.tv_nsec = 0;
+    }
+    uint64_t seed = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
+    seed ^= (uint64_t)getpid() << 32;
+    seed ^= (uint64_t)status_temp_counter++;
+    for (size_t i = filled; i < length; i++) {
+        seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+        out[i] = (unsigned char)(seed >> 33);
+    }
+}
+
+/* Write the complete payload to an unpredictable same-directory temp file.
+ * On any failure the temp link is removed, so the reader sees no terminal
+ * marker at all. On success the caller receives the temp pathname to link. */
+static int status_write_temp(const char *payload, char *temp_path, size_t capacity, int code)
+{
+    unsigned char entropy[16];
+    status_temp_entropy(entropy, sizeof(entropy));
+    uint64_t nonce = 0;
+    for (size_t i = 0; i < 8; i++) {
+        nonce = (nonce << 8) | entropy[i];
     }
 
-    /* O_EXCL + O_NOFOLLOW reject a pre-existing file or symlink without ever
-     * following it; the descriptor is then verified to be a regular file. The
-     * world-readable 0644 mode keeps markers observable to the unprivileged
-     * native reader; some filesystems ignore mode bits, so only type and
-     * no-follow are enforced as write preconditions. */
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0644);
-    if (fd < 0) {
+    int fd = -1;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int written = snprintf(temp_path, capacity,
+                               "%s/dfroot_tmp_%s_rc%d_%016llx_%ld_%d",
+                               status_root, status_operation_id, code,
+                               (unsigned long long)nonce, (long)getpid(), attempt);
+        if (written < 0 || (size_t)written >= capacity) {
+            return status_fail("terminal temp path is too long");
+        }
+        fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+        if (fd >= 0) {
+            break;
+        }
+        if (errno == EEXIST) {
+            nonce = nonce * 6364136223846793005ull + 1442695040888963407ull;
+            continue;
+        }
         return status_fail_errno("terminal marker open failed");
     }
-    int result = 0;
+    if (fd < 0) {
+        return status_fail("could not allocate a unique terminal temp file");
+    }
 
+    int result = 0;
     struct stat st;
     if (fstat(fd, &st) != 0) {
         result = status_fail_errno("terminal marker fstat failed");
@@ -341,14 +476,26 @@ int run_status_write(int code)
         result = status_fail("terminal marker is not a regular file");
         goto done;
     }
+    /* The temp name is unpredictable and carries a non-terminal prefix, so it
+     * is ignored by the classifier while the payload is still being written.
+     * Mode bits are tightened to 0644 only after the content is fully written
+     * and fsynced (below), never before. Some filesystems ignore mode bits;
+     * regular-file type and no-follow are the enforced preconditions. */
+#ifdef RUN_STATUS_TEST_HOOKS
+    if (status_gated_pause(&writer_wait_fd, &writer_notify_fd,
+                           "writer pause notification failed",
+                           "writer pause ended unexpectedly") != 0) {
+        result = -1;
+        goto done;
+    }
+#endif
 
     size_t length = strlen(payload);
     size_t offset = 0;
     while (offset < length) {
         ssize_t written;
 #ifdef RUN_STATUS_TEST_HOOKS
-        /* Inject EIO through the same write/error branch production uses;
-         * never short-circuit to a test-only error goto. */
+        /* Inject EIO through the same write/error branch production uses. */
         if ((injected_fault & RUN_STATUS_FAULT_WRITE) != 0) {
             errno = EIO;
             written = -1;
@@ -373,7 +520,6 @@ int run_status_write(int code)
 
     int fsync_result;
 #ifdef RUN_STATUS_TEST_HOOKS
-    /* Likewise, feed the injected EIO into the real fsync error branch. */
     if ((injected_fault & RUN_STATUS_FAULT_FSYNC) != 0) {
         errno = EIO;
         fsync_result = -1;
@@ -386,13 +532,17 @@ int run_status_write(int code)
         result = status_fail_errno("terminal marker fsync failed");
         goto done;
     }
+    /* Only a complete, fsynced payload becomes world-readable. The descriptor
+     * is still open here, so no pathname-based chmod race is introduced. */
+    if (fchmod(fd, 0644) != 0) {
+        result = status_fail_errno("terminal marker fchmod failed");
+        goto done;
+    }
 
 done:
     {
         int close_result = close(fd);
 #ifdef RUN_STATUS_TEST_HOOKS
-        /* The close fault stays on the real close_result; it never invents a
-         * separate branch either. */
         if ((injected_fault & RUN_STATUS_FAULT_CLOSE) != 0 && close_result == 0) {
             close_result = -1;
             errno = EIO;
@@ -404,7 +554,154 @@ done:
             result = status_fail_errno("terminal marker close failed");
         }
     }
+    if (result != 0) {
+        /* A temp file never carries a terminal name, but remove it anyway so a
+         * failed publication leaves no debris and no complete payload behind. */
+        (void)status_unlink_temp(temp_path);
+    }
     return result;
+}
+
+/* Directory durability for the final link. EINVAL/ENOTSUP mean that this
+ * filesystem does not implement directory fsync; like file fsync, that is a
+ * no-op rather than a failed publication. All other errors are unconfirmed. */
+static int status_fsync_directory(void)
+{
+    int fd = open(status_root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return status_fail_errno("terminal marker directory open failed");
+    }
+    int fsync_result;
+#ifdef RUN_STATUS_TEST_HOOKS
+    if ((injected_fault & RUN_STATUS_FAULT_FSYNC_DIR) != 0) {
+        errno = EIO;
+        fsync_result = -1;
+    } else
+#endif
+    {
+        fsync_result = fsync(fd);
+    }
+    int saved_errno = errno;
+    close(fd);
+    if (fsync_result != 0) {
+        errno = saved_errno;
+        if (errno == EINVAL || errno == ENOTSUP) {
+            return 0;
+        }
+        return status_fail_errno("terminal marker directory fsync failed");
+    }
+    return 0;
+}
+
+/* Best-effort dedicated reader channel for an unconfirmed publication. This
+ * uses the same checked pipeline but deliberately ignores injected faults: the
+ * fallback is a separate operation and must succeed when the real filesystem
+ * is healthy. Never called recursively for rc=7 itself. */
+static void status_publish_indeterminate(void)
+{
+    char final_path[RUN_STATUS_PATH_MAX];
+    char temp_path[RUN_STATUS_PATH_MAX];
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    if (marker_path(final_path, sizeof(final_path), status_root, status_operation_id,
+                    RUN_STATUS_TERMINAL_INDETERMINATE) != 0
+        || make_payload(payload, sizeof(payload), status_operation_id,
+                        RUN_STATUS_TERMINAL_INDETERMINATE) != 0) {
+        return;
+    }
+#ifdef RUN_STATUS_TEST_HOOKS
+    int saved_fault = injected_fault;
+    injected_fault = RUN_STATUS_FAULT_NONE;
+#endif
+    if (status_write_temp(payload, temp_path, sizeof(temp_path),
+                          RUN_STATUS_TERMINAL_INDETERMINATE) == 0) {
+        if (link(temp_path, final_path) == 0) {
+            (void)unlink(temp_path);
+            (void)status_fsync_directory();
+        } else {
+            (void)unlink(temp_path);
+        }
+    }
+#ifdef RUN_STATUS_TEST_HOOKS
+    injected_fault = saved_fault;
+#endif
+}
+
+int run_status_write(int code)
+{
+    if (code_index(code) < 0) {
+        return status_fail("terminal code is unsupported");
+    }
+    if (!status_configured) {
+        return status_fail("marker protocol is not configured");
+    }
+    char final_path[RUN_STATUS_PATH_MAX];
+    char temp_path[RUN_STATUS_PATH_MAX];
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    if (marker_path(final_path, sizeof(final_path), status_root, status_operation_id, code) != 0
+        || make_payload(payload, sizeof(payload), status_operation_id, code) != 0) {
+        return status_fail("terminal marker path or payload is too long");
+    }
+
+    if (status_write_temp(payload, temp_path, sizeof(temp_path), code) != 0) {
+        return -1;
+    }
+
+    /* link() is atomic and fails with EEXIST if the run-scoped final path is
+     * already present, so conflict detection is preserved: we never replace a
+     * marker published by another code. */
+    if (link(temp_path, final_path) != 0) {
+        int result = status_fail_errno("terminal marker link failed");
+        (void)status_unlink_temp(temp_path);
+        return result;
+    }
+    if (status_unlink_temp(temp_path) != 0) {
+        (void)status_fail_errno("terminal marker unlink failed");
+        goto unconfirmed;
+    }
+    if (status_fsync_directory() != 0) {
+        goto unconfirmed;
+    }
+    return 0;
+
+unconfirmed:
+    {
+        /* The final link is visible but not durably confirmed. Publish the
+         * indeterminate reader channel FIRST: the classifier scans the whole
+         * directory before deciding and rc=7 outranks success, so even while
+         * the intended marker is still present a concurrent reader returns
+         * rc=7, never SUCCESS. Only then retract our own final link. The
+         * original diagnostic is preserved for the caller (bootstrap maps -1
+         * to rc=7, never to the intended success/error code). */
+        char first_error[RUN_STATUS_DIAGNOSTIC_MAX];
+        snprintf(first_error, sizeof(first_error), "%s", status_error);
+
+        /* A transient temp-unlink failure must not leave debris behind. Retry
+         * here (the one-shot test fault has already cleared itself); a second
+         * failure is tolerated because the temp name is never classified. */
+        for (int attempt = 0; attempt < 2; attempt++) {
+            if (status_unlink_temp(temp_path) == 0 || errno == ENOENT) {
+                break;
+            }
+        }
+        if (code != RUN_STATUS_TERMINAL_INDETERMINATE) {
+            status_publish_indeterminate();
+        }
+#ifdef RUN_STATUS_TEST_HOOKS
+        /* Both the intended marker and the rc=7 marker are visible here. The
+         * gated reader test classifies in exactly this coexistence window. */
+        (void)status_gated_pause(&retract_wait_fd, &retract_notify_fd,
+                                 "retract pause notification failed",
+                                 "retract pause ended unexpectedly");
+#endif
+        (void)unlink(final_path);
+        snprintf(status_error, sizeof(status_error), "%s", first_error);
+        return -1;
+    }
+}
+
+int run_status_publication_exit_code(int write_result, int intended_code)
+{
+    return write_result == 0 ? intended_code : RUN_STATUS_TERMINAL_INDETERMINATE;
 }
 
 int run_status_soft_reboot_code(int command_exit_code)
