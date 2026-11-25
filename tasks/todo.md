@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration, final host verification and four APPROVE comprehensive reviews. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R4 final): record R4.1–R4.9 phases/checkpoints, four final comprehensive reviews and their Required fix loop, full host verification, and residual optional items. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record R5.1–R5.8 phases/checkpoint, scoped OPEN gates, residual optional items, and reset the four final comprehensive reviews to unchecked at HEAD 33980e2. See NOTICE. -->
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
@@ -757,24 +757,55 @@ app-data reset only discards the barrier, NOT evidence effects stopped);
 `dfroot_confirm_` needed for definitive non-7, rc7 before retraction, residual
 abnormal-death window OPEN hardware gate, not proved safe.
 
+## Fifth repair round (R5, 2026-11-26) — phases, checkpoint and gates
+
+Committed local HEAD `33980e2` covers R5.1–R5.8. It addresses Re-review 4 and
+**code-fixes R2-17, R2-18, R2-20, R2-21 and R2-23 in reviewed scope**; **R2-14
+and R2-16 are SCOPED / OPEN gates — not closed, not proved safe.** Host-only
+focused verification and independent static reviews only; no device, hardware,
+ADB, payload, privileged-container, crash/power-loss or APK-assembly work; no
+fresh full-suite or CI-green claim (623/45 and 140/138 are prior-round baselines).
+
+- [x] R5.1 `f9e55a9` (R2-17): replayable bounded outcome ledger, own-ID onStart
+  reconciliation, no replay; 90 focused tests; two reviews APPROVE.
+- [x] R5.2 `3a221ab` (R2-18): no production change; blocked-store/throwing-starter
+  tests pin off-lock failure reporting; 93 focused tests; two reviews APPROVE.
+- [x] R5.3 `05ff93a` (R2-21 + dispatch half): ledger-first reporting, bounded
+  reporter and start records, eviction-time `stopSelf`; Required eviction/bound
+  issues fixed and re-reviewed RESOLVED by two reviewers.
+- [x] R5.4 `48bf31b` (R2-20 foreground): attach under `startsLock` + epoch recheck;
+  Required attach-side gap fixed with latch test/mutation check, RESOLVED.
+- [x] R5.5 `513af88` (R2-20 liveness): auth read before owner sample; 74 focused
+  tests; racy assertion latch-gated and re-verified; two reviews APPROVE.
+- [x] R5.6 `3ef725c` (R2-16 SCOPED): docs/comments only, zero executable change;
+  Required vacuous guard assertion fixed and RESOLVED.
+- [x] R5.7 `e9b12c6` (R2-14 SCOPED, gate OPEN): narrowed claim + harmless host
+  fixtures; 142 host CTest; two reviews APPROVE.
+- [x] R5.8 `33980e2` (R2-23): both APK variants pin-gated before upload; policy
+  73/73, make 36/36; two reviews APPROVE.
+- [ ] Checkpoint R5: pending main agent — fresh full host verification and four
+  final comprehensive reviews at HEAD `33980e2`. Open gates: R2-14 publication
+  window, R2-16 OFF atomicity, Direct Boot FGS, real soft reboot, `/dev` marker
+  trust, sticky-bit owner, AES key in argv, no recovery UI, BOOT_COUNT diagnostic.
+  R5 optional residuals recorded, not silently accepted: reporter-overflow UX
+  until `onStart()` (R5.3), `stopForeground`-under-`startsLock` ANR risk and
+  interrupted waiting flush (R5.4), and a future `if: always()` upload bypass
+  guard (R5.8, currently absent).
+
 ## Final Comprehensive Review
 
-Four fresh independent comprehensive reviews were run against the final HEAD
-`74d35f5`: correctness/lifecycle APPROVE, security APPROVE, architecture/native
-APPROVE, test/build/CI REQUEST CHANGES solely for stale R4.9 "uncommitted"/HEAD
-tags across the docs — corrected and re-reviewed APPROVE. Non-blocking Low/Info
-and Optional items were recorded above, not silently accepted.
+The four comprehensive reviews recorded for R4 at `74d35f5` are **historical**.
+R5 introduced new code, so four fresh independent reviews must be run by the main
+agent at HEAD `33980e2`; any Required/Critical finding enters a fix → review loop.
+All checkboxes below are intentionally UNCHECKED until that gate completes.
 
-- [x] Final 6.1: Correctness/lifecycle independent review — APPROVE.
-- [x] Final 6.2: Security/staging/environment independent review — APPROVE.
-- [x] Final 6.3: Test/build/CI independent review — REQUEST CHANGES then APPROVE
-  after the Required stale-docs-tag fix loop.
-- [x] Final 6.4: Architecture/native integration independent review — APPROVE.
-- [x] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
-- [x] Final 6.6: Fresh full verification complete; approved commit series is
-  committed and pushed by the main agent. Local verification: 623 JVM tests / 45
-  suites, 140 host CTest, lint 0 errors, policy 67/67, signing 40/40, make 36/36,
-  pins matched, hygiene clean.
+- [ ] Final 6.1: Correctness/lifecycle independent review — pending (main agent).
+- [ ] Final 6.2: Security/staging/environment independent review — pending (main agent).
+- [ ] Final 6.3: Test/build/CI independent review — pending (main agent).
+- [ ] Final 6.4: Architecture/native integration independent review — pending (main agent).
+- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops — pending.
+- [ ] Final 6.6: Fresh full verification complete; approved commit series is
+  committed and pushed by the main agent — pending.
 
 Residual optional items recorded, not silently accepted: the signed-release
 job not running packaged-pin verification itself (inherited PR #1 policy), the

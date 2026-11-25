@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R4 final): record the R4.1–R4.9 phases, four final comprehensive reviews and their Required fix loop, full host verification, and residual optional items. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record the R5.1–R5.8 phases, scoped OPEN gates, residual optional items, and reset the four final comprehensive reviews to unchecked at HEAD 33980e2. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -404,24 +404,62 @@ Remaining release gates (not satisfied locally, not claimed as done):
 - [ ] APK assembly remains blocked by the gitignored, absent `ko/*.ko` and would
   require a privileged DDK container; no device/ADB/payload validation in R3.
 
+## Fifth repair round (R5.1–R5.8) — phases, gates and residuals (2026-11-26)
+
+Committed local HEAD `33980e2` (R5.1–R5.8), addressing Re-review 4. **R2-17,
+R2-18, R2-20, R2-21 and R2-23 are code-fixed in reviewed scope. R2-14 and R2-16
+are SCOPED / OPEN gates — documented honestly, NOT closed and NOT proved safe.**
+All evidence is focused host-only verification plus independent static reviews;
+no device, hardware, ADB, payload, privileged container, crash/power-loss or APK
+assembly was performed. Prior-round baselines: 623 JVM tests / 45 suites, 140
+host CTest (R4 final gate) and 138/138 + 623/45 in Re-review 4 — none is a fresh
+R5 full-suite result.
+
+- [x] R5.1 (`f9e55a9`, R2-17 stopped-Activity half): bounded 32-entry outcome
+  ledger and onStart reconciliation; 90 focused tests, 0 failures; two reviews APPROVE.
+- [x] R5.2 (`3a221ab`, R2-18): no production change; blocked-store/throwing-starter
+  pins off-lock synchronous failure reporting; 93 focused tests, 0 failures; two reviews APPROVE.
+- [x] R5.3 (`05ff93a`, R2-21 + R2-17 dispatch half): ledger-before-enqueue, 64-slot
+  reporter, 64+64 bounded start records, eviction-time `stopSelf`; 172 then 112
+  focused tests; Required eviction/bound issues fixed and re-reviewed RESOLVED.
+- [x] R5.4 (`48bf31b`, R2-20 foreground half): attach under `startsLock`, epoch
+  recheck + single `stopForeground`; Required attach-side gap fixed with in-flight
+  latch test and mutation check, re-reviewed RESOLVED; 62 focused tests.
+- [x] R5.5 (`513af88`, R2-20 liveness half): blocking authorization read before
+  owner-token sample under the `engineStarted` lock; 74 focused tests, 0 failures;
+  a racy assertion was latch-gated and re-verified.
+- [x] R5.6 (`3ef725c`, R2-16 SCOPED): docs/comments only, zero executable
+  production change; honest OFF boundary; 75 then 59 focused tests; vacuous
+  guard assertion fixed and re-reviewed RESOLVED.
+- [x] R5.7 (`e9b12c6`, R2-14 SCOPED, gate OPEN): narrowed publication overclaims,
+  host-only pause seam, two boundary fixtures and proved/not-proved table;
+  142 host CTest, 0 failures; hooks absent from production.
+- [x] R5.8 (`33980e2`, R2-23): both APK variants pin-gated before upload on every
+  trigger; policy 73/73, make 36/36; two reviews APPROVE.
+- [ ] Checkpoint R5: pending main agent — fresh full Java + native suite, full
+  verification and four final comprehensive reviews at HEAD `33980e2`. Open gates:
+  R2-14 publication observation window, R2-16 OFF atomicity, Direct Boot FGS
+  eligibility, real soft-reboot safety, `/dev` marker-root trust, sticky-bit
+  owner, AES key in argv, no recovery UI, `BOOT_COUNT` diagnostic only. R5
+  optional residuals recorded, not silently accepted: reporter-overflow UX until
+  `onStart()` (R5.3), `stopForeground`-under-`startsLock` ANR risk and interrupted
+  waiting flush (R5.4), and a future `if: always()` upload bypass guard (R5.8,
+  currently absent).
+
 ## Final Gate
 
-Four independent final reviewers ran against HEAD `74d35f5`:
-correctness/lifecycle APPROVE, security APPROVE, architecture/native APPROVE,
-test/build/CI REQUEST CHANGES for stale R4.9 docs tags only — corrected and
-re-reviewed APPROVE. Fresh full verification (non-privileged host only):
-623 JVM tests / 45 suites, 140 host CTest, lint 0 errors, policy 67/67,
-signing 40/40, make 36/36, pins matched, hygiene clean. The approved commit
-series is pushed by the main agent; Focused R4 runs are not a substitute for the
-fresh full-suite result recorded here.
+The four comprehensive reviews run at R4 HEAD `74d35f5` are **historical**; R5
+introduced new code, so four fresh independent reviews must be run by the main
+agent at HEAD `33980e2`. Every Required finding enters fix → review loop. After
+all four approve, run full non-privileged host verification and push the approved
+series. All checkboxes below are intentionally UNCHECKED until then.
 
-- [x] Final 6.1: correctness/lifecycle independent review — APPROVE.
-- [x] Final 6.2: security/staging/environment independent review — APPROVE.
-- [x] Final 6.3: test/build/CI independent review — REQUEST CHANGES then APPROVE
-  after the Required stale-docs-tag fix.
-- [x] Final 6.4: architecture/native integration independent review — APPROVE.
-- [x] Final 6.5: Required/Critical findings resolved through fix → review loops.
-- [x] Final 6.6: Full host verification complete; commit series pushed.
+- [ ] Final 6.1: correctness/lifecycle independent review — pending.
+- [ ] Final 6.2: security/staging/environment independent review — pending.
+- [ ] Final 6.3: test/build/CI independent review — pending.
+- [ ] Final 6.4: architecture/native integration independent review — pending.
+- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops — pending.
+- [ ] Final 6.6: Fresh full verification complete; approved commit series pushed — pending.
 - Keep the PR draft unless the user explicitly asks to mark it ready; pushing does not imply hardware validation or merge approval.
 
 ## Risks and Mitigations

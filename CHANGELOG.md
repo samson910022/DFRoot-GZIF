@@ -1,5 +1,76 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — Fifth repair round (R5.1–R5.8) consolidated — PR #2 / branch `fix/app-correctness-safety`
+
+Authoritative record of the **fifth repair round** (final local HEAD `33980e2`)
+on top of R4 (`74d35f5`). It addresses Re-review 4 (2026-11-26) and closes
+**R2-17, R2-18, R2-20, R2-21 and R2-23 in reviewed scope**, while **R2-14 and
+R2-16 are explicitly SCOPED, not closed and not proved safe**. All evidence
+below is focused host-only verification plus independent static reviews; no
+device, hardware, ADB, payload, privileged-container, cold-boot, soft-reboot,
+crash/power-loss, APK-assembly or root validation was performed, and no fresh
+full-suite or CI-green result is claimed here. Older R5.x notes below are
+historical phase records; counts and gate states in this section are current.
+
+### Phase table — commit, finding, fix loop, focused verification, review outcome
+
+| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
+|---|---|---|---|
+| R5.1 `f9e55a9` | R2-17 (stopped-Activity half) | 32-entry LRU outcome ledger under a separate `outcomeLock` (strict `lock -> outcomeLock`); record before best-effort post; `onStart()` reconciles only its own ID; absence stays uncertainty; nothing replayed/cancelled. Dispatch-failure half explicitly deferred to R5.3. **90 focused tests, 0 failures.** | Two reviews APPROVED (correctness/lock-order, test quality), no Required/Critical. |
+| R5.2 `3a221ab` | R2-18 | No production change: the synchronous `startForegroundService` catch already calls `noteRequestOutcomeAsync`. Harmless blocked-store + throwing-starter fixtures pin prompt click return, the correlated `REJECTED` written off the durable lock, and checked persistence respected after release. **93 focused tests, 0 failures.** | Two reviews APPROVED (UI responsiveness, test quality), no Required/Critical. |
+| R5.3 `05ff93a` | R2-21 + R2-17 (dispatch-failure half) | Ledger write before enqueue; bounded 64-slot abort-on-full reporter (overflow harmless because the ledger is authoritative); active starts and resolved history bounded at 64 each; eldest resolved ID gets its own `stopSelf` at eviction outside the lock; deferred stops at the final flush. **172 focused tests, then 112 after the fix, 0 failures.** | Three reviews: correctness APPROVE; test-quality and architecture REQUEST CHANGES (shared Required history-eviction loss and vacuous bound assertions) — fixed and re-reviewed RESOLVED by both. |
+| R5.4 `48bf31b` | R2-20 (foreground side-effect race) | `startsLock` now spans the whole foreground attach sequence; flush epoch recheck and the single `stopForeground(REMOVE)` run under that lock behind one flush guard; per-ID `stopSelf` stays outside. **62 focused tests, 0 failures.** | Both reviews first found a Required attach-side gap (epoch bump after an unlocked `startForeground`); fixed with an in-flight-attach latch test plus mutation check, then re-reviewed RESOLVED. |
+| R5.5 `513af88` | R2-20 (liveness half) | Final pre-engine gate reads the potentially blocking authorization **before** the owner-token liveness sample under the `engineStarted` lock; an `onDestroy` during that read is seen and denied as a proven pre-effect `PRECHECK_FAILED` (checked clear, no engine). Post-recheck invalidation is intentionally not revoked. **74 focused tests, 0 failures.** | Two reviews APPROVED; a racy `STARTING` assertion was replaced with a latch-gated `RUNNING` assertion and re-verified green. |
+| R5.6 `3ef725c` | R2-16 — SCOPED, not closed | Documentation/boundary only, zero executable/control-flow change in production Java: removed the atomic-with-Settings and "no OFF can slip" overclaims; the final gate is a re-read under the coordinator lock, fail-closed on OFF/unreadable, no revocation after engine start; the `PackageManager` OFF write is outside that lock. Source-text guard pins the overclaims out. **75 focused tests initially, 59 re-verified after the guard fix, 0 failures.** | Doc review APPROVE (zero executable production changes independently confirmed); test review REQUEST CHANGES for a vacuous forbidden-phrase assertion — fixed and re-reviewed RESOLVED. |
+| R5.7 `e9b12c6` | R2-14 — SCOPED, gate stays OPEN | Docs + harmless host fixtures only: narrowed the "never sees actionable success on ANY detected failure" overclaim; the provable statement is that once rc7 is published AND observed it outranks success/conflicts, while an earlier definitive-looking consumption cannot be revoked. Host-only pause seam plus two deterministic fixtures and a proved/not-proved table; hooks absent from production CMake. **142 host CTest, 0 failures, warnings-clean.** | Two reviews APPROVED (no production control-flow change; fixtures genuine and non-vacuous). |
+| R5.8 `33980e2` | R2-23 | `build-dfroot` now verifies **both** debug and unsigned-release packaged loader pins in one fail-closed step on every trigger, before APK counts/upload; equality locks, active-task checks, weakening mutations and a stub-`gradlew` fail-closed fixture. Signed-release/publish job, pins, action SHAs, permissions and workflow
+upload/trigger allowlists untouched (policy test-side locks were extended). **Policy 73/73, make 36/36, pins matched; no local APK assembly.** | Two reviews APPROVED, no Required/Critical. |
+
+### R5 final gate state and residual optional items
+
+- **R2-14 — OPEN gate, NOT closed or proved safe.** The acknowledgement
+  protocol narrows the observation window but does not eliminate it: the
+  post-confirm/detection and abnormal-death windows remain unproved hardware/OS
+  safety gates. R5.7 scoped the documentation honestly; no device
+  crash/power-loss validation was performed.
+- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization
+  check remains a read under the coordinator monitor, not an atomic transition
+  shared with the `PackageManager` component-setting write. R5.6 documented the
+  honest boundary: an OFF written after the re-read is not observed before
+  `engine.run()`, and work already started is not cancelled.
+- **Code-fixed in reviewed scope:** R2-17 (replayable correlated outcomes and
+  bounded reporting), R2-18 (off-lock synchronous start-failure reporting),
+  R2-20 (foreground lifetime serialization and pre-engine owner liveness),
+  R2-21 (bounded start/outcome bookkeeping) and R2-23 (both APK variants
+  pin-gated before upload). These are host/review results, **not** device-safety
+  proofs.
+- **Unchanged contracts:** marker conflict → rc7, never rc1; definitive non-7
+  needs a matching `dfroot_confirm_`; `/dev/df` and `/dev/dfm6` stay progress-only;
+  fail-closed on OFF/unreadable; no revocation after engine start; unattended
+  soft reboot OFF; no root probe; no in-app recovery UI; no retry/clear path.
+- **Outstanding hardware/OS validation:** Direct Boot FGS eligibility from boot,
+  real soft-reboot safety, abnormal-death/crash/power-loss `/dev` marker
+  durability, and all device/ADB/payload/APK validation. Green host CI is not
+  proof of device safety.
+- **Final comprehensive reviews are PENDING at HEAD `33980e2`:** the main agent
+  runs the correctness/lifecycle, security, architecture/native and test/build/CI
+  reviews after this consolidation. The APPROVE outcomes recorded in the R4
+  sections were run at `74d35f5` and are historical; they are not an approval of
+  the current HEAD. `tasks/plan.md` and `tasks/todo.md` keep the final
+  6.1–6.6 checkboxes **UNCHECKED** for that purpose.
+- **Prior-round baselines only:** **623 JVM tests / 45 suites** and **140 host
+  CTest** (R4 final gate) and the **138/138 host-native + 623/45 Java tests**
+  reported in Re-review 4 are prior-round baselines, **not** a fresh R5
+  full-suite result. No fresh full suite or CI-green result is claimed here.
+- **Residual optional items recorded, not silently accepted:** R5.3 optional
+  reporter-overflow UX until `onStart()`; R5.4 `stopForeground` under
+  `startsLock` ANR risk and interrupted-waiting flush; R5.8 optional
+  `if: always()` upload-bypass guard (currently absent); plus earlier accepted
+  residuals — benign duplicate correlated rejection, signed-release job
+  packaged-pin gate inherited from PR #1 policy, owner-facing recovery UI out
+  of scope, `/dev` marker-root trust, AES key in argv, `BOOT_COUNT` diagnostic
+  only, and the abnormal-death publication window (OPEN).
+
 ## 2026-11-26 — R5.8: integrated CI/artifact pin gate (R2-23) — PR #2
 
 Scoped workflow + policy change only; R5.9 consolidates. In `build-dfroot` the
@@ -231,8 +302,9 @@ below are historical phase records, not current gate claims.
   tags — corrected here and re-reviewed APPROVE. Fresh host verification by the
   main agent: **623 JVM tests / 45 suites, 0 failures/errors/skips**, **140 host
   CTest**, lint 0 errors, workflow policy 67/67, signing 40/40, make 36/36, pins
-  matched, `git diff --check` clean. A fresh remote CI green run after push remains
-  a **POST-PUSH gate**; it is not claimed locally.
+  matched, `git diff --check` clean. These are **prior-round baselines at R4
+  (`74d35f5`), not a fresh R5 full-suite result**. A fresh remote CI green run
+  after push remains a **POST-PUSH gate**; it is not claimed locally.
 
 ## 2026-11-26 — R4.8: bounded service-local admission lifetime (R2-21)
 
