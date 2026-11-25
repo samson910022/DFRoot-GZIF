@@ -1,6 +1,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): add the short off-main durable boot claim before explicit service start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): suppress boot claims while an unconfirmed attempt survives process death. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): re-check the Start at Boot component at claim time so queued claims honor OFF. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.6): Javadoc only — state that the claim-time component read is read-only and not atomic with the PackageManager OFF write. No behavior change. See NOTICE.
 package df.root;
 
 import android.content.ComponentName;
@@ -33,6 +34,14 @@ final class BootClaimCoordinator {
      * Read-only, claim-time gate for the separate Start at Boot component setting.
      * Production reads PackageManager; pure JVM tests inject ENABLED, DISABLED or
      * UNREADABLE (including a throwing reader) without any Android runtime.
+     *
+     * <p>This is a single read-only view of the setting, NOT an atomic transition
+     * with the SettingsFragment OFF write: PackageManager writes that component
+     * outside the coordinator monitor, and no gate here can make that write
+     * atomic with claim, admission or engine start. OFF/unreadable at this read
+     * suppresses the claim; a later OFF is enforced by the submit/publish gate
+     * and pre-engine recheck only if it is observed there. Already-started work
+     * is never cancelled.</p>
      */
     interface BootComponentGate {
         enum State { ENABLED, DISABLED, UNREADABLE }

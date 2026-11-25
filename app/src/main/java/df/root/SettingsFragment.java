@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): wire settings to confirmed configuration and require durable modal consent. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): gate boot and dangerous settings on writable configuration plus an idle coordinator. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): keep Start at Boot OFF reachable in every state and surface component-setting failures. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.6): comment only — state that the OFF write is a PackageManager operation outside the coordinator monitor, not atomic with admission. No behavior change. See NOTICE.
 package df.root;
 
 import android.app.AlertDialog;
@@ -87,7 +88,12 @@ public class SettingsFragment extends PreferenceFragment {
             int actual;
             try {
                 // No coordinator call on this path: an active operation keeps its
-                // admission, lease and finish semantics untouched.
+                // admission, lease and finish semantics untouched. The OFF write
+                // is a PackageManager operation OUTSIDE the coordinator monitor;
+                // it is not atomic with admission or with the final authorization
+                // re-read, so a not-yet-started action may still observe the old
+                // value at that re-read. OFF always suppresses FUTURE unattended
+                // attempts that observe it; already-started work is never cancelled.
                 actual = mBootComponents.set(ctx, bootReceiver, desired);
             } catch (RuntimeException e) {
                 showBootChangeFailure(ctx, bootReceiver, describe(e));

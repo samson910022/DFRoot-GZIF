@@ -107,7 +107,7 @@ is unchanged: rc7 precedence and indeterminate ownership still apply.
 ## Operation ownership, boot, and soft reboot
 
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. Each UI request carries a click-time ID: the coordinator publishes `ACCEPTED`, `REJECTED` or `CANCELLED` for that ID, and the UI clears its pending state only on a matching outcome (never on an unrelated snapshot). `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death. Service destruction publishes `CANCELLED` **only** for unclaimed service-local work and never replays it; accepted work stays coordinator-owned.
-- **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state. That queued-request recheck is defense in depth only: the **authoritative final gate** is checked inside `RunCoordinator.submit()` under the same lock as the durable attempt publish, immediately before that publish, with another recheck before the engine starts. OFF (or an unreadable setting) therefore suppresses an unattended operation even if the toggle races a blocked publish, initialization or delayed worker, and the checked barrier clear remains allowed for a proven pre-effect rejection. An OFF toggle **after** `engine.run()` has started is **not** revoked — the coordinator keeps ownership of privileged work instead of cancelling it. Foreground-service start eligibility from boot still requires a hardware/OS gate, not a code claim.
+- **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state. That queued-request recheck is defense in depth and READ-ONLY: the **authoritative final gate** is checked inside `RunCoordinator.submit()` under the same lock as the durable attempt publish, immediately before that publish, with another recheck before the engine starts, and it fails closed on OFF/unreadable. OFF (or an unreadable setting) observed at those reads blocks an unattended operation even when the toggle races a blocked publish, initialization or delayed worker, and the checked barrier clear remains allowed for a proven pre-effect rejection. **Honest boundary:** the OFF write is a `PackageManager` component-setting operation **outside the coordinator monitor**; it cannot be made atomic with the gate read or `engine.run()`. An OFF written after the final pre-engine re-read therefore cannot be observed before the engine starts — this is a residual window, not a claimed guarantee, and no device safety is implied. An OFF toggle **after** `engine.run()` has started is **not** revoked — the coordinator keeps ownership of privileged work instead of cancelling it. Foreground-service start eligibility from boot still requires a hardware/OS gate, not a code claim.
 - **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. Turning it ON still requires verified configuration, an idle coordinator, and consent; a rejected component change is surfaced in the UI with the state actually applied.
 - **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until a trusted caller clears the barrier. **Resetting app data is NOT safe recovery**: it only discards the barrier and is not evidence that privileged effects stopped, so it must not be presented as a way out of the lockout. `engineFinished` only proves the Java engine call returned/threw, not that externally owned effects ceased; no in-app retry/clear control is exposed from it.
 - **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
@@ -344,6 +344,26 @@ latch/fake tests only; no other gate, rc, `/dev`, recovery or hardware claim
 changes. No device, ADB, payload or APK work was performed; this is host-only
 evidence, not device safety proof, and no R2-14/R2-16 closure is claimed.
 
+### R5.6 note (2026-11-26) — honest final-authorization boundary (R2-16 scoped docs)
+
+Documentation/boundary phase only (no executable or control-flow change).
+Removed the overclaim that the final OFF check was atomic with the Settings
+control or that no OFF transition could slip between the re-read and engine
+start. The final gate is a re-read of unattended authorization under the
+coordinator lock immediately before `engineStarted`: OFF/unreadable at that read
+blocks a not-yet-started action, while the external `PackageManager`
+component-setting write is outside that lock and cannot be made atomic with the
+read or `engine.run()`. An OFF written after the re-read is not observed before
+the engine starts; work already started is never cancelled. The boot-component
+admission recheck is defense-in-depth and READ-ONLY, not an atomic transition;
+`SettingsFragment`/`BootClaimCoordinator` state the OFF write's monitor boundary.
+Fail-closed on OFF/unreadable, the authoritative `submit()` gate plus pre-engine
+recheck, no revocation after engine start, unattended soft-reboot OFF and the
+hardware/OS FGS eligibility gate are all unchanged. A deterministic source-text
+guard test pins the removed phrases out and the honest text in. No device, ADB,
+payload, privileged-container, APK-assembly or native work was performed; no
+device safety is implied and R2-16 is scoped, not claimed closed.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`
@@ -372,14 +392,21 @@ rc1); publication acknowledgement requires a matching `dfroot_confirm_`
 marker; early unconfirmed markers are indeterminate; rc7 is published before
 retraction; the residual abnormal-death window is an **OPEN hardware/OS gate,
 NOT proved safe**. The OFF gate is enforced in `submit()` with a pre-engine
-recheck, is not revoked after engine start, and foreground-service eligibility
-from boot still needs hardware validation. Unattended soft reboot stays OFF and
-manual soft reboot remains experimental/unvalidated on GZIF. Final user
+recheck and fails closed on OFF/unreadable at each read; it is not revoked after
+engine start, and foreground-service eligibility from boot still needs hardware
+validation. The corresponding authorization boundary is read-only and honest:
+the `PackageManager` OFF write is outside the coordinator monitor and cannot be
+made atomic with the gate read or `engine.run()`; an OFF written after the final
+re-read is not observed before the engine starts. No device safety is implied.
+Unattended soft reboot stays OFF and manual soft reboot remains
+experimental/unvalidated on GZIF. Final user
 messages never claim verified root or a bare `SUCCESS` (the `/dev/df` and
 `/dev/dfm6` strings remain owner-approved progress diagnostics only).
 
 Open gates and residual optional items recorded, not silently accepted:
-Direct Boot FGS eligibility; real soft-reboot safety; `/dev` marker-root trust;
+Direct Boot FGS eligibility; real soft-reboot safety; the final pre-engine
+authorization re-read (R2-16) is read-only and not atomic with the PackageManager
+OFF write, so an OFF after that re-read is a residual window; `/dev` marker-root trust;
 sticky-bit `/data/local/tmp` owner (`shell`); AES key in argv out of scope;
 no owner-facing recovery UI (ordinary users stay intentionally locked out and
 app-data reset is not safe recovery); `BOOT_COUNT` is diagnostic only; the
@@ -411,7 +438,7 @@ gates in this section are current.
 | R2-14 | `6012c21` | The post-link publication window is documented as provable, not stronger: pre-link failures leave no final marker; once rc=7 is published it outranks success/conflicts; only results acted on **after publication completes** are indeterminate. A deterministic concurrent-reader host test proves an early confirmed observation is possible and cannot be revoked. |
 | R2-14 (R4.3) | `916a18e` | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification, with three new confirmation-protocol cases. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
 | R2-16 / R2-17 | `b87318f` | Queued unattended requests re-read the Start-at-Boot component setting at admission and fail closed on OFF/unreadable without touching an admitted operation; every rejected submission publishes a fresh rejection snapshot so the Activity leaves its pending state and shows the real barrier reason. |
-| R2-16 (R4.4) | `7e41d27` | Closed the remaining pending-admission window: the authoritative authorization gate sits inside `submit()` immediately before the durable publish (fail closed when unreadable), with a second recheck immediately before engine start. An OFF toggle during a blocked publish, configuration wait or queued worker now yields a proven pre-effect `PRECHECK_FAILED` with a checked barrier clear and no engine call; OFF after engine start is deliberately not revoked. Hardware/OS FGS eligibility remains a separate gate. |
+| R2-16 (R4.4) | `7e41d27` | Closed the remaining pending-admission window: the authoritative authorization gate sits inside `submit()` immediately before the durable publish (fail closed when unreadable), with a second recheck immediately before engine start. An OFF toggle during a blocked publish, configuration wait or queued worker now yields a proven pre-effect `PRECHECK_FAILED` with a checked barrier clear and no engine call; OFF after engine start is deliberately not revoked. Hardware/OS FGS eligibility remains a separate gate. The final atomicity with the Settings write is still **open** — see the R5.6 honest boundary above. |
 | R2-18 | `d32006e` | Checked attempt-store work runs on a bounded single-thread admission executor with claim-once/close-once ownership, and the read-only availability diagnostic runs on a separate worker with sequence/generation guards. No safety check is bypassed: Boot OFF, the durable barrier, single-flight and fail-closed diagnostics stay authoritative. |
 | R2-18 (R4.6) | `15bb5cc` | Narrower, honest guarantee: `ExploitService`'s main-thread failure and cancellation paths now **enqueue** the correlated outcome report on the admission worker instead of calling the coordinator method that takes the monitor held across checked storage; notification/status reads remain volatile-snapshot-only. A background worker may still wait on storage under that durable barrier lock. This is **not** a claim that every path is nonblocking. |
 | R2-20 (R4.7) | `a51f74e` | Shutdown is per start, not per latest snapshot: a resolved start is stopped exactly once, and the foreground notification is removed only when every owned start is resolved and no owned operation is active, so an older terminal snapshot cannot cancel a newer pending request. A per-instance owner token is invalidated before destruction cancels local work; the coordinator denies a dead owner under the admission lock and again immediately before engine start (proven pre-effect `PRECHECK_FAILED`, barrier cleared, no engine). Once the engine has started, ownership stays with the coordinator and an unverified outcome keeps lease, freeze and barrier. |

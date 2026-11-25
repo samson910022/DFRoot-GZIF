@@ -1,5 +1,41 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.6: honest final-authorization boundary (R2-16 scoped docs/boundary phase) — PR #2
+
+Documentation/boundary phase only: ZERO executable or control-flow changes in
+production code (verified by a comment-stripping diff filter over all four
+touched Java production files). Removed the overclaims that the final OFF check
+was atomic with the Settings control or that no OFF transition could slip
+between the re-read and engine start. The final gate in
+`RunCoordinator.start()` is now documented as a re-read of unattended
+authorization under the coordinator lock immediately before `engineStarted`:
+OFF/unreadable at that read blocks a not-yet-started action. The external
+`PackageManager` component-setting write is outside that lock and cannot be
+made atomic with the read or `engine.run()`; an authorization withdrawn after
+the re-read cannot be observed before the engine starts, and work already
+started is never cancelled. The `ExploitService` boot-component recheck is
+described as defense-in-depth and READ-ONLY, not an atomic transition, with the
+authoritative `submit()`/durable-publish gate and pre-engine recheck named as
+the real gate. `SettingsFragment` / `BootClaimCoordinator` state that the OFF
+write is a `PackageManager` operation outside the coordinator monitor and that
+the claim-time read is read-only, not an atomic transition with admission.
+README and the authorization section replace the unconditional guarantee with
+the honest residual window; no device safety is implied.
+
+Unchanged and re-verified: fail-closed on OFF/unreadable, the authoritative
+final gate in `submit()` plus pre-engine recheck, no revocation after engine
+start, unattended soft-reboot OFF, hardware/OS FGS eligibility gate, final gate,
+preflight, boot claim, durable barrier, recovery lockout, `START_NOT_STICKY`,
+SUCCESS/progress reporting, no root probe, loader pin/preflight and no in-app
+recovery. Added one deterministic source-text guard test in `RunCoordinatorTest`
+that the removed overclaim phrases are absent from the touched Java/README
+sections and the honest replacement text is present; no behavior test was
+weakened. Focused `:app:testDebugUnitTest` (`RunCoordinatorTest` 59 tests +
+`ExploitServiceAsyncTest` 16 tests = 75 tests, 0 failures / 0 errors / 0
+skipped), `git diff --check` clean. No device, ADB, payload,
+privileged-container, APK-assembly or native work was performed; no commit,
+stage or push.
+
 ## 2026-11-26 — R5.5: final pre-engine gate ordering (liveness half of R2-20) — PR #2
 
 Short contract note (R5.9 consolidates): `RunCoordinator.start()` now reads

@@ -17,6 +17,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): bounded replayable request-outcome ledger with a separate outcome lock and off-main async reporting; no operation replay or ownership change. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): bound the outcome-report executor queue with an explicit reject policy and expose read-only queue seams; a rejected post cannot lose the caller-written ledger record. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.5): order the final pre-engine gate so the blocking authorization read precedes the owner liveness check; a host destroyed during that read cannot authorize a not-yet-started engine, and started work is never revoked. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.6): comments/Javadoc only — state the honest final-authorization boundary; the PackageManager OFF write is outside the coordinator monitor and cannot be made atomic with the gate read or engine.run(). No behavior change. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -1043,18 +1044,22 @@ public final class RunCoordinator {
             boolean ownerGoneBeforeEngine;
             boolean authLostBeforeEngine;
             synchronized (lock) {
-                // Final, atomic recheck under the same lock as engineStarted.
-                // The authorization read MUST come first: it may block while
-                // holding this lock, and onDestroy() can invalidate the owner
-                // token independently during that read. Reading owner liveness
-                // afterwards observes such an invalidation before the request
-                // is authorized to start. A token is only a denial seam BEFORE
-                // engine start; once engineStarted is set the coordinator keeps
-                // exclusive ownership and never cancels privileged work.
-                // Honest boundary: an invalidation arriving AFTER this recheck
-                // but BEFORE engine.run() is intentionally not revoked — that
-                // request was already authorized and started work is never
-                // blindly terminated.
+                // Final re-read of unattended authorization under the same
+                // coordinator lock that sets engineStarted. OFF/unreadable at
+                // this read blocks a request that has not started yet.
+                // Honest boundary — NOT an atomic transition: the external
+                // PackageManager component-setting write is NOT under this lock
+                // and cannot be made atomic with this read or engine.run().
+                // An authorization withdrawn after this re-read cannot be
+                // observed before the engine starts; work already started is
+                // never cancelled. The authorization read MUST come first: it
+                // may block while holding this lock, and onDestroy() can
+                // invalidate the owner token independently during that read.
+                // Reading owner liveness afterwards observes such an
+                // invalidation before the request is authorized to start. A
+                // token is likewise only a denial seam BEFORE engine start;
+                // once engineStarted is set the coordinator keeps exclusive
+                // ownership and never cancels privileged work.
                 authLostBeforeEngine = unattendedAuthorizationLostLocked(operation);
                 ownerGoneBeforeEngine = !operation.engineStarted
                         && operation.ownerToken != null && !operation.ownerToken.isAlive();

@@ -10,6 +10,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin that the async ledger write is lock-free while the posted publication takes the durable lock off-caller. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): pin the bounded outcome-reporter queue, its reject policy and the caller-written ledger under overflow. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.5): pin that an owner destroyed during the blocking final authorization read cannot authorize a not-yet-started engine, with fail-closed, honest denial and no revocation of started work. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.6): add a deterministic source-text guard that the removed authorization-atomicity overclaims are absent from the touched Java/README sections and the honest boundary text is present. No behavior change. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -38,6 +39,8 @@ import org.robolectric.shadows.ShadowLooper;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -85,6 +88,54 @@ public class RunCoordinatorTest {
             assertTrue(worker.awaitTermination(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         }
         ShadowLooper.idleMainLooper();
+    }
+
+    /**
+     * R5.6 doc-level guard: the final OFF check is a lock-scoped re-read, NOT an
+     * atomic transition shared with the PackageManager component write. This
+     * test reads checked-in source text only; it changes no runtime behavior.
+     */
+    @Test
+    public void authorizationBoundaryDocsRemoveOverclaimsAndStateTheHonestLimit() throws Exception {
+        String coordinator = readSource("app/src/main/java/df/root/RunCoordinator.java");
+        String service = readSource("app/src/main/java/df/root/ExploitService.java");
+        String settings = readSource("app/src/main/java/df/root/SettingsFragment.java");
+        String bootClaim = readSource("app/src/main/java/df/root/BootClaimCoordinator.java");
+        String readme = readSource("README.md");
+
+        // Overclaim phrases that must no longer appear in the touched sections.
+        assertFalse("RunCoordinator must not call the re-read atomic",
+                coordinator.contains("Final, atomic recheck"));
+        // HEAD wrapped this phrase as "// ... so they cannot" / "// disagree
+        // about authority; ...", so match the stable substring that actually
+        // existed rather than a whitespace-dependent concatenation.
+        assertFalse("ExploitService must not claim the reads cannot disagree",
+                service.contains("disagree about authority"));
+        assertFalse("ExploitService must not claim a racing OFF is always honored",
+                service.contains("even if it races this read"));
+        assertFalse("README must not claim a racing OFF is unconditionally suppressed",
+                readme.contains("suppresses an unattended operation even if the toggle races"));
+
+        // Honest replacement text must be present.
+        assertTrue("final gate must state it is not atomic with engine.run()",
+                coordinator.contains("cannot be made atomic with this read or engine.run()"));
+        assertTrue("component recheck must be defense-in-depth and read-only",
+                service.contains("defense in depth and READ-ONLY"));
+        assertTrue("component recheck must not be an atomic transition",
+                service.contains("NOT an atomic transition"));
+        assertTrue("OFF write must be outside the coordinator monitor",
+                settings.contains("OUTSIDE the coordinator monitor"));
+        assertTrue("claim-time read must not be an atomic transition",
+                bootClaim.contains("NOT an atomic transition"));
+        assertTrue("README must state the monitor boundary",
+                readme.contains("outside the coordinator monitor"));
+        assertTrue("README must state the residual re-read window",
+                readme.contains("cannot be made atomic with the gate read or `engine.run()`"));
+    }
+
+    private static String readSource(String relativePath) throws Exception {
+        return new String(Files.readAllBytes(TestFixtures.repositoryRoot().resolve(relativePath)),
+                StandardCharsets.UTF_8);
     }
 
     @Test
