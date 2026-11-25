@@ -33,6 +33,13 @@
 #define DF_FINAL_PATH "/dev/dffinal"
 #define DF_FINAL_TMP  "/dev/dffinal.tmp"
 #define DF_NONCE_PATH "/data/user_de/0/df.root/files/dfinv"
+/* App-private channels: bootstrap failures before a run identity exists are
+ * published under the RESERVED nonce here, never to /dev/dffinal. The recovery
+ * status is written by exp.c after cleanup verification and can only block a
+ * reboot (never authorize one). */
+#define DF_BOOTFAIL_PATH "/data/user_de/0/df.root/files/dfbootfail"
+#define DF_BOOTFAIL_TMP  "/data/user_de/0/df.root/files/dfbootfail.tmp"
+#define DF_RECOVER_PATH  "/data/user_de/0/df.root/files/dfrecover"
 #define LATE_LOAD_WAIT_MS 60000
 #define SOFT_REBOOT_WAIT_MS 5000
 /* Secondary deadline for reaping a SIGKILLed child. A stuck child must never
@@ -523,6 +530,74 @@ static int read_nonce(char out[DF_NONCE_CHARS + 1])
     return df_nonce_is_valid(out) ? 0 : -1;
 }
 
+/* Strict read of the app-private recovery status written by exp.c. ONLY the
+ * exact three bytes "ok\n" in a regular file count as verified restore; an
+ * absent file, "fail\n", a partial/oversize file or a symlink all fail closed
+ * and disable the reboot path. */
+static int read_recovery_ok(void *ctx)
+{
+    struct stat st;
+    char buf[3];
+    size_t off = 0;
+    int fd;
+
+    (void)ctx;
+    fd = open(DF_RECOVER_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 3) {
+        close(fd);
+        return -1;
+    }
+    while (off < sizeof(buf)) {
+        ssize_t n = read(fd, buf + off, sizeof(buf) - off);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            close(fd);
+            return -1;
+        }
+        off += (size_t)n;
+    }
+    close(fd);
+    return df_recovery_status_is_ok(buf, sizeof(buf)) ? 1 : -1;
+}
+
+/* Publish a bootstrap failure that occurred before a run nonce could be
+ * established. The canonical token carries the RESERVED identity and is
+ * atomically written to an app-owned file, never to /dev/dffinal with a
+ * reserved/forged identity. Returns 0 on success, -1 if publication failed
+ * (the caller still reports the failure as rc=1). */
+static int publish_bootstrap_failure(void)
+{
+    char token[DF_FINAL_TOKEN_CAP];
+
+    if (df_format_final_token(token, sizeof(token), DF_RESERVED_BOOTSTRAP_NONCE,
+                              BOOTSTRAP_FAILED) < 0)
+        return -1;
+    return df_publish_final(DF_BOOTFAIL_TMP, DF_BOOTFAIL_PATH, token);
+}
+
+/* A transient marker-write fault must not leave the consumer waiting out its
+ * whole budget for a status that will never arrive. Retry a small bounded
+ * number of times; if all attempts fail, say so explicitly (the consumer then
+ * reports rc=2/unknown instead of this bootstrap failure). */
+static int publish_bootstrap_failure_bounded(void)
+{
+    int attempt, rc = -1;
+
+    for (attempt = 1; attempt <= 3; attempt++) {
+        rc = publish_bootstrap_failure();
+        if (rc == 0)
+            return 0;
+        if (attempt < 3)
+            usleep(10000);
+    }
+    printf("bootstrap: bootfail publication FAILED after 3 attempts; "
+           "consumer cannot observe this bootstrap failure (may report rc=2)\n");
+    return rc;
+}
+
 /* Build the injected IO and let the pure protocol decide + publish the one
  * final outcome. All progress markers are informational; nothing here reads
  * a marker to derive a result. */
@@ -536,6 +611,7 @@ static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot,
     io.read_final      = io_read_final;
     io.publish_final   = io_publish_final;
     io.late_load_state = io_late_load_state;
+    io.recovery_ok     = read_recovery_ok;
     io.wait_child      = wait_child_bounded;
     io.report          = io_report;
     io.nonce           = nonce;
@@ -550,16 +626,18 @@ int main(void)
     int soft_reboot = 0, disable_mods = 0;
     int late_load_rc;
 
-    touch("/dev/dfm1");
-    /* A missing or malformed nonce means the publisher cannot be bound to
-     * this run. Publish ERROR with the reserved zero nonce, force soft_reboot
-     * off, and never launch late-load or a reboot. */
+    /* Establish run identity BEFORE touching /dev or staging. A missing or
+     * malformed nonce means bootstrap failed before any bound outcome can
+     * exist: publish BOOTSTRAP_FAILED on the separate reserved-nonce channel
+     * (rc=1, NOT an unknown rc=2), disable late-load and reboot, and leave
+     * /dev and staging completely untouched. */
     if (read_nonce(nonce) != 0) {
-        memset(nonce, '0', DF_NONCE_CHARS);
-        nonce[DF_NONCE_CHARS] = '\0';
-        printf("bootstrap: nonce missing/malformed; publishing ERROR, no reboot\n");
-        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
+        (void)publish_bootstrap_failure_bounded();
+        printf("bootstrap: nonce missing/malformed; bootfail handling done, no reboot\n");
+        return DF_RC_ERROR;
     }
+
+    touch("/dev/dfm1");
     if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
         touch("/dev/dfme0");
         return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));

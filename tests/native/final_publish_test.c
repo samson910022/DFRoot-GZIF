@@ -17,6 +17,11 @@
 #define TOK_ROOT          "dfroot-v2:" NONCE ":root_only\n"
 #define TOK_REBOOT_REQ    "dfroot-v2:" NONCE ":reboot_requested\n"
 #define TOK_ERROR         "dfroot-v2:" NONCE ":error\n"
+#define TOK_BOOTFAIL      "dfroot-v2:" DF_RESERVED_BOOTSTRAP_NONCE ":bootstrap_failed\n"
+#define TOK_BOOTFAIL_WRONG "dfroot-v2:" DF_RESERVED_BOOTSTRAP_NONCE ":error\n"
+#define TOK_BOOTFAIL_REAL  "dfroot-v2:" NONCE ":bootstrap_failed\n"
+#define RECOVERY_OK       "ok\n"
+#define RECOVERY_FAIL     "fail\n"
 #define GUARD_BYTE        0x5a /* sentinel placed one byte past the read cap */
 
 static char g_dir[256];
@@ -24,6 +29,8 @@ static char g_tmp[288];
 static char g_final[288];
 static char g_victim[288];
 static char g_read[288];
+static char g_bootfail_tmp[288];
+static char g_bootfail[288];
 
 static void make_paths(void)
 {
@@ -42,6 +49,8 @@ static void make_paths(void)
     snprintf(g_final, sizeof(g_final), "%s/dffinal", g_dir);
     snprintf(g_victim, sizeof(g_victim), "%s/victim", g_dir);
     snprintf(g_read, sizeof(g_read), "%s/readtoken", g_dir);
+    snprintf(g_bootfail_tmp, sizeof(g_bootfail_tmp), "%s/dfbootfail.tmp", g_dir);
+    snprintf(g_bootfail, sizeof(g_bootfail), "%s/dfbootfail", g_dir);
 }
 
 static void cleanup_files(void)
@@ -50,6 +59,8 @@ static void cleanup_files(void)
     unlink(g_final);
     unlink(g_victim);
     unlink(g_read);
+    unlink(g_bootfail_tmp);
+    unlink(g_bootfail);
     rmdir(g_dir);
 }
 
@@ -206,6 +217,110 @@ static void assert_rejected(const char *token)
     assert_final(TOK_REBOOT_REQ);     /* prior final status untouched */
 }
 
+static void assert_bootfail(const char *expected)
+{
+    struct stat st;
+    char buf[128];
+    int fd;
+    ssize_t n;
+
+    /* The reserved-channel token is also world-readable: the app uid consumes
+     * what uid 0 published in bootstrap's nonce-failure path. */
+    assert((DF_FINAL_MODE & 0444) == 0444);
+    assert(stat(g_bootfail, &st) == 0);
+    assert(S_ISREG(st.st_mode));
+    assert((st.st_mode & 0777) == DF_FINAL_MODE);
+    assert(access(g_bootfail_tmp, F_OK) != 0); /* temp consumed by rename(2) */
+
+    fd = open(g_bootfail, O_RDONLY | O_NOFOLLOW);
+    assert(fd >= 0);
+    n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    assert(n >= 0 && n < (ssize_t)sizeof(buf));
+    buf[n] = '\0';
+    assert(strcmp(buf, expected) == 0);
+    assert(df_token_is_canonical(buf));
+}
+
+/* Reserved bootstrap-failure channel: publication, permission, canonicality,
+ * temp consumption, strict reader and strict channel parser. */
+static void test_bootfail_channel(void)
+{
+    mode_t old_umask;
+    char *buf = guarded_buf();
+    size_t len = 12345;
+    enum df_outcome o = ROOT_ONLY;
+
+    old_umask = umask(0777);
+    assert(df_publish_final(g_bootfail_tmp, g_bootfail, TOK_BOOTFAIL) == 0);
+    umask(old_umask);
+    assert_bootfail(TOK_BOOTFAIL);
+
+    assert(df_read_final_file(g_bootfail, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(len == strlen(TOK_BOOTFAIL));
+    assert(memcmp(buf, TOK_BOOTFAIL, len) == 0);
+    assert_guard_intact(buf);
+    assert(df_parse_bootstrap_failure_token(buf, len, &o) == 0);
+    assert(o == BOOTSTRAP_FAILED);
+    assert(df_outcome_to_rc(o) == 1);
+    o = ROOT_ONLY;
+    assert(df_parse_final_token(buf, len, NONCE, &o) != 0);
+    assert(o == DF_OUTCOME_NONE);
+
+    /* Both look-alike tokens are canonical v2 and can be published, but the
+     * strict bootfail channel parser rejects them: reserved nonce + wrong
+     * outcome, or real run nonce + BOOTSTRAP_FAILED. */
+    assert(df_publish_final(g_bootfail_tmp, g_bootfail, TOK_BOOTFAIL_WRONG) == 0);
+    assert_bootfail(TOK_BOOTFAIL_WRONG);
+    assert(df_read_final_file(g_bootfail, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(df_parse_bootstrap_failure_token(buf, len, &o) != 0);
+    assert(o == DF_OUTCOME_NONE);
+
+    assert(df_publish_final(g_bootfail_tmp, g_bootfail, TOK_BOOTFAIL_REAL) == 0);
+    assert_bootfail(TOK_BOOTFAIL_REAL);
+    assert(df_read_final_file(g_bootfail, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(df_parse_bootstrap_failure_token(buf, len, &o) != 0);
+    assert(o == DF_OUTCOME_NONE);
+
+    /* Non-canonical bytes are rejected before any file is created and the
+     * previous bootfail token is left untouched. */
+    assert(df_publish_final(g_bootfail_tmp, g_bootfail, "root_only") == -1);
+    assert(access(g_bootfail_tmp, F_OK) != 0);
+    assert_bootfail(TOK_BOOTFAIL_REAL);
+    free(buf);
+}
+
+/* App-private recovery status: only the exact bytes "ok\n" open a reboot gate.
+ * The real-file adapter preserves exact bytes; the pure validator rejects the
+ * fail token, empty/partial files and any extra bytes. */
+static void test_recovery_status(void)
+{
+    char *buf = guarded_buf();
+    size_t len = 12345;
+    const char *const bad[] = { RECOVERY_FAIL, "", "ok", "ok\n\n", "ok\nX" };
+    size_t i;
+
+    write_read_file(RECOVERY_OK, strlen(RECOVERY_OK));
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(len == 3 && memcmp(buf, RECOVERY_OK, 3) == 0);
+    assert(df_recovery_status_is_ok(buf, len) == 1);
+    assert_guard_intact(buf);
+
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        write_read_file(bad[i], strlen(bad[i]));
+        assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+        assert(len == strlen(bad[i]));
+        assert(df_recovery_status_is_ok(buf, len) == 0);
+        assert_guard_intact(buf);
+    }
+    /* No NUL convenience byte is written past the exact length. */
+    memset(buf, GUARD_BYTE, DF_FINAL_READ_CAP + 2);
+    write_read_file(RECOVERY_OK, 3);
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert((unsigned char)buf[len] == GUARD_BYTE);
+    free(buf);
+}
+
 int main(void)
 {
     mode_t old_umask;
@@ -274,7 +389,12 @@ int main(void)
     test_read_embedded_nul();
     test_read_canonical_token();
 
+    /* 6. Reserved bootfail token publication/reader (host-only, no /dev). */
+    test_bootfail_channel();
+    /* 7. Strict recovery-status bytes (host-only, no /dev). */
+    test_recovery_status();
+
     cleanup_files();
-    puts("final_publish_test: canonical-token / permission / atomicity / reader checks passed");
+    puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / recovery checks passed");
     return 0;
 }
