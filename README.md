@@ -297,6 +297,21 @@ and publication happens off-caller after the store releases. Checked persistence
 fail-closed admission, the durable barrier, single-flight and ownership are
 unchanged. No device, ADB, payload or APK work was performed.
 
+### R5.3 note (2026-11-26) — total request bookkeeping bounds
+
+Short contract note (R5.9 consolidates): outcome reports now go through
+`RunCoordinator.noteRequestOutcomeAsync`, whose caller-written ledger record
+survives a rejected post to the dedicated bounded (64-entry, abort-on-full)
+observer reporter; nothing is retried or admitted to save memory. The service
+also bounds retained start records: active and resolved-history maps hold at
+most 64 entries each. When the history is full, the eldest resolved ID receives
+its own `stopSelf` at eviction (outside the bookkeeping lock, retiring only
+that start ID); deferred stops still occur at the final flush. No start ID is
+lost to bounded pruning, and a long-lived indeterminate host retains no
+unbounded scan set. An unreported outcome is still uncertainty for the Activity,
+never proof of admission. Admission, ownership, the durable barrier and all OFF
+gates are unchanged. No device, ADB, payload or APK work was performed.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`

@@ -8,6 +8,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): pin the foreground owner-token denial at submit and before engine start, and no revocation after start. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): pin bounded outcome-ledger replay, lock isolation and best-effort async delivery. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin that the async ledger write is lock-free while the posted publication takes the durable lock off-caller. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.3): pin the bounded outcome-reporter queue, its reject policy and the caller-written ledger under overflow. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -49,6 +50,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1606,6 +1608,56 @@ public class RunCoordinatorTest {
                 coordinator.getRequestOutcome("boot-holder").getOutcome());
         assertNotNull(store.load());
         assertTrue(store.load().isUnconfirmed());
+    }
+
+    /**
+     * R5.3: the reporter queue is bounded with an abort policy. Overflow is
+     * allowed (the ledger was written on the caller), but the queue never grows
+     * past its bound and no retry or extra admission work is created.
+     */
+    @Test
+    public void outcomeReporterQueueIsBoundedAndOverflowKeepsLedgerRecord() throws Exception {
+        Method factory = RunCoordinator.class.getDeclaredMethod("newOutcomeExecutor");
+        factory.setAccessible(true);
+        ExecutorService reporter = (ExecutorService) factory.invoke(null);
+        ThreadPoolExecutor reporterPool = (ThreadPoolExecutor) reporter;
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run, engine, TEST_TIMEOUT_MS, reporter);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            reporter.execute(() -> {
+                entered.countDown();
+                try {
+                    release.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue("the reporter worker was not pinned",
+                    entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+
+            int capacity = coordinator.outcomeQueueCapacityForTesting();
+            assertEquals(RunCoordinator.MAX_OUTCOME_QUEUE_CAPACITY, capacity);
+            assertEquals(0, reporterPool.getQueue().size());
+            for (int i = 0; i < capacity * 2; i++) {
+                coordinator.noteRequestOutcomeAsync("bounded-" + i,
+                        RunCoordinator.RequestOutcome.REJECTED, "reason-" + i);
+            }
+            assertEquals("the reporter queue grew past its bound", capacity,
+                    coordinator.outcomeQueueSizeForTesting());
+            assertEquals(capacity, reporterPool.getQueue().size());
+            assertNotNull(coordinator.getRequestOutcome("bounded-" + (capacity * 2 - 1)));
+            Field records = RunCoordinator.class.getDeclaredField("outcomeRecords");
+            records.setAccessible(true);
+            assertEquals("the ledger also stays bounded",
+                    RunCoordinator.MAX_OUTCOME_RECORDS,
+                    ((Map<?, ?>) records.get(coordinator)).size());
+            assertThrows(RejectedExecutionException.class, () -> reporter.execute(() -> { }));
+        } finally {
+            release.countDown();
+            reporter.shutdownNow();
+        }
     }
 
     /** A rejected observer post leaves the record readable; duplicates do not add records. */

@@ -5,6 +5,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): drive OFF-at-admission work on a controllable executor and assert the correlated REJECTED outcome. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): confirm the main-thread boundary still queues exactly one admission task before driving it. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF): confirm a duplicate boot start is rejected before a second WakeLock while its request is queued. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.3): wire the coordinator's reporter to the deterministic queue that already counts one boot work plus one report. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -436,6 +437,10 @@ public class BootReceiverBoundaryTest {
                 .create();
         CapturingExecutor admission = new CapturingExecutor();
         controller.get().setAdmissionExecutorForTesting(admission);
+        // R5.3: the duplicate's outcome report now goes through the
+        // coordinator's bounded reporter; keep it in the same deterministic
+        // queue so "one work + one report" remains observable.
+        coordinator.setOutcomeExecutorForTesting(admission);
         List<FakeLease> leases = new ArrayList<>();
         controller.get().setWakeLockSourceForTesting(ignored -> {
             FakeLease lease = new FakeLease();

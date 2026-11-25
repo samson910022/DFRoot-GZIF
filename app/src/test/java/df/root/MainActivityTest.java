@@ -4,6 +4,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): drive the outcome-report executor explicitly in failure/cancellation tests. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): cover stopped-Activity outcome reconciliation from the bounded ledger without replay. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin the synchronous start-failure path to the lock-free ledger write with blocked checked storage and a throwing starter. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.3): keep failure reports observable on the existing queue seam and pin Activity reconciliation when both dispatchers reject. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -62,6 +63,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -364,6 +366,57 @@ public class MainActivityTest {
                 Shadows.shadowOf(rejectedController.get()).isStoppedBySelf());
     }
 
+    /**
+     * R2-17/R5.3: when even the reporter queue rejects, no snapshot publication
+     * reaches the Activity — but the caller-written ledger still lets the
+     * returned Activity reconcile its own request on onStart(), without replay.
+     */
+    @Test
+    public void dispatchFailureOutcomeIsReconciledByTheActivityOnStart() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 61), true);
+        coordinatorWorker = new QueueExecutor();
+        coordinatorObservers = new QueueExecutor();
+        immediateEngine = new ImmediateEngine();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
+                immediateEngine, 0L, command -> {
+                    throw new RejectedExecutionException("reporter full");
+                });
+        RunCoordinator.setInstanceForTesting(coordinator);
+        ActivityController<MainActivity> activity = launchController();
+        activity.get().findViewById(R.id.btnRun).performClick();
+        Intent request = nextServiceRequest();
+        String requestId = request.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(requestId);
+        assertTrue(ReflectionHelpers.getField(activity.get(), "mManualStartPending"));
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+
+        ServiceController<ExploitService> serviceController = Robolectric.buildService(
+                ExploitService.class).create().withIntent(request);
+        serviceControllers.add(serviceController);
+        serviceController.get().setAdmissionExecutorForTesting(command -> {
+            throw new RejectedExecutionException("admission full");
+        });
+        serviceController.startCommand(0, 810);
+
+        assertSame("no observer publication happened", before, coordinator.getSnapshot());
+        RunCoordinator.RequestOutcomeRecord recorded = coordinator.getRequestOutcome(requestId);
+        assertNotNull(recorded);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, recorded.getOutcome());
+        assertTrue(recorded.getReason().contains("admission dispatch failed"));
+        assertTrue(ReflectionHelpers.getField(activity.get(), "mManualStartPending"));
+
+        activity.stop();
+        activity.start();
+
+        assertFalse("the Activity must reconcile from its own ledger record",
+                ReflectionHelpers.getField(activity.get(), "mManualStartPending"));
+        assertTrue(output(activity.get()).contains("Operation request rejected"));
+        assertTrue(output(activity.get()).contains("admission dispatch failed"));
+        assertEquals(0, immediateEngine.calls.get());
+        assertEquals(0, coordinatorWorker.commands.size());
+        assertSame("reconciliation is read-only", before, coordinator.getSnapshot());
+    }
+
     /** Destruction before admission cancels only service-local work, never an engine. */
     @Test
     public void destroyedBeforeAdmissionPublishesCancelledAndClearsPendingWithoutEngine() {
@@ -378,6 +431,7 @@ public class MainActivityTest {
                 ExploitService.class).create().withIntent(request);
         QueueExecutor admission = new QueueExecutor();
         controller.get().setAdmissionExecutorForTesting(admission);
+        coordinator.setOutcomeExecutorForTesting(admission);
         controller.startCommand(0, 204);
         assertTrue(admission.hasNext());
         assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
@@ -748,6 +802,7 @@ public class MainActivityTest {
         // work explicitly instead of relying on inline delivery.
         QueueExecutor admission = new QueueExecutor();
         serviceController.get().setAdmissionExecutorForTesting(admission);
+        coordinator.setOutcomeExecutorForTesting(admission);
         Shadows.shadowOf(serviceController.get()).setThrowInStartForeground(
                 new IllegalStateException("FGS denied by platform"));
         serviceController.withIntent(request).startCommand(0, 73);
@@ -784,6 +839,7 @@ public class MainActivityTest {
         // work explicitly instead of relying on inline delivery.
         QueueExecutor admission = new QueueExecutor();
         serviceController.get().setAdmissionExecutorForTesting(admission);
+        coordinator.setOutcomeExecutorForTesting(admission);
         serviceController.get().setWakeLockSourceForTesting(ignored -> {
             throw new IllegalStateException("PowerManager unavailable");
         });

@@ -1,5 +1,23 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.3: total request bookkeeping bounds (R2-21 / dispatch half of R2-17) — PR #2
+
+Short contract note (R5.9 consolidates): `ExploitService` outcome reports now
+delegate to `RunCoordinator.noteRequestOutcomeAsync`, so the correlated ledger
+record is written on the caller before observer delivery is posted to a
+dedicated **bounded (64 entries) reporter queue with an abort policy**. A
+rejected post is logged, never retried and never replaced with extra admission
+work; the Activity can reconcile its own request from the ledger on `onStart()`.
+Admission stays single-flight on its own single-thread worker. Retained start
+records are bounded too: oldest resolved records move out of the active map
+while a long-lived indeterminate host keeps the foreground alive, into a small
+bounded (64 IDs) history preserving TERMINAL-state observations. When that
+history is also full, the eldest resolved ID receives its own `stopSelf` at
+eviction (outside the bookkeeping lock, retiring only that start ID); the
+remaining deferred IDs are stopped at the final flush. No start ID is lost to
+bounded pruning. No operation is replayed, cancelled or transferred, and no
+privileged/device work was performed.
+
 ## 2026-11-26 — R5.2: synchronous start-failure stays off the storage lock (R2-18) — PR #2
 
 Short contract note (R5.9 consolidates): no production change was needed —

@@ -15,9 +15,11 @@
 // Modified 2026-11-25 (DFRoot GZIF): gate admission and pre-engine start on the foreground service owner token; never cancel work after the engine started. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R4.9): Javadoc only — state the limits of engineFinished and remove the app-data-reset recovery claim. No behavior change. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): bounded replayable request-outcome ledger with a separate outcome lock and off-main async reporting; no operation replay or ownership change. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.3): bound the outcome-report executor queue with an explicit reject policy and expose read-only queue seams; a rejected post cannot lose the caller-written ledger record. See NOTICE.
 package df.root;
 
 import android.content.Context;
+import android.util.Log;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -29,11 +31,13 @@ import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -152,6 +156,15 @@ public final class RunCoordinator {
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
     /** Bounded replay window for request outcomes; oldest (least-recently used) is evicted. */
     static final int MAX_OUTCOME_RECORDS = 32;
+    /**
+     * Bounded queue for best-effort outcome observer delivery. The ledger is
+     * written synchronously by the caller before this queue is touched, so an
+     * enqueue rejection only drops a redundant snapshot publication — never a
+     * required request outcome. Admission work is bounded separately by the
+     * service; this bound adds no extra work and starts no retry.
+     */
+    static final int MAX_OUTCOME_QUEUE_CAPACITY = 64;
+    private static final String TAG = "dfroot";
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
     /** Short bounded wait so the first service request is not dropped during off-main init. */
     static final long INITIALIZATION_WAIT_MS = 500L;
@@ -225,8 +238,12 @@ public final class RunCoordinator {
     /**
      * Dedicated single-thread daemon for best-effort correlated observer delivery.
      * Never used to record an outcome: the ledger is written on the caller first.
+     * Volatile only so deterministic tests can replace it with a controlled seam;
+     * production creates one bounded instance per coordinator.
      */
-    private final Executor outcomeExecutor;
+    private volatile Executor outcomeExecutor;
+    /** Original owned reporter, retained even when a test replaces the delivery seam. */
+    private final ExecutorService ownedOutcomeExecutor;
     private final boolean ownsWorkerExecutor;
     private final boolean ownsInitializationExecutor;
     private final boolean ownsOutcomeExecutor;
@@ -366,6 +383,9 @@ public final class RunCoordinator {
         this.unattendedAuthorization = Objects.requireNonNull(unattendedAuthorization,
                 "unattendedAuthorization");
         this.outcomeExecutor = Objects.requireNonNull(outcomeExecutor, "outcomeExecutor");
+        this.ownedOutcomeExecutor = ownsOutcomeExecutor
+                && outcomeExecutor instanceof ExecutorService
+                ? (ExecutorService) outcomeExecutor : null;
         this.ownsWorkerExecutor = ownsWorkerExecutor;
         this.ownsInitializationExecutor = ownsInitializationExecutor;
         this.ownsOutcomeExecutor = ownsOutcomeExecutor;
@@ -377,13 +397,42 @@ public final class RunCoordinator {
         this.snapshot = buildSnapshotLocked();
     }
 
-    private static Executor newOutcomeExecutor() {
-        ExecutorService outcome = Executors.newSingleThreadExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "dfroot-outcome");
-            thread.setDaemon(true);
-            return thread;
-        });
-        return outcome;
+    /**
+     * Production reporter: one daemon thread, a fixed-capacity queue and an
+     * explicit abort policy. Overflow is not an error to retry — the caller has
+     * already written the authoritative ledger record, and no extra work is
+     * admitted to make room for a snapshot.
+     */
+    private static ExecutorService newOutcomeExecutor() {
+        return new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<Runnable>(MAX_OUTCOME_QUEUE_CAPACITY),
+                runnable -> {
+                    Thread thread = new Thread(runnable, "dfroot-outcome");
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    /** Read-only queue size of the owned reporter; zero for an injected test seam. */
+    int outcomeQueueSizeForTesting() {
+        Executor current = outcomeExecutor;
+        return current instanceof ThreadPoolExecutor
+                ? ((ThreadPoolExecutor) current).getQueue().size() : 0;
+    }
+
+    /** Read-only queue capacity of the owned reporter; the bound for a test seam. */
+    int outcomeQueueCapacityForTesting() {
+        Executor current = outcomeExecutor;
+        return current instanceof ThreadPoolExecutor
+                ? ((ThreadPoolExecutor) current).getQueue().remainingCapacity()
+                        + ((ThreadPoolExecutor) current).getQueue().size()
+                : MAX_OUTCOME_QUEUE_CAPACITY;
+    }
+
+    /** Deterministic seam: replaces observer delivery, never the synchronous ledger write. */
+    void setOutcomeExecutorForTesting(Executor executor) {
+        this.outcomeExecutor = Objects.requireNonNull(executor, "executor");
     }
 
     /** Returns the single process-wide coordinator. */
@@ -447,8 +496,8 @@ public final class RunCoordinator {
                     && current.initializationExecutor instanceof ExecutorService) {
                 ((ExecutorService) current.initializationExecutor).shutdownNow();
             }
-            if (current.ownsOutcomeExecutor && current.outcomeExecutor instanceof ExecutorService) {
-                ((ExecutorService) current.outcomeExecutor).shutdownNow();
+            if (current.ownsOutcomeExecutor && current.ownedOutcomeExecutor != null) {
+                current.ownedOutcomeExecutor.shutdownNow();
             }
         }
     }
@@ -814,10 +863,13 @@ public final class RunCoordinator {
 
     /**
      * Records the outcome synchronously on the caller (outcomeLock only), then
-     * posts ordinary correlated snapshot publication to the dedicated outcome
-     * executor. Observer delivery is best effort: even a rejected enqueue
-     * leaves the ledger record readable by the originating Activity on its next
-     * start. No operation is replayed, retried or cancelled by this method.
+     * posts ordinary correlated snapshot publication to the dedicated bounded
+     * outcome executor. Observer delivery is best effort: even a rejected
+     * enqueue (full queue, shut-down worker or an injected failing seam) leaves
+     * the ledger record readable by the originating Activity on its next start.
+     * The post is never retried on the caller, and no extra admission work is
+     * created to make room. No operation is replayed, retried or cancelled by
+     * this method.
      */
     void noteRequestOutcomeAsync(String requestId, RequestOutcome outcome, String reason) {
         Objects.requireNonNull(outcome, "outcome");
@@ -826,7 +878,9 @@ public final class RunCoordinator {
             outcomeExecutor.execute(() -> noteRequestOutcome(requestId, outcome, reason));
         } catch (RuntimeException e) {
             // Best-effort observer delivery; the durable-lock-free ledger is the
-            // authoritative record for read-only reconciliation.
+            // authoritative record for read-only reconciliation. Do not retry
+            // here: the caller must stay nonblocking and no extra work is admitted.
+            Log.w(TAG, "outcome report enqueue rejected; ledger record is authoritative", e);
         }
     }
 
