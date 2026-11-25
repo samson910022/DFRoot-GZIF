@@ -86,6 +86,42 @@ APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
 
+## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; uncommitted)
+
+Third repair round on `fix/app-correctness-safety` (HEAD `2a74dd0`), left
+uncommitted. Scope: **R2-14 only** — the post-link publication observation
+window. No payload, device/adb, privileged-container, APK assembly, dependency,
+attempt-store, Java, boot or UI changes; JVM tests are untouched. The temp
+write / fsync / close / `link()` publication protocol and atomic conflict
+detection are unchanged, and the safety policy (rc=7 precedence, indeterminate
+ownership) is not weakened.
+
+- **Aligned guarantee (was stronger than provable).** A **pre-link** failure
+  leaves no final marker and no debris; once the rc=7 channel is published it
+  **outranks** success and conflicts in the classifier. But `link()` makes the
+  complete final pathname visible before temp unlink and directory fsync can
+  succeed, so an external reader polling in the brief post-link/pre-rc7 window
+  can observe the intended marker as a confirmed terminal verdict, and that
+  observation cannot be retroactively revoked by the later rc=7 publication and
+  retraction. The app therefore does **not** claim that a failed publication is
+  never observable as confirmed; it claims only that any result it acts on
+  **after publication completes** is indeterminate (writer rc=7, reader rc=7).
+  Stated in `run_status.h`, `README.md`, `PORTING-GZIF.md` and this changelog.
+- **Host-only hook.** `run_status_set_post_link_pause(wait_fd, notify_fd)` under
+  `RUN_STATUS_TEST_HOOKS` gates the writer immediately after `link()` succeeds
+  and before temp unlink, directory fsync and failure detection — the earliest
+  instant the final path is observable. All seam state is compiled out of the
+  production `dfroot`/`bootstrap`/`exp` binaries.
+- **Deterministic reader test.** New `run_status.post_link_early_observation`
+  case proves (over explicit pipe handshakes, with no sleeps or allocation luck)
+  that a concurrent reader classifies the visible intended rc0 marker as a
+  confirmed verdict in the early window; then a one-shot temp-unlink failure is
+  injected, rc7 publication is observed before retraction while rc7 outranks
+  rc0, the reader sees rc7 only afterwards, the writer exits rc7, no temp debris
+  remains, and the first unlink diagnostic survives. The existing
+  `post_link_gated_reader` coexistence test and every prior assertion/test are
+  retained unchanged. Fresh CTest count: **137/137** (136 + 1).
+
 ## 2026-11-25 — Re-review 1 repair (R2-10..R2-16; locally committed, not pushed)
 
 Second 2026-11-25 repair round on `fix/app-correctness-safety`, commits
@@ -132,7 +168,8 @@ counts** at that point — these are intermediate, not final totals):
   payload written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`,
   EINTR-safe full write, fsync, fchmod 0644, checked close) then atomically
   linked to the run-scoped final path, temp unlinked and directory fsynced; a
-  failed publication cannot leave a complete final marker. Added writer rc=7
+  **pre-link** failure cannot leave a final marker (the post-link observation
+  window is scoped by the Re-review 2 fix above). Added writer rc=7
   for unconfirmed publication and Java `NativeResultMapper` → `RESULT_INDETERMINATE`
   only. Conflict detection, operation-ID binding, progress-only `/dev/dfm*`
   markers, and soft-reboot rc=4/6 preserved. **123/123 host CTest cases** and

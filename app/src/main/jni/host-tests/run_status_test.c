@@ -5,6 +5,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a harmless live fake child. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): inject a classifier observation failure and assert the reader exits rc7 with no confirmed result. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): gate the whole post-link/pre-rc7 observation window with a deterministic concurrent reader. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -954,6 +955,232 @@ static void test_post_link_gated_reader(void)
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
+/* Deterministic harmless test for the ENTIRE post-link failure window. The
+ * writer pauses at the new post-link hook: link() has succeeded, so the intended
+ * rc0 marker is complete and visible, while temp unlink, directory fsync,
+ * failure detection and the rc=7 channel have not happened yet. A concurrent
+ * reader MUST observe a confirmed terminal success here - that observation
+ * cannot be retroactively revoked by the later rc=7 publication/retraction.
+ * A one-shot temp-unlink failure is then injected; the writer pauses again
+ * AFTER rc=7 is published but BEFORE the rc0 link is retracted, so the reader
+ * must see rc=7 only in that coexistence window and after retraction. Every
+ * poll is driven by an explicit pipe handshake: no sleeps, no scheduling luck,
+ * no allocation. */
+static void test_post_link_early_observation(void)
+{
+    configure(OUR_ID);
+    int gate[2], observed[2];
+    int post_release[2], post_paused[2];
+    int retract_release[2], retract_paused[2];
+    int diagnostic[2];
+    if (pipe(gate) != 0 || pipe(observed) != 0
+        || pipe(post_release) != 0 || pipe(post_paused) != 0
+        || pipe(retract_release) != 0 || pipe(retract_paused) != 0
+        || pipe(diagnostic) != 0) {
+        die("post-link early-observation pipes failed");
+    }
+    run_status_set_post_link_pause(post_release[0], post_paused[1]);
+    run_status_set_retract_pause(retract_release[0], retract_paused[1]);
+
+    pid_t writer = fork();
+    if (writer < 0) die("post-link early-observation writer fork failed");
+    if (writer == 0) {
+        close(gate[0]); close(gate[1]);
+        close(observed[0]); close(observed[1]);
+        close(post_release[1]); close(post_paused[0]);
+        close(retract_release[1]); close(retract_paused[0]);
+        close(diagnostic[0]);
+        /* One-shot EIO on the post-link temp unlink: a genuine post-link
+         * failure whose first diagnostic must survive the rc=7 fallback. */
+        run_status_inject_fault(RUN_STATUS_FAULT_UNLINK_TEMP);
+        int rc = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+        const char *message = run_status_last_error();
+        size_t length = message == NULL ? 0 : strlen(message);
+        if (length > RUN_STATUS_DIAGNOSTIC_MAX) length = RUN_STATUS_DIAGNOSTIC_MAX;
+        if (length > 0 && write(diagnostic[1], message, length) != (ssize_t)length) {
+            _exit(2);
+        }
+        close(diagnostic[1]);
+        _exit(rc == 0 ? 0 : RUN_STATUS_TERMINAL_INDETERMINATE);
+    }
+
+    pid_t reader = fork();
+    if (reader < 0) die("post-link early-observation reader fork failed");
+    if (reader == 0) {
+        close(gate[1]);
+        close(observed[0]);
+        close(post_release[0]); close(post_release[1]);
+        close(post_paused[0]); close(post_paused[1]);
+        close(retract_release[0]); close(retract_release[1]);
+        close(retract_paused[0]); close(retract_paused[1]);
+        close(diagnostic[0]); close(diagnostic[1]);
+        char command;
+        for (;;) {
+            ssize_t count = read(gate[0], &command, 1);
+            if (count == 0) break;
+            if (count != 1) _exit(2);
+            struct run_status_result result;
+            char verdict = 'X';
+            if (run_status_classify(&result) == 0
+                && result.verdict == RUN_STATUS_VERDICT_TERMINAL) {
+                if (result.code == RUN_STATUS_TERMINAL_SUCCESS) verdict = 'S';
+                if (result.code == RUN_STATUS_TERMINAL_INDETERMINATE) verdict = 'R';
+            }
+            if (write(observed[1], &verdict, 1) != 1) _exit(3);
+        }
+        _exit(0);
+    }
+
+    close(gate[0]); close(observed[1]);
+    close(post_release[0]); close(post_paused[1]);
+    close(retract_release[0]); close(retract_paused[1]);
+    close(diagnostic[1]);
+
+    char byte;
+    if (read(post_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("writer never reached the post-link pause");
+    }
+
+    /* Prove the gate is the earliest observable instant: the intended rc0
+     * final path is a complete regular marker, rc7 does not exist yet, and the
+     * temp link is still present (unlink has not been attempted). */
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc0", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("intended marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("intended rc0 marker was not visible at the post-link gate");
+    }
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc7", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("indeterminate marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    if (lstat(marker_path, &st) == 0) {
+        die("rc7 was published before the post-link gate");
+    }
+    if (errno != ENOENT) {
+        perror("lstat early rc7 marker");
+        exit(1);
+    }
+    int temp_count = 0;
+    DIR *directory = opendir(root);
+    if (directory == NULL) die("opendir at the post-link gate failed");
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strstr(entry->d_name, "dfroot_tmp_") != NULL) temp_count++;
+    }
+    closedir(directory);
+    if (temp_count != 1) die("post-link gate was not before temp unlink");
+
+    struct run_status_result at_gate = classify();
+    if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || at_gate.code != RUN_STATUS_TERMINAL_SUCCESS) {
+        fprintf(stderr, "post-link gate did not expose the intended success: "
+                        "verdict=%d code=%d\n", (int)at_gate.verdict, at_gate.code);
+        exit(1);
+    }
+
+    /* The early observation is real and repeatable while the writer is paused:
+     * the reader can classify a confirmed terminal verdict here. */
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("early-window reader handshake failed");
+        }
+        if (byte != 'S') {
+            die("reader could not observe confirmed success in the post-link window");
+        }
+    }
+
+    /* Release the gate: the injected temp-unlink EIO is detected, rc=7 is
+     * published, and the writer pauses before retracting the rc0 link. */
+    if (write(post_release[1], "g", 1) != 1) die("post-link release failed");
+    if (read(retract_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("writer never reached the post-failure retract pause");
+    }
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc0", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("intended marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("intended rc0 marker was retracted before rc7 was published");
+    }
+    if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc7", OUR_ID) < 0
+        || strlen(name) >= sizeof(name)) {
+        die("indeterminate marker name is too long");
+    }
+    make_path(marker_path, sizeof(marker_path), name);
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("rc7 channel was not published before retraction");
+    }
+    at_gate = classify();
+    if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || at_gate.code != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        fprintf(stderr, "rc7 did not outrank coexisting rc0: verdict=%d code=%d\n",
+                (int)at_gate.verdict, at_gate.code);
+        exit(1);
+    }
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "c", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("coexistence-window reader handshake failed");
+        }
+        if (byte != 'R') die("reader reported SUCCESS after rc7 was published");
+    }
+
+    if (write(retract_release[1], "g", 1) != 1) die("retract release failed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "a", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("post-retraction reader handshake failed");
+        }
+        if (byte != 'R') die("reader reported SUCCESS after retraction");
+    }
+
+    /* The first (unlink) diagnostic must survive the rc=7 fallback. */
+    char message[RUN_STATUS_DIAGNOSTIC_MAX + 1];
+    size_t length = 0;
+    for (;;) {
+        ssize_t count = read(diagnostic[0], message + length, sizeof(message) - 1 - length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            perror("read writer diagnostic");
+            exit(1);
+        }
+        if (count == 0) break;
+        length += (size_t)count;
+        if (length == sizeof(message) - 1) break;
+    }
+    message[length] = '\0';
+    const char expected_error[] = "terminal marker unlink failed";
+    if (strncmp(message, expected_error, sizeof(expected_error) - 1) != 0) {
+        fprintf(stderr, "first post-link diagnostic was lost: '%s'\n", message);
+        exit(1);
+    }
+
+    int status = 0;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status)
+        || WEXITSTATUS(status) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("post-link early-observation writer did not exit rc=7");
+    }
+    close(gate[1]);
+    if (waitpid(reader, &status, 0) != reader || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("post-link early-observation reader fixture failed");
+    }
+    close(observed[0]);
+    close(post_release[1]); close(post_paused[0]);
+    close(retract_release[1]); close(retract_paused[0]);
+    close(diagnostic[0]);
+    run_status_set_post_link_pause(-1, -1);
+    run_status_set_retract_pause(-1, -1);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+}
+
 /* A harmless fake child: it blocks reading a pipe and never executes a
  * payload. A bounded wait cannot observe an exit, so the writer must not claim
  * completion and must not signal the child. */
@@ -1607,6 +1834,8 @@ static void run_case(const char *name)
         test_concurrent_failed_publish();
     } else if (!strcmp(name, "post_link_gated_reader")) {
         test_post_link_gated_reader();
+    } else if (!strcmp(name, "post_link_early_observation")) {
+        test_post_link_early_observation();
     } else if (!strcmp(name, "late_load_command_timeout")) {
         test_live_child_timeout(1);
     } else if (!strcmp(name, "soft_reboot_command_timeout")) {

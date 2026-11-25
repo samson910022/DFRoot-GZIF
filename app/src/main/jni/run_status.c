@@ -6,6 +6,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): map reader expiry to rc7 and expose the shared-budget remainder. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): scan the reserved pre-admission diagnostic and decide through a pure helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): add a shared classifier-failure rc7 mapping and a harmless host injection seam. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): gate the post-link/pre-confirmation observation window with a host-only hook. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -30,6 +31,8 @@ static int injected_fault;
 static int injected_classifier_failure;
 static int writer_wait_fd = -1;
 static int writer_notify_fd = -1;
+static int post_link_wait_fd = -1;
+static int post_link_notify_fd = -1;
 static int retract_wait_fd = -1;
 static int retract_notify_fd = -1;
 void run_status_inject_fault(int fault) { injected_fault = fault; }
@@ -41,6 +44,11 @@ void run_status_set_writer_pause(int wait_fd, int notify_fd)
 {
     writer_wait_fd = wait_fd;
     writer_notify_fd = notify_fd;
+}
+void run_status_set_post_link_pause(int wait_fd, int notify_fd)
+{
+    post_link_wait_fd = wait_fd;
+    post_link_notify_fd = notify_fd;
 }
 void run_status_set_retract_pause(int wait_fd, int notify_fd)
 {
@@ -753,6 +761,19 @@ int run_status_write(int code)
         (void)status_unlink_temp(temp_path);
         return result;
     }
+#ifdef RUN_STATUS_TEST_HOOKS
+    /* EARLIEST observable instant: link() succeeded, so the complete final
+     * marker exists, but temp unlink, directory fsync and failure detection
+     * have not run yet and rc=7 does not exist yet. Host-only gate for the
+     * deterministic reader test that proves this window is classifiable as the
+     * intended verdict. A broken handshake is itself an unconfirmed failure:
+     * fail closed through the same rc=7 path as any other post-link failure. */
+    if (status_gated_pause(&post_link_wait_fd, &post_link_notify_fd,
+                           "post-link pause notification failed",
+                           "post-link pause ended unexpectedly") != 0) {
+        goto unconfirmed;
+    }
+#endif
     if (status_unlink_temp(temp_path) != 0) {
         (void)status_fail_errno("terminal marker unlink failed");
         goto unconfirmed;

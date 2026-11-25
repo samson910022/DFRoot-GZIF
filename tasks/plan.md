@@ -53,7 +53,7 @@ The final branch must be buildable, testable without privileged execution, lifec
 | R2-09 loader precheck / fallback | exact selection-aware asset preflight; no implicit fallback | 1 |
 | R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`d8b7d30`) |
 | R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`c3c9854`) |
-| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; no success from failed write | Re-review 3 (`caf8c9e`) |
+| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; pre-link failure leaves no final marker, and the brief post-link/pre-rc7 observation window is documented honestly rather than claimed unobservable | Re-review 3 (`caf8c9e`) |
 | R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`3aaefdf`) |
 | R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`f0cc8e5`) |
 | R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`42ba1d5`, `83d93b5`) |

@@ -67,6 +67,17 @@ be running, so the app keeps ownership until explicit owner recovery. **No root
 probe is added**: the app does not run `su` or inspect root state to decide a
 result. Verify root yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
 
+**Publication window (precise guarantee).** A **pre-link** failure leaves no
+final marker at all. Once the rc=7 indeterminate channel is published it
+**outranks** success and conflicts, so no reader classifying afterwards can
+report SUCCESS. In the brief interval between a successful `link()` and that
+rc=7 publication an external reader can observe the intended marker as a
+confirmed terminal verdict, and that observation cannot be retroactively
+revoked. We therefore do **not** claim that a failed publication is never
+observable as confirmed; we claim only that any result the app acts on **after
+publication completes** is indeterminate. The safety policy is unchanged: rc=7
+precedence and indeterminate ownership still apply.
+
 ## Operation ownership, boot, and soft reboot
 
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death.
@@ -260,16 +271,25 @@ ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
   written to an unpredictable same-directory temp file (`O_EXCL|O_NOFOLLOW`,
   full write, `fsync`, `fchmod 0644`, checked close) and only then atomically
   linked to the run-scoped final name, with temp unlink and directory fsync.
-  A failed publication leaves no complete marker at the final path, so a reader
-  cannot observe success from a failed write. On an unconfirmed post-link
-  failure the indeterminate channel is published **before** retracting the
-  intended marker; rc=7 outranks success and conflicts in the classifier.
+  A **pre-link** failure leaves no final marker and no debris, so a reader cannot
+  observe success from a failed write. A **post-link** failure (temp unlink or
+  directory fsync) is unconfirmed: the indeterminate rc=7 channel is published
+  **before** retracting the intended marker, and rc=7 outranks success and
+  conflicts in the classifier. Because `link()` makes the final pathname visible
+  before cleanup and directory fsync can succeed, a reader polling in that brief
+  post-link/pre-rc7 window **can** observe the intended marker as a confirmed
+  terminal verdict, and that observation cannot be retroactively revoked. We do
+  not claim a failed publication is never observable as confirmed; we claim only
+  that any result the app acts on **after publication completes** is
+  indeterminate (writer exits rc=7, reader's steady-state marker is rc=7).
 - **rc=7 indeterminate contract for missing confirmation (`caf8c9e`, `3aaefdf`,
   `42ba1d5`).** Bounded, non-killing native waits map timeouts and unobserved
   exits to rc=7 (late-load and soft-reboot); the reader's own deadline expiry
   is rc=7 ("privileged child may still be running"); a failed/unconfirmed
-  publication cannot report success; and a valid reserved pre-admission rc=1
-  marker with no terminal marker for the admitted operation yields rc=7 with
+  publication cannot report success as the app's acted-on result (the observable
+  post-link/pre-rc7 window is documented above); and a valid reserved
+  pre-admission rc=1 marker with no terminal marker for the admitted operation
+  yields rc=7 with
   an explicit "completion unverified" diagnostic. Current-operation markers
   stay authoritative, foreign/stale markers never become success, and rc=2 is
   only a pre-operation `setup()` failure.

@@ -777,10 +777,18 @@ round's contracts, §16 supersedes them as noted below.
   is written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`, full
   EINTR-safe write, fsync, fchmod 0644, checked close) and atomically linked to
   the run-scoped final path, then the temp is unlinked and the directory
-  fsynced. A failed publication leaves no complete final marker. On an
-  unconfirmed post-link failure the indeterminate channel is published **first**,
-  then the intended marker is retracted, so a concurrent reader can never
-  return SUCCESS; rc=7 outranks success and conflicts in the classifier.
+  fsynced. A **pre-link** failure leaves no final marker and no temp debris. On
+  an unconfirmed **post-link** failure (temp unlink or directory fsync) the
+  indeterminate channel is published **first**, then the intended marker is
+  retracted, and rc=7 outranks success and conflicts in the classifier: no reader
+  classifying after rc=7 exists can return SUCCESS. Because `link()` exposes the
+  complete final path before cleanup/directory fsync can succeed, a reader
+  polling in the brief post-link/pre-rc7 window **can** observe the intended
+  marker as a confirmed verdict, and that observation cannot be retroactively
+  revoked. We do **not** claim a failed publication is never observable as
+  confirmed; we claim only that any result acted on after publication completes
+  is indeterminate (writer rc=7, reader rc=7). rc=7 precedence and indeterminate
+  ownership are unchanged.
 - **Bounded, non-killing waits (R2-12 / partial R2-03, `3aaefdf`).** Late-load
   and soft-reboot command waits share one 60 s late-load budget and never signal
   or kill a child. Observed exits map to rc=0/1 and rc=4/6; timeouts and

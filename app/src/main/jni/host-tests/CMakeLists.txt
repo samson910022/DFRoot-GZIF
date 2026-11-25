@@ -11,6 +11,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): cover reader rc7 timeout, shared late-load budget, and fork-failure mapping. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): register the harmless classifier-failure rc7 reader case. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): register the post-link early-observation gated reader case. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -219,6 +220,7 @@ foreach(status_case IN ITEMS
         publication_failure_protocol
         concurrent_failed_publish
         post_link_gated_reader
+        post_link_early_observation
         late_load_command_timeout
         soft_reboot_command_timeout
         observed_exit_mapping
