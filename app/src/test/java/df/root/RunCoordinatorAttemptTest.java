@@ -361,6 +361,24 @@ public class RunCoordinatorAttemptTest {
     }
 
     @Test
+    public void corruptAttemptLoadFailureBlocksCoordinatorAdmission() throws Exception {
+        ControllableStore corrupt = new ControllableStore();
+        corrupt.loadError =
+                new OperationAttemptStore.Failure("attempt record is incomplete");
+        RunCoordinator coordinator = new RunCoordinator(repository, Runnable::run, Runnable::run,
+                engine, 0L, corrupt, reader, Runnable::run);
+        coordinator.initialize();
+
+        RunCoordinator.Submission rejected = coordinator.submit(context(),
+                RunConfig.ExecutionMode.MANUAL, new FakeLease());
+        assertFalse(rejected.isAccepted());
+        assertTrue(rejected.getReason(), rejected.getReason().contains("load failed"));
+        assertTrue(rejected.getReason(),
+                rejected.getReason().contains("attempt record is incomplete"));
+        assertEquals(0, engine.calls.get());
+    }
+
+    @Test
     public void initializationRunsOnTheInjectedExecutorAndAdmissionWaitsForIt() throws Exception {
         QueueExecutor attemptExecutor = new QueueExecutor();
         RunCoordinator coordinator = new RunCoordinator(repository, Runnable::run, Runnable::run,
@@ -659,6 +677,7 @@ public class RunCoordinatorAttemptTest {
         boolean clearResult = true;
         int loadCalls;
         RuntimeException loadFailure;
+        OperationAttemptStore.Failure loadError;
         RuntimeException clearThrows;
 
         void seed(OperationAttempt attempt) throws Exception {
@@ -672,6 +691,9 @@ public class RunCoordinatorAttemptTest {
         @Override
         public OperationAttempt load() throws Failure {
             loadCalls++;
+            if (loadError != null) {
+                throw loadError;
+            }
             if (loadFailure != null) {
                 throw new Failure("load failed", loadFailure);
             }

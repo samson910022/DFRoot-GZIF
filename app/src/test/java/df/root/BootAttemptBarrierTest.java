@@ -135,4 +135,38 @@ public class BootAttemptBarrierTest {
         assertEquals(0, claims.attempts.size());
         assertEquals(0, starter.calls);
     }
+
+    @Test
+    public void corruptAttemptRecordFailsClosedWithoutClaimOrStart() throws Exception {
+        OperationAttemptStore corrupt = new OperationAttemptStore() {
+            @Override
+            public OperationAttempt load() throws Failure {
+                throw new Failure("attempt record is incomplete");
+            }
+
+            @Override
+            public boolean publish(OperationAttempt attempt) {
+                return false;
+            }
+
+            @Override
+            public boolean clear(String operationId) {
+                return false;
+            }
+        };
+        BootClaimFakes.MemoryStore claims = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        BootClaimCoordinator coordinator = new BootClaimCoordinator(
+                new BootClaimFakes.MutableReader(64L), claims, corrupt,
+                Runnable::run, BootClaimCoordinator.Logger.NO_OP, false);
+
+        BootReceiver.dispatchAction(null, Intent.ACTION_LOCKED_BOOT_COMPLETED, coordinator,
+                new BootClaimFakes.Finisher(), starter);
+        BootReceiver.dispatchAction(null, Intent.ACTION_BOOT_COMPLETED, coordinator,
+                new BootClaimFakes.Finisher(), starter);
+
+        assertEquals(0, claims.attempts.size());
+        assertEquals(0L, claims.lastClaimed());
+        assertEquals(0, starter.calls);
+    }
 }

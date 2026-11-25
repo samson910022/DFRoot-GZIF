@@ -5,6 +5,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
@@ -98,5 +99,73 @@ public class OperationAttemptStoreDeviceTest {
         assertFalse(restarted.clear("wrong-id"));
         assertTrue(restarted.clear(ID));
         assertNull(SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context).load());
+    }
+
+    @Test
+    public void emptyAttemptFileLoadsNoRecord() throws Exception {
+        OperationAttemptStore store =
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context);
+
+        assertNull(store.load());
+    }
+
+    @Test
+    public void missingIdWithOtherKeysFailsClosed() {
+        attemptPrefs.edit()
+                .putString(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE,
+                        RunConfig.ExecutionMode.MANUAL.name())
+                .putLong(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, 93L)
+                .putBoolean(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED, true)
+                .putString(SharedPreferencesOperationAttemptStore.KEY_REASON, "partial")
+                .commit();
+
+        OperationAttemptStore.Failure failure = assertThrows(OperationAttemptStore.Failure.class,
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context)::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void missingUnconfirmedWithOtherKeysFailsClosed() {
+        attemptPrefs.edit()
+                .putString(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID, ID)
+                .putString(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE,
+                        RunConfig.ExecutionMode.MANUAL.name())
+                .putLong(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, 94L)
+                .putString(SharedPreferencesOperationAttemptStore.KEY_REASON, "partial")
+                .commit();
+
+        OperationAttemptStore.Failure failure = assertThrows(OperationAttemptStore.Failure.class,
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context)::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void negativeBootCountFailsClosed() {
+        attemptPrefs.edit()
+                .putString(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID, ID)
+                .putString(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE,
+                        RunConfig.ExecutionMode.MANUAL.name())
+                .putLong(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, -1L)
+                .putBoolean(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED, true)
+                .commit();
+
+        OperationAttemptStore.Failure failure = assertThrows(OperationAttemptStore.Failure.class,
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context)::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is corrupt"));
+    }
+
+    @Test
+    public void wrongValueTypeFailsClosedThroughTheCheckedReadPath() {
+        attemptPrefs.edit()
+                .putString(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID, ID)
+                .putString(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE,
+                        RunConfig.ExecutionMode.MANUAL.name())
+                .putString(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, "not-a-long")
+                .putBoolean(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED, true)
+                .commit();
+
+        OperationAttemptStore.Failure failure = assertThrows(OperationAttemptStore.Failure.class,
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context)::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is unreadable"));
     }
 }

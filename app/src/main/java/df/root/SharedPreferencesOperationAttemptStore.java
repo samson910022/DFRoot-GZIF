@@ -11,6 +11,12 @@ import java.util.Objects;
  * to admission attempts: it never shares a file or a key with configuration or
  * boot-claim state. Only a successful checked {@code commit()} changes the
  * durable barrier.
+ *
+ * <p>Android may mutate the process-local preference view before a checked
+ * commit is known to have reached disk. Consequently a false or throwing commit
+ * makes THIS store instance uncertain: every later operation fails closed
+ * instead of consulting the cache. A newly constructed store re-reads durable
+ * state. See {@link OperationAttemptStore} for the full contract.</p>
  */
 final class SharedPreferencesOperationAttemptStore implements OperationAttemptStore {
     static final String PREFS_NAME = "dfroot_operation_attempt";
@@ -24,6 +30,8 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
     private static final Object STORE_LOCK = new Object();
 
     private final SharedPreferences preferences;
+    /** Guarded by STORE_LOCK; see the uncertain-commit contract on the interface. */
+    private boolean uncertain;
 
     SharedPreferencesOperationAttemptStore(Context deviceProtectedContext) {
         this(Objects.requireNonNull(deviceProtectedContext, "deviceProtectedContext")
@@ -44,28 +52,40 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
     @Override
     public OperationAttempt load() throws Failure {
         synchronized (STORE_LOCK) {
-            String id;
-            String mode;
-            long bootCount;
-            boolean unconfirmed;
-            String reason;
+            requireCertain();
+            boolean hasId;
+            boolean hasMode;
+            boolean hasBootCount;
+            boolean hasUnconfirmed;
+            boolean hasReason;
             try {
-                id = preferences.getString(KEY_OPERATION_ID, null);
-                if (id == null || id.isEmpty()) {
+                // Presence, not a default value, decides whether a record exists.
+                hasId = preferences.contains(KEY_OPERATION_ID);
+                hasMode = preferences.contains(KEY_EXECUTION_MODE);
+                hasBootCount = preferences.contains(KEY_BOOT_COUNT);
+                hasUnconfirmed = preferences.contains(KEY_UNCONFIRMED);
+                hasReason = preferences.contains(KEY_REASON);
+                if (!hasId && !hasMode && !hasBootCount && !hasUnconfirmed && !hasReason) {
                     return null;
                 }
-                mode = preferences.getString(KEY_EXECUTION_MODE, null);
-                bootCount = preferences.getLong(KEY_BOOT_COUNT, 0L);
-                unconfirmed = preferences.getBoolean(KEY_UNCONFIRMED, true);
-                reason = preferences.getString(KEY_REASON, null);
+                if (!hasId || !hasMode || !hasBootCount || !hasUnconfirmed) {
+                    throw new Failure("attempt record is incomplete");
+                }
+                String id = preferences.getString(KEY_OPERATION_ID, null);
+                String mode = preferences.getString(KEY_EXECUTION_MODE, null);
+                long bootCount = preferences.getLong(KEY_BOOT_COUNT, 0L);
+                boolean unconfirmed = preferences.getBoolean(KEY_UNCONFIRMED, true);
+                // A missing reason is valid; a wrong value type is not.
+                String reason = hasReason ? preferences.getString(KEY_REASON, null) : null;
+                RunConfig.ExecutionMode parsedMode = parseMode(mode);
+                if (id == null || id.isEmpty() || !RunConfigArtifact.isValidOperationId(id)
+                        || parsedMode == null || bootCount < 0L) {
+                    throw new Failure("attempt record is corrupt");
+                }
+                return new OperationAttempt(id, parsedMode, bootCount, unconfirmed, reason);
             } catch (RuntimeException e) {
                 throw new Failure("attempt record is unreadable", e);
             }
-            RunConfig.ExecutionMode parsedMode = parseMode(mode);
-            if (!RunConfigArtifact.isValidOperationId(id) || parsedMode == null || bootCount < 0L) {
-                throw new Failure("attempt record is corrupt");
-            }
-            return new OperationAttempt(id, parsedMode, bootCount, unconfirmed, reason);
         }
     }
 
@@ -73,6 +93,7 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
     public boolean publish(OperationAttempt attempt) throws Failure {
         Objects.requireNonNull(attempt, "attempt");
         synchronized (STORE_LOCK) {
+            requireCertain();
             OperationAttempt current = loadLocked();
             if (current != null && current.isUnconfirmed()
                     && !current.getOperationId().equals(attempt.getOperationId())) {
@@ -98,6 +119,7 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
             return false;
         }
         synchronized (STORE_LOCK) {
+            requireCertain();
             OperationAttempt current = loadLocked();
             if (current == null || !current.getOperationId().equals(operationId)) {
                 return false;
@@ -117,13 +139,30 @@ final class SharedPreferencesOperationAttemptStore implements OperationAttemptSt
         return load();
     }
 
+    private void requireCertain() throws Failure {
+        if (uncertain) {
+            throw new Failure("attempt store is uncertain after a failed commit; "
+                    + "only a store created after a process restart re-reads durable state");
+        }
+    }
+
     private boolean commit(SharedPreferences.Editor editor) throws Failure {
+        boolean committed;
         try {
             // Checked commit: a false result or thrown exception never admits a run.
-            return editor.commit();
+            committed = editor.commit();
         } catch (RuntimeException e) {
+            // The in-memory view may already have changed; never trust it again.
+            uncertain = true;
             throw new Failure("attempt store commit failed", e);
+        } catch (Error e) {
+            uncertain = true;
+            throw e;
         }
+        if (!committed) {
+            uncertain = true;
+        }
+        return committed;
     }
 
     private static RunConfig.ExecutionMode parseMode(String value) {

@@ -13,6 +13,7 @@ import org.junit.Test;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -115,9 +116,13 @@ public class OperationAttemptStoreTest {
         prefs.commitResult = false;
         assertFalse(store.clear(ID));
         assertEquals(ID, prefs.values.get(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        // The failed clear made this instance uncertain: its in-memory view no
+        // longer proves durable absence, so it must not be consulted again.
+        assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.clear(ID));
 
-        // The failed edit already removed the in-memory candidate; only durable
-        // values survive a process restart, where a checked clear can succeed.
+        // Only durable values survive a process restart, where a checked clear
+        // can succeed through a fresh store instance.
         SharedPreferencesOperationAttemptStore restarted =
                 new SharedPreferencesOperationAttemptStore(
                         new FakePreferences(new HashMap<>(prefs.values)).delegate());
@@ -137,6 +142,7 @@ public class OperationAttemptStoreTest {
                 () -> store.clear(ID));
         assertEquals("clear failed", failure.getCause().getMessage());
         assertEquals(ID, prefs.values.get(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        assertThrows(OperationAttemptStore.Failure.class, store::load);
     }
 
     @Test
@@ -149,7 +155,9 @@ public class OperationAttemptStoreTest {
         SharedPreferencesOperationAttemptStore store =
                 new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
 
-        assertThrows(OperationAttemptStore.Failure.class, store::load);
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is corrupt"));
     }
 
     @Test
@@ -163,6 +171,190 @@ public class OperationAttemptStoreTest {
         assertEquals(ID, store.load().getOperationId());
         assertTrue(store.clear(ID));
         assertNull(store.load());
+    }
+
+    @Test
+    public void noAttemptKeyLoadsNoRecord() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+
+        assertNull(store.load());
+    }
+
+    @Test
+    public void missingIdWithOtherKeysFailsClosed() {
+        Map<String, Object> values = completeRecord();
+        values.remove(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID);
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void missingModeWithOtherKeysFailsClosed() {
+        Map<String, Object> values = completeRecord();
+        values.remove(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE);
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void missingBootCountWithOtherKeysFailsClosed() {
+        Map<String, Object> values = completeRecord();
+        values.remove(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT);
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void missingUnconfirmedWithOtherKeysFailsClosed() {
+        Map<String, Object> values = completeRecord();
+        values.remove(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED);
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void orphanReasonKeyFailsClosed() {
+        Map<String, Object> values = new HashMap<>();
+        values.put(SharedPreferencesOperationAttemptStore.KEY_REASON, "orphan");
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is incomplete"));
+    }
+
+    @Test
+    public void negativeBootCountFailsClosed() {
+        Map<String, Object> values = completeRecord();
+        values.put(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, -1L);
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(new FakePreferences(values).delegate());
+
+        OperationAttemptStore.Failure failure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is corrupt"));
+    }
+
+    @Test
+    public void wrongValueTypesFailClosedThroughTheCheckedReadPath() {
+        Map<String, Object> wrongId = completeRecord();
+        wrongId.put(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID, 123L);
+        Map<String, Object> wrongMode = completeRecord();
+        wrongMode.put(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE, Boolean.TRUE);
+        Map<String, Object> wrongBootCount = completeRecord();
+        wrongBootCount.put(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, "41");
+        Map<String, Object> wrongUnconfirmed = completeRecord();
+        wrongUnconfirmed.put(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED, "true");
+        Map<String, Object> wrongReason = completeRecord();
+        wrongReason.put(SharedPreferencesOperationAttemptStore.KEY_REASON, 7);
+
+        for (Map<String, Object> values : Arrays.asList(wrongId, wrongMode, wrongBootCount,
+                wrongUnconfirmed, wrongReason)) {
+            SharedPreferencesOperationAttemptStore store =
+                    new SharedPreferencesOperationAttemptStore(
+                            new FakePreferences(values).delegate());
+            OperationAttemptStore.Failure failure =
+                    assertThrows(OperationAttemptStore.Failure.class, store::load);
+            assertTrue(failure.getMessage(), failure.getMessage().contains("attempt record is"));
+        }
+    }
+
+    @Test
+    public void falseClearMakesTheSameInstanceFailClosedButDurableRecordSurvives() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+        assertTrue(store.publish(attempt(ID, 43L)));
+
+        prefs.commitResult = false;
+        assertFalse(store.clear(ID));
+        assertEquals(ID, prefs.values.get(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID));
+        OperationAttemptStore.Failure loadFailure =
+                assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertTrue(loadFailure.getMessage(), loadFailure.getMessage().contains("uncertain"));
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.publish(attempt(OTHER, 43L)));
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.clear(ID));
+        // The boolean contract for a null ID stays false even on an uncertain store.
+        assertFalse(store.clear(null));
+
+        SharedPreferencesOperationAttemptStore fresh =
+                new SharedPreferencesOperationAttemptStore(prefs.freshDelegate());
+        OperationAttempt loaded = fresh.load();
+        assertNotNull(loaded);
+        assertEquals(ID, loaded.getOperationId());
+        assertTrue(loaded.isUnconfirmed());
+        assertTrue(fresh.clear(ID));
+        assertNull(fresh.load());
+    }
+
+    @Test
+    public void falsePublishMakesTheSameInstanceFailClosed() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        prefs.commitResult = false;
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+
+        assertFalse(store.publish(attempt(ID, 44L)));
+        assertTrue(prefs.values.isEmpty());
+        assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.publish(attempt(ID, 44L)));
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.clear(ID));
+    }
+
+    @Test
+    public void thrownCommitMakesTheSameInstanceFailClosed() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        prefs.commitFailure = new IllegalStateException("disk full");
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.publish(attempt(ID, 45L)));
+        assertTrue(prefs.values.isEmpty());
+        assertThrows(OperationAttemptStore.Failure.class, store::load);
+        assertThrows(OperationAttemptStore.Failure.class, () -> store.clear(ID));
+    }
+
+    @Test
+    public void successfulClearRemainsIdempotent() throws Exception {
+        FakePreferences prefs = new FakePreferences(new HashMap<>());
+        SharedPreferencesOperationAttemptStore store =
+                new SharedPreferencesOperationAttemptStore(prefs.delegate());
+
+        assertTrue(store.publish(attempt(ID, 46L)));
+        assertTrue(store.clear(ID));
+        assertNull(store.load());
+        assertFalse(store.clear(ID));
+        assertEquals(2, prefs.commitCalls);
+    }
+
+    private static Map<String, Object> completeRecord() {
+        Map<String, Object> values = new HashMap<>();
+        values.put(SharedPreferencesOperationAttemptStore.KEY_OPERATION_ID, ID);
+        values.put(SharedPreferencesOperationAttemptStore.KEY_EXECUTION_MODE,
+                RunConfig.ExecutionMode.MANUAL.name());
+        values.put(SharedPreferencesOperationAttemptStore.KEY_BOOT_COUNT, 42L);
+        values.put(SharedPreferencesOperationAttemptStore.KEY_UNCONFIRMED, true);
+        values.put(SharedPreferencesOperationAttemptStore.KEY_REASON, "admitted");
+        return values;
     }
 
     private static OperationAttempt attempt(String id, long bootCount) {
@@ -192,6 +384,11 @@ public class OperationAttemptStoreTest {
 
         android.content.SharedPreferences delegate() {
             return (android.content.SharedPreferences) preferences;
+        }
+
+        /** A fresh process-local view over the SAME durable map (a new store instance). */
+        android.content.SharedPreferences freshDelegate() {
+            return new FakePreferences(values).delegate();
         }
 
         private Object invokeEditor(Method method, Object[] args) {
@@ -241,6 +438,8 @@ public class OperationAttemptStoreTest {
                     return cached.containsKey(args[0]) ? cached.get(args[0]) : args[1];
                 case "getBoolean":
                     return cached.containsKey(args[0]) ? cached.get(args[0]) : args[1];
+                case "contains":
+                    return cached.containsKey(args[0]);
                 default:
                     throw new UnsupportedOperationException(method.getName());
             }

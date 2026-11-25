@@ -5,7 +5,9 @@ import java.util.Objects;
 
 /**
  * Process-local attempt store. It implements exactly the same CAS and checked
- * contract as the durable store but writes nothing outside this object.
+ * contract as the durable store but writes nothing outside this object. It has
+ * no checked commit, so it never becomes uncertain and never claims to observe
+ * another process's durable state.
  */
 final class InMemoryOperationAttemptStore implements OperationAttemptStore {
     private final Object lock = new Object();
