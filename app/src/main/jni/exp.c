@@ -162,19 +162,55 @@ static int spawn_crash_dump(off_t offset, int write_fd, int target_fd, const cha
     return st;
 }
 
+/* A helper that reports success but leaves the pipe empty is the symptom of a
+ * transient pipe/fd race seen during cleanup. Retry that case only, with a
+ * fresh pipe each time; never retry a real helper failure or spawn error. */
+#define DF_READ_VENDOR_ATTEMPTS 3
+#define DF_READ_VENDOR_RETRY_US 1000
+
 /* Read 16 bytes from vendor file at offset using crash_dump bridge (read mode).
  */
 static int read_vendor_content(off_t offset, uint8_t buf[16]) {
-    int rdpipe[2];
-    if (pipe(rdpipe) < 0) { printf("pipe failed: %s\n", strerror(errno)); return -1; }
-
-    int status = spawn_crash_dump(offset, rdpipe[1], 0, "r");
-    close(rdpipe[1]);
+    uint8_t tmp[16];
+    int status = -1;
     int n = 0;
-    if (status >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        n = (int)TEMP_FAILURE_RETRY(read(rdpipe[0], buf, 16));
-    close(rdpipe[0]);
-    if (status < 0) return -1;
+    int read_errno = 0;
+
+    for (int attempt = 1; attempt <= DF_READ_VENDOR_ATTEMPTS; attempt++) {
+        int rdpipe[2];
+        if (pipe(rdpipe) < 0) { printf("pipe failed: %s\n", strerror(errno)); return -1; }
+
+        status = spawn_crash_dump(offset, rdpipe[1], 0, "r");
+        close(rdpipe[1]);
+        if (status < 0) { close(rdpipe[0]); return -1; }
+
+        n = 0;
+        read_errno = 0;
+        if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+            /* Clear errno so a 0-byte read (EOF, not an error) does not print a
+             * stale value from an earlier syscall. */
+            errno = 0;
+            n = (int)TEMP_FAILURE_RETRY(read(rdpipe[0], tmp, 16));
+            read_errno = errno;
+        }
+        close(rdpipe[0]);
+
+        if (n == 16) {
+            /* buf is private to the caller: publish only a complete block. */
+            memcpy(buf, tmp, 16);
+            return 0;
+        }
+
+        printf("read_vendor at 0x%lx attempt %d: got %d bytes, status=0x%x, errno=%d (%s)\n",
+               (long)offset, attempt, n, status, read_errno, strerror(read_errno));
+
+        /* Retry only the "helper succeeded but short/empty read" case. */
+        if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+            break;
+        if (attempt < DF_READ_VENDOR_ATTEMPTS)
+            usleep(DF_READ_VENDOR_RETRY_US);
+    }
+
     if (n != 16) {
         if (WIFEXITED(status)) {
             static const char *const exit_meanings[] = {
