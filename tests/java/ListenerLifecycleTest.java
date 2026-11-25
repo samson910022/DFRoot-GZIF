@@ -163,6 +163,86 @@ public class ListenerLifecycleTest {
         assertFalse(BootUiPolicy.disableOnQuarantine(false, false));
     }
 
+    @Test
+    public void unknownPresentationIsPersistentAndNeverClaimsOff() {
+        BootUiPolicy.BootComponentState fromDefault = BootUiPolicy.fromPackageManagerState(0);
+        BootUiPolicy.BootComponentState fromUnknownConstant = BootUiPolicy.fromPackageManagerState(99);
+        BootUiPolicy.BootComponentState fromFailure = BootUiPolicy.fromReadbackFailure();
+
+        for (BootUiPolicy.BootComponentState unknown : new BootUiPolicy.BootComponentState[]{
+                fromDefault, fromUnknownConstant, fromFailure}) {
+            assertEquals(BootUiPolicy.BootComponentState.UNKNOWN, unknown);
+            assertEquals("DEFAULT/unknown/exception must present as UNKNOWN",
+                    BootUiPolicy.BootStatusPresentation.UNKNOWN,
+                    BootUiPolicy.presentation(unknown));
+            assertTrue("an unverifiable observation must be flagged",
+                    BootUiPolicy.isUnverifiable(unknown));
+            assertFalse("UNKNOWN is never verified OFF", BootUiPolicy.verifiedDisabled(unknown));
+            assertFalse("the thumb is unchecked, but that is not a status claim",
+                    BootUiPolicy.desiredChecked(unknown));
+        }
+
+        // DISABLED is the only observation that may be presented as verified OFF.
+        BootUiPolicy.BootComponentState disabled = BootUiPolicy.fromPackageManagerState(2);
+        assertEquals(BootUiPolicy.BootStatusPresentation.OFF_VERIFIED,
+                BootUiPolicy.presentation(disabled));
+        assertTrue(BootUiPolicy.verifiedDisabled(disabled));
+        assertFalse(BootUiPolicy.isUnverifiable(disabled));
+        assertFalse(BootUiPolicy.desiredChecked(disabled));
+
+        // ENABLED maps to ON, never to any OFF claim.
+        BootUiPolicy.BootComponentState enabled = BootUiPolicy.fromPackageManagerState(1);
+        assertEquals(BootUiPolicy.BootStatusPresentation.ON, BootUiPolicy.presentation(enabled));
+        assertFalse(BootUiPolicy.verifiedDisabled(enabled));
+        assertFalse(BootUiPolicy.isUnverifiable(enabled));
+        assertTrue(BootUiPolicy.desiredChecked(enabled));
+    }
+
+    @Test
+    public void explicitDisableIsAlwaysPermittedEvenWhenUnknownOrQuarantined() {
+        BootUiPolicy.BootComponentState unknown = BootUiPolicy.fromReadbackFailure();
+        assertTrue("the user may always request an explicit OFF",
+                BootUiPolicy.mayRequestDisable());
+        assertTrue(BootUiPolicy.mayChangeTo(false, unknown, true));
+        assertTrue(BootUiPolicy.mayChangeTo(false, unknown, false));
+
+        // ON requests stay refused under the same uncertain conditions.
+        assertFalse(BootUiPolicy.mayChangeTo(true, unknown, true));
+        assertFalse(BootUiPolicy.mayChangeTo(true, unknown, false));
+        assertFalse(BootUiPolicy.mayChangeTo(true, BootUiPolicy.fromPackageManagerState(2), true));
+        assertTrue(BootUiPolicy.mayChangeTo(true, BootUiPolicy.fromPackageManagerState(2), false));
+    }
+
+    @Test
+    public void failedDisableReadbackNeverConfirmsOffAndNeverAutoEnables() {
+        BootUiPolicy.BootComponentState failed = BootUiPolicy.fromReadbackFailure();
+        assertEquals(BootUiPolicy.BootStatusPresentation.UNKNOWN,
+                BootUiPolicy.presentation(failed));
+        assertFalse("a failed read-back is not verified OFF",
+                BootUiPolicy.verifiedDisabled(failed));
+        assertFalse("recovery never auto-enables an unverifiable component",
+                BootUiPolicy.onRecovery(failed, true));
+        assertFalse("a previously checked switch is ignored on recovery",
+                BootUiPolicy.onRecovery(failed, false));
+        assertFalse("framework write to OFF is rejected without evidence",
+                BootUiPolicy.acceptFrameworkChange(false, failed));
+        assertFalse("framework write to ON is rejected without evidence",
+                BootUiPolicy.acceptFrameworkChange(true, failed));
+
+        // Only an explicit DISABLED read-back may be presented/confirmed as OFF.
+        BootUiPolicy.BootComponentState disabled = BootUiPolicy.fromPackageManagerState(2);
+        assertEquals(BootUiPolicy.BootStatusPresentation.OFF_VERIFIED,
+                BootUiPolicy.presentation(disabled));
+        assertTrue(BootUiPolicy.acceptFrameworkChange(false, disabled));
+        assertFalse(BootUiPolicy.acceptFrameworkChange(true, disabled));
+        assertEquals(BootUiPolicy.BootStatusPresentation.UNKNOWN,
+                BootUiPolicy.presentation(BootUiPolicy.fromPackageManagerState(0)));
+
+        // Quarantine still disables via the shared gate, independently of the read-back.
+        assertTrue(BootUiPolicy.disableOnQuarantine(true, true));
+        assertTrue(BootUiPolicy.disableOnQuarantine(true, false));
+    }
+
     private static final class CountingListener implements PreferenceIntegrity.Listener {
         int calls;
 

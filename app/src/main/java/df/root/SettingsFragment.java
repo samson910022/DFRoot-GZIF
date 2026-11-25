@@ -4,6 +4,8 @@
 // See NOTICE.
 // Round-5: an unreadable/DEFAULT component state is UNKNOWN (never verified OFF),
 // framework writes are rejected on UNKNOWN, and a one-shot notice explains it.
+// Round-6: UNKNOWN now has a PERSISTENT status row and an explicit safe OFF
+// action. The one-shot toast model is gone: no observation ever claims OFF.
 package df.root;
 
 import android.content.ComponentName;
@@ -13,12 +15,14 @@ import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.SwitchPreference;
 import android.util.Log;
 import android.widget.Toast;
 
 import df.root.BootUiPolicy.BootComponentState;
+import df.root.BootUiPolicy.BootStatusPresentation;
 
 public class SettingsFragment extends PreferenceFragment {
 
@@ -30,6 +34,8 @@ public class SettingsFragment extends PreferenceFragment {
     private SharedPreferences mDePrefs;
     private PreferencePersister mPersister;
     private SwitchPreference mBootPref;
+    private Preference mBootStatusPref;
+    private Preference mBootDisablePref;
     private SwitchPreference mSoftRebootPref;
     private SwitchPreference mDisableModulesPref;
     private PreferenceIntegrity.Listener mIntegrityListener;
@@ -40,8 +46,6 @@ public class SettingsFragment extends PreferenceFragment {
     // reads, so the switches must never be re-read from that map on recovery.
     private boolean mSoftRebootCommitted;
     private boolean mDisableModulesCommitted;
-    // One notice per screen: an unverifiable boot state is never claimed as OFF.
-    private boolean mUnknownBootStateToastShown;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -67,6 +71,8 @@ public class SettingsFragment extends PreferenceFragment {
         mBootReceiver = new ComponentName(mAppContext, BootReceiver.class);
         mBootPref = (SwitchPreference) findPreference("boot_start");
         mBootPref.setPersistent(false);
+        mBootStatusPref = findPreference("boot_status"); // non-selectable, persistent status
+        mBootDisablePref = findPreference("boot_disable"); // explicit safe OFF action
 
         mSoftRebootPref = (SwitchPreference) findPreference("soft_reboot");
         mSoftRebootPref.setPersistent(false);
@@ -80,15 +86,16 @@ public class SettingsFragment extends PreferenceFragment {
             BootComponentState before = readBootComponentState();
             if (!BootUiPolicy.mayChangeTo(turningOn, before,
                     PreferenceIntegrity.isQuarantined())) {
-                // Never arm a boot-time launch while memory and the on-disk
-                // preferences may disagree, or while the component state could
-                // not be verified. Disable through the shared gate and re-read
-                // the real state: an unverifiable readback is UNKNOWN, not OFF.
+                // ON is refused while preferences are quarantined or the state
+                // is unverifiable. Do NOT silently disable the component here:
+                // that would hide the real state. Show a clear message and
+                // re-apply the honest presentation from a fresh observation so
+                // the user can see exactly what was observed.
                 Toast.makeText(mAppContext,
-                        "Start on Boot is blocked while preference state is uncertain",
+                        "Start on Boot cannot be turned ON while preference state is " +
+                        "uncertain. Use 'Disable automatic startup' to turn it OFF.",
                         Toast.LENGTH_LONG).show();
-                PreferenceIntegrity.disableBootLaunchNow();
-                mBootPref.setChecked(BootUiPolicy.desiredChecked(readBootComponentState()));
+                applyBootPresentation(readBootComponentState());
                 return false; // framework must not re-apply the rejected value
             }
             // A user-initiated OFF request is always attempted, even if the
@@ -101,17 +108,24 @@ public class SettingsFragment extends PreferenceFragment {
             } catch (RuntimeException e) {
                 // Rejected change: fail closed and show the real state instead
                 // of letting the framework mark the switch as requested.
-                mBootPref.setChecked(BootUiPolicy.desiredChecked(readBootComponentState()));
+                Log.e(TAG, "Could not change boot component setting", e);
+                applyBootPresentation(readBootComponentState());
                 return false;
             }
             // The observed component state, not the requested value, is truth.
             BootComponentState actual = readBootComponentState();
-            mBootPref.setChecked(BootUiPolicy.desiredChecked(actual));
-            if (actual == BootComponentState.UNKNOWN) showUnknownBootStateToastOnce();
+            applyBootPresentation(actual);
             // Returning true makes TwoStatePreference setChecked(newValue)
             // again, which could show OFF while the receiver stays ENABLED.
             return BootUiPolicy.acceptFrameworkChange(turningOn, actual);
         });
+
+        if (mBootDisablePref != null) {
+            mBootDisablePref.setOnPreferenceClickListener(pref -> {
+                requestDisableBootLaunch();
+                return true;
+            });
+        }
 
         mSoftRebootPref.setOnPreferenceChangeListener((pref, value) -> {
             boolean turningOn = Boolean.TRUE.equals(value);
@@ -177,11 +191,76 @@ public class SettingsFragment extends PreferenceFragment {
             return;
         }
         BootComponentState actual = readBootComponentState(); // read AFTER any gate action
-        mBootPref.setChecked(BootUiPolicy.desiredChecked(actual));
-        mBootPref.setEnabled(true); // the user must always be able to turn boot OFF
-        if (actual == BootComponentState.UNKNOWN) showUnknownBootStateToastOnce();
+        applyBootPresentation(actual);
         mSoftRebootPref.setChecked(mSoftRebootCommitted);
         mDisableModulesPref.setChecked(mDisableModulesCommitted);
+    }
+
+    /**
+     * Single choke point for ALL boot presentation: the switch thumb position,
+     * the switch summary and the persistent boot_status row are rewritten from
+     * the latest observation every time. UNKNOWN is shown as an unchecked thumb
+     * but is NEVER described as verified OFF. The switch stays enabled so the
+     * user can always turn automatic startup OFF.
+     */
+    private void applyBootPresentation(BootComponentState actual) {
+        if (mBootPref == null) return;
+        mBootPref.setChecked(BootUiPolicy.desiredChecked(actual)); // thumb position ONLY
+        mBootPref.setEnabled(true); // the user must always be able to turn boot OFF
+
+        BootStatusPresentation presentation = BootUiPolicy.presentation(actual);
+        String summary;
+        switch (presentation) {
+            case ON:
+                summary = "On - automatic startup enable setting is present";
+                break;
+            case OFF_VERIFIED:
+                summary = "Off - verified disabled";
+                break;
+            case UNKNOWN:
+            default:
+                summary = "Status unavailable - not confirmed disabled";
+                if (PreferenceIntegrity.isQuarantined()) {
+                    summary += "; preference state is quarantined, automatic startup may " +
+                            "still be enabled";
+                }
+                break;
+        }
+        mBootPref.setSummary(summary);
+        if (mBootStatusPref != null) mBootStatusPref.setSummary(summary);
+    }
+
+    /**
+     * Explicit, user-initiated safe OFF. It never enables anything and never
+     * depends on a prior observation: the read-back after the write decides
+     * what may be claimed in the secondary toast.
+     */
+    private void requestDisableBootLaunch() {
+        if (!isAdded() || getActivity() == null || mAppContext == null ||
+                mBootReceiver == null) return;
+        if (!BootUiPolicy.mayRequestDisable()) return;
+        try {
+            mAppContext.getPackageManager().setComponentEnabledSetting(mBootReceiver,
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    PackageManager.DONT_KILL_APP);
+        } catch (RuntimeException e) {
+            Log.e(TAG, "Could not disable boot component setting", e);
+        }
+        BootComponentState actual = readBootComponentState();
+        applyBootPresentation(actual);
+        final BootComponentState observed = actual;
+        mMain.post(() -> {
+            if (!isAdded() || getActivity() == null) return;
+            if (observed == BootComponentState.DISABLED) {
+                Toast.makeText(mAppContext,
+                        "Automatic startup disabled (verified)", Toast.LENGTH_LONG).show();
+            } else {
+                // A failed/DEFAULT read-back is NOT evidence of OFF: never claim it.
+                Toast.makeText(mAppContext,
+                        "Could not confirm automatic startup is disabled; " +
+                        "status unavailable - not confirmed disabled", Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     /**
@@ -199,17 +278,5 @@ public class SettingsFragment extends PreferenceFragment {
         } catch (RuntimeException e) {
             return BootUiPolicy.fromReadbackFailure();
         }
-    }
-
-    /** One-shot, lifecycle-safe notice: UNKNOWN is shown off but not verified off. */
-    private void showUnknownBootStateToastOnce() {
-        if (mUnknownBootStateToastShown) return;
-        mUnknownBootStateToastShown = true;
-        mMain.post(() -> {
-            if (!isAdded() || getActivity() == null) return;
-            Toast.makeText(mAppContext,
-                    "Start on Boot could not be read and is not confirmed OFF; " +
-                    "you can still try to turn it off", Toast.LENGTH_LONG).show();
-        });
     }
 }

@@ -250,7 +250,7 @@ jobs:
 
       # Explicit XML assertion: a green Gradle exit code alone cannot hide a
       # skipped test class or a failure recorded only in the report.
-      - name: Assert JUnit XML (36 tests, 0 failures)
+      - name: Assert JUnit XML (39 tests, 0 failures)
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -272,8 +272,8 @@ jobs:
                      root.get("errors"), root.get("skipped")))
           print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %
                 (tests, failures, errors, skipped))
-          if tests != 36 or failures != 0 or errors != 0 or skipped != 0:
-              raise SystemExit("::error::JUnit XML assertion failed: expected 36 tests, 0 failures/errors/skips")
+          if tests != 39 or failures != 0 or errors != 0 or skipped != 0:
+              raise SystemExit("::error::JUnit XML assertion failed: expected 39 tests, 0 failures/errors/skips")
           PY
           echo "junit-ok" > "$RUNNER_TEMP/marker-junit"
 
@@ -397,7 +397,7 @@ jobs:
           {
             echo "## CI evidence artifact scope"
             echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
-            echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
+            echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload DFRoot-CI evidence

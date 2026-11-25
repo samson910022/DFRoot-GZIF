@@ -2,6 +2,9 @@
 // truthful boot switches and lifecycle-safe quarantine handling (P2-10). See NOTICE.
 // Round-5: state observation is tri-state; a failed/DEFAULT readback is UNKNOWN,
 // never evidence that automatic startup was disabled. See NOTICE.
+// Round-6 (PR #3): UNKNOWN has a distinct, persistent presentation and an
+// always-available explicit OFF request; the unchecked thumb is ONLY a position,
+// never a status claim. See NOTICE.
 package df.root;
 
 /**
@@ -37,7 +40,41 @@ public final class BootUiPolicy {
         return BootComponentState.UNKNOWN;
     }
 
-    /** The switch mirrors observation; UNKNOWN is shown conservatively as off. */
+    /**
+     * How the boot state must be presented to the user. This is a display
+     * category derived from an observation: UNKNOWN is never a claim that
+     * automatic startup was disabled.
+     */
+    public enum BootStatusPresentation {
+        ON, OFF_VERIFIED, UNKNOWN
+    }
+
+    /** Map an observation to its honest presentation category. */
+    public static BootStatusPresentation presentation(BootComponentState state) {
+        if (state == BootComponentState.ENABLED) return BootStatusPresentation.ON;
+        if (state == BootComponentState.DISABLED) return BootStatusPresentation.OFF_VERIFIED;
+        return BootStatusPresentation.UNKNOWN;
+    }
+
+    /** True only when the component setting could not be observed at all. */
+    public static boolean isUnverifiable(BootComponentState state) {
+        return state == BootComponentState.UNKNOWN;
+    }
+
+    /**
+     * An explicit OFF is always permitted. Requesting it never auto-enables
+     * anything and never depends on a prior observation having succeeded.
+     */
+    public static boolean mayRequestDisable() {
+        return true;
+    }
+
+    /**
+     * ONLY the switch thumb position: UNKNOWN is shown as an unchecked thumb so
+     * it never implies ON, but this is NOT a status claim that automatic startup
+     * is disabled. Use {@link #presentation(BootComponentState)} together with
+     * the persistent status row for the honest status text.
+     */
     public static boolean desiredChecked(BootComponentState state) {
         return state == BootComponentState.ENABLED;
     }
