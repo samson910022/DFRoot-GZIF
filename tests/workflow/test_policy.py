@@ -62,6 +62,17 @@ TEST_CI_COMMANDS = {
 APK_COUNTER_COMMAND = "Verify APK counts"
 ANCESTRY_STEP = "Verify tag is on master"
 CLEANUP_STEP = "Clean up signing material"
+HOST_GATES_JOB = "host-gates"
+CHECKOUT_SHA_STEP = "Assert checked-out SHA"
+CHECKOUT_SHA_SCRIPT = (
+    "set -euo pipefail\n"
+    "head=$(git rev-parse 'HEAD^{commit}')\n"
+    'if [ "$head" != "$GITHUB_SHA" ]; then\n'
+    '  echo "::error::git HEAD $head != GITHUB_SHA $GITHUB_SHA"\n'
+    "  exit 1\n"
+    "fi\n"
+    'echo "Checked out exactly $GITHUB_SHA"'
+)
 # PR #3 gate step names.  These are exact allowlist entries, not descriptive
 # prose: renaming or reordering any of them fails the policy suite.
 HOST_STATUS_STEP = "Host status-protocol tests"
@@ -73,10 +84,10 @@ KO_CI_POLICY_STEP = "KO hash policy (CI enforced, skip rejected)"
 JVM_TEST_STEP = "Java preference-persistence unit tests"
 JUNIT_STEP = "Assert JUnit XML (36 tests, 0 failures)"
 ALL_MARKERS_STEP = "Assert all test suites reached"
-DEBUG_BUILD_STEP = "Build debug APK (UNVERIFIED CI artifact)"
+DEBUG_BUILD_STEP = "Build debug APK (compile/content gate only)"
 CI_CACHE_ASSERT_STEP = "Assert KO hash check enabled in every CMakeCache"
-CI_SCOPE_STEP = "Report UNVERIFIED CI artifact scope"
-CI_UPLOAD_STEP = "Upload UNVERIFIED CI APKs"
+CI_SCOPE_STEP = "Report CI evidence-only artifact scope"
+CI_UPLOAD_STEP = "Upload DFRoot-CI evidence"
 PACKAGED_KO_GATE_STEP = "Verify packaged KO bytes in every distributable APK"
 PROVENANCE_IDENTITY_STEP = "Verify build-provenance identity for every record"
 RELEASE_EVIDENCE_STEP = "Verify release evidence for every uploaded APK"
@@ -103,7 +114,7 @@ RELEASE_GATE_MARKERS = (
     "marker-release-evidence",
 )
 RELEASE_GATE_INDEX = "apk-gate-index.tsv"
-CI_ARTIFACT_NAME = "DFRoot-UNVERIFIED-CI"
+CI_EVIDENCE_ARTIFACT_NAME = "DFRoot-CI-evidence"
 RELEASE_ARTIFACT_NAME = "DFRoot-release"
 PROVENANCE_ARTIFACT_NAME = "DFRoot-provenance"
 # Exact, ordered run-script contract for build-release.  Dict insertion order
@@ -707,10 +718,11 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
     ),
 }
 
-# Exact, ordered run-script contract for build-dfroot's host gates and
-# debug-only build.  The JUnit step's pinned Python heredoc is the only
-# heredoc the strict parser permits, and only because its text is locked here.
-DFROOT_RUN_SCRIPTS: dict[str, str] = {
+# Exact, ordered run-script contract for the UNCONDITIONAL host-gates job.
+# The JUnit step's pinned Python heredoc is the only heredoc the strict parser
+# permits, and only because its text is locked here.
+HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
+    CHECKOUT_SHA_STEP: CHECKOUT_SHA_SCRIPT,
     'Host status-protocol tests': (
         'set -euo pipefail\n'
         'make -C tests/native test\n'
@@ -825,7 +837,13 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         'if [ "$missing" -ne 0 ]; then exit 1; fi\n'
         'echo "All native/CMake/JVM suites reached (7/7 markers)"'
     ),
-    'Build debug APK (UNVERIFIED CI artifact)': (
+}
+
+# Exact, ordered run-script contract for build-dfroot: a Debug compile/content
+# gate, the CMakeCache assertion, the APK counter and the evidence-only scope
+# report. No host suite, no release build and no APK may appear here.
+DFROOT_RUN_SCRIPTS: dict[str, str] = {
+    DEBUG_BUILD_STEP: (
         'set -euo pipefail\n'
         'for attempt in 1 2 3; do\n'
         '  if ./gradlew :app:assembleDebug --no-daemon --console=plain; then\n'
@@ -876,11 +894,11 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '  exit 1\n'
         'fi'
     ),
-    'Report UNVERIFIED CI artifact scope': (
+    CI_SCOPE_STEP: (
         '{\n'
-        '  echo "## CI artifact scope"\n'
-        '  echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."\n'
-        '  echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
+        '  echo "## CI evidence artifact scope"\n'
+        '  echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."\n'
+        '  echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }
@@ -902,8 +920,9 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Build dfroot.ko",
         "Upload dfroot.ko",
     ],
-    "build-dfroot": [
+    HOST_GATES_JOB: [
         "Check out source",
+        CHECKOUT_SHA_STEP,
         "Set up Java 21",
         "Download DF LKM (android13-5.15)",
         "Set up Gradle",
@@ -916,6 +935,12 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         JVM_TEST_STEP,
         JUNIT_STEP,
         ALL_MARKERS_STEP,
+    ],
+    "build-dfroot": [
+        "Check out source",
+        "Set up Java 21",
+        "Download DF LKM (android13-5.15)",
+        "Set up Gradle",
         DEBUG_BUILD_STEP,
         CI_CACHE_ASSERT_STEP,
         APK_COUNTER_COMMAND,
@@ -951,16 +976,16 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
 }
 # Exact multiline artifact paths/files.  These are compared with equality, so
 # appending an extra file (e.g. signing.properties) is a hard failure.
-CI_UPLOAD_PATH = (
-    "app/build/outputs/apk/debug/DFRoot_*.apk\n"
-    "app/build/outputs/apk/release/DFRoot_*.apk\n"
+CI_EVIDENCE_UPLOAD_PATH = (
     "GPL-3.0.txt\n"
     "LICENSE\n"
     "NOTICE\n"
     "THIRD_PARTY_NOTICES.md"
 )
-# Licence/notices accompany both the unsigned CI artifact and the signed
-# release assets; the repository's own GPL-2.0 LICENSE is one of them.
+# No APK may ever be distributed from PR/branch/manual events. This is an
+# evidence-only bundle; the Debug APK is a compile/content gate, not a product.
+# Licence/notices also accompany the signed release assets; the repository's
+# own GPL-2.0 LICENSE is one of them.
 LICENSE_ASSETS = ("GPL-3.0.txt", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 # Byte-exact pin of the verbatim official text from gnu.org; any edit to the
 # conveyed licence (or a truncated/substituted copy) is a policy violation.
@@ -990,7 +1015,7 @@ PUBLISH_FILES = (
 PROVENANCE_UPLOAD_PATH = "${{ runner.temp }}/dfroot-apk-provenance.txt"
 UPLOAD_ARTIFACT_NAMES = {
     "build-lkms": ("df-lkm-${{ matrix.kmi }}",),
-    "build-dfroot": (CI_ARTIFACT_NAME,),
+    "build-dfroot": (CI_EVIDENCE_ARTIFACT_NAME,),
     "build-release": (RELEASE_ARTIFACT_NAME, PROVENANCE_ARTIFACT_NAME),
 }
 LKM_UPLOAD_PATH = "out/dfroot-${{ matrix.kmi }}.ko"
@@ -1125,7 +1150,7 @@ def strict_violations(text: str) -> list[str]:
             continue
         body_lines = [line[_indent + 2:] if line.strip() else "" for line in lines[start + 1:end]]
         body = "\n".join(body_lines).strip()
-        if body == DFROOT_RUN_SCRIPTS[JUNIT_STEP]:
+        if body == HOST_GATES_RUN_SCRIPTS[JUNIT_STEP]:
             continue
         for index in range(start + 1, end):
             if heredoc_re.search(lines[index]):
@@ -1433,7 +1458,8 @@ def assert_required_steps_unskippable(text: str) -> None:
     jobs = job_blocks(active)
     required = {
         "test-ci": list(TEST_CI_COMMANDS),
-        "build-dfroot": [
+        HOST_GATES_JOB: [
+            CHECKOUT_SHA_STEP,
             HOST_STATUS_STEP,
             KO_POLICY_TEST_STEP,
             PACKAGED_KO_TEST_STEP,
@@ -1443,6 +1469,8 @@ def assert_required_steps_unskippable(text: str) -> None:
             JVM_TEST_STEP,
             JUNIT_STEP,
             ALL_MARKERS_STEP,
+        ],
+        "build-dfroot": [
             DEBUG_BUILD_STEP,
             CI_CACHE_ASSERT_STEP,
             APK_COUNTER_COMMAND,
@@ -1551,7 +1579,7 @@ def assert_exact_release_run_scripts(text: str) -> None:
 
 
 def assert_exact_dfroot_run_scripts(text: str) -> None:
-    """Lock every build-dfroot host-gate/debug run script to its exact text."""
+    """Lock every build-dfroot compile/content-gate run script to exact text."""
     job = job_blocks(strip_yaml_comments(text))["build-dfroot"]
     run_steps = [step for step in steps(job) if step_property(step, "run") is not None]
     actual_names = [step_property(step, "name") for step in run_steps]
@@ -1568,6 +1596,127 @@ def assert_exact_dfroot_run_scripts(text: str) -> None:
             )
 
 
+def assert_exact_host_gates_run_scripts(text: str) -> None:
+    """Lock every host-gates run script, including the checkout-SHA assertion."""
+    job = job_blocks(strip_yaml_comments(text))[HOST_GATES_JOB]
+    run_steps = [step for step in steps(job) if step_property(step, "run") is not None]
+    actual_names = [step_property(step, "name") for step in run_steps]
+    expected_names = list(HOST_GATES_RUN_SCRIPTS)
+    if actual_names != expected_names:
+        raise AssertionError(
+            f"host-gates run steps must be exactly {expected_names!r}, got {actual_names!r}"
+        )
+    for name, step in zip(expected_names, run_steps):
+        if run_script(step) != HOST_GATES_RUN_SCRIPTS[name]:
+            raise AssertionError(
+                f"host-gates/{name} run script must be exactly "
+                f"{HOST_GATES_RUN_SCRIPTS[name]!r}, got {run_script(step)!r}"
+            )
+
+
+def assert_job_graph(text: str) -> None:
+    """Host evidence gates are unconditional and required by both build paths."""
+    active = strip_yaml_comments(text)
+    jobs = job_blocks(active)
+    expected_order = [
+        "test-ci", "build-lkms", HOST_GATES_JOB,
+        "build-dfroot", "build-release", "publish",
+    ]
+    if list(jobs) != expected_order:
+        raise AssertionError(f"job graph order must be exactly {expected_order!r}, got {list(jobs)!r}")
+    expected_needs = {
+        "test-ci": None,
+        "build-lkms": "test-ci",
+        HOST_GATES_JOB: "build-lkms",
+        "build-dfroot": HOST_GATES_JOB,
+        "build-release": HOST_GATES_JOB,
+        "publish": "build-release",
+    }
+    for name, needed in expected_needs.items():
+        actual = property_value(jobs[name], "needs", 4)
+        if actual != needed:
+            raise AssertionError(f"{name} needs must be {needed!r}, got {actual!r}")
+    host = jobs[HOST_GATES_JOB]
+    if property_value(host, "if", 4) is not None:
+        raise AssertionError("host-gates must be unconditional (no if:)")
+    if mapping(host, "permissions", 4) != {"contents": "read"}:
+        raise AssertionError("host-gates permissions must be exactly contents: read")
+    if property_value(host, "timeout-minutes", 4) is None:
+        raise AssertionError("host-gates must declare a timeout-minutes")
+    if property_value(jobs["build-dfroot"], "if", 4) != "${{ !(" + TAG_PUSH + ") }}":
+        raise AssertionError("build-dfroot must keep its non-tag-only guard")
+    for job_name in ("build-release", "publish"):
+        if property_value(jobs[job_name], "if", 4) != "${{ " + TAG_PUSH + " }}":
+            raise AssertionError(f"{job_name} must keep its tag-only guard")
+
+
+def assert_five_cmake_suites(text: str) -> None:
+    """All five host CMake suites must run in host-gates, none in build-dfroot."""
+    jobs = job_blocks(strip_yaml_comments(text))
+    host_scripts = "\n".join(run_script(step) for step in steps(jobs[HOST_GATES_JOB]))
+    suites = set(re.findall(r"tests/cmake/[A-Za-z0-9_]+\.cmake", host_scripts))
+    expected = {
+        "tests/cmake/ko_hash_policy_test.cmake",
+        "tests/cmake/packaged_ko_test.cmake",
+        "tests/cmake/packaging_target_graph_test.cmake",
+        "tests/cmake/apk_packaging_gate_test.cmake",
+        "tests/cmake/apk_content_gate_test.cmake",
+    }
+    if suites != expected:
+        raise AssertionError(
+            f"host-gates must run exactly the five CMake suites {sorted(expected)!r}, "
+            f"got {sorted(suites)!r}"
+        )
+    ci_scripts = "\n".join(run_script(step) for step in steps(jobs["build-dfroot"]))
+    for suite in expected:
+        if suite in ci_scripts:
+            raise AssertionError(f"{suite} must not be duplicated in build-dfroot")
+
+
+def assert_ci_evidence_upload_has_no_apk(text: str) -> None:
+    """PR/branch/manual uploads are licence evidence only: never an APK."""
+    job = job_blocks(strip_yaml_comments(text))["build-dfroot"]
+    uploads = action_steps(job, "actions/upload-artifact")
+    if len(uploads) != 1:
+        raise AssertionError("build-dfroot must have exactly one upload step")
+    inputs = mapping(uploads[0], "with", 8)
+    if inputs.get("name") != CI_EVIDENCE_ARTIFACT_NAME:
+        raise AssertionError(
+            f"CI upload artifact must be {CI_EVIDENCE_ARTIFACT_NAME!r}, "
+            f"got {inputs.get('name')!r}"
+        )
+    path = inputs.get("path") or ""
+    if ".apk" in path.lower() or ".apk" in (inputs.get("name") or "").lower():
+        raise AssertionError("CI evidence upload must not include any APK path")
+    if "app/build/outputs" in path:
+        raise AssertionError("CI evidence upload must not include build output paths")
+    if path != CI_EVIDENCE_UPLOAD_PATH:
+        raise AssertionError(f"CI evidence upload path must be exactly {CI_EVIDENCE_UPLOAD_PATH!r}")
+
+
+def assert_smoke_identity(gradle: str, smoke: str) -> None:
+    """The signing smoke must use an isolated identity and reject DFRoot APKs."""
+    for fragment in (
+        'applicationId = if (signingSmokeSkipNative) "df.root.signingsmoke" else "df.root"',
+        'versionName = if (signingSmokeSkipNative) "4.8-gzif-signingsmoke" else "4.8-gzif"',
+        'if (signingSmokeSkipNative) "SigningSmoke-${vn}.apk" else "DFRoot_${vn}.apk"',
+    ):
+        if fragment not in gradle:
+            raise AssertionError(f"gradle signing-smoke identity is missing {fragment!r}")
+    for fragment in (
+        "SIGNED_APK=app/build/outputs/apk/release/SigningSmoke-4.8-gzif-signingsmoke.apk",
+        "compgen -G 'app/build/outputs/apk/*/DFRoot_*.apk'",
+        "ERROR: signing smoke produced a production-named DFRoot_*.apk.",
+        "expected exactly the isolated signing-smoke APK",
+        "if ./gradlew :app:clean :app:assembleRelease",
+        "no release APK was produced",
+    ):
+        if fragment not in smoke:
+            raise AssertionError(f"smoke script is missing {fragment!r}")
+    if "SIGNED_APK=app/build/outputs/apk/release/DFRoot_" in smoke:
+        raise AssertionError("smoke script still uses the production APK name")
+
+
 def assert_pr3_gates(text: str) -> None:
     """Focused assertions for the integrated PR #3 gates.
 
@@ -1577,10 +1726,14 @@ def assert_pr3_gates(text: str) -> None:
     removed gate is caught with a readable failure even before equality checks.
     """
     jobs = job_blocks(strip_yaml_comments(text))
-    ci, release = jobs["build-dfroot"], jobs["build-release"]
+    host, ci, release = jobs[HOST_GATES_JOB], jobs["build-dfroot"], jobs["build-release"]
     ci_steps, release_steps = steps(ci), steps(release)
 
-    # 1. Each of the seven host suites writes its own marker.
+    # 1. Each of the seven host suites writes its own marker, unconditionally,
+    # in host-gates. build-dfroot must not carry any host suite any more.
+    for step in ci_steps:
+        if step_property(step, "name") in HOST_GATES_RUN_SCRIPTS:
+            raise AssertionError(f"build-dfroot must not repeat host-gates step {step_property(step, 'name')!r}")
     marker_steps = {
         HOST_STATUS_STEP: ("native-ok", "marker-native"),
         KO_POLICY_TEST_STEP: ("ko-policy-ok", "marker-ko-policy"),
@@ -1591,18 +1744,18 @@ def assert_pr3_gates(text: str) -> None:
         JUNIT_STEP: ("junit-ok", "marker-junit"),
     }
     for name, (value, marker) in marker_steps.items():
-        script = run_script(named_step(ci, name))
+        script = run_script(named_step(host, name))
         if f'echo "{value}" > "$RUNNER_TEMP/{marker}"' not in script:
-            raise AssertionError(f"build-dfroot/{name} must write {marker}")
+            raise AssertionError(f"host-gates/{name} must write {marker}")
     # The target-graph harness shares the packaged-KO step and its one marker;
     # it must never become an eighth suite/marker.
-    packaged_host = run_script(named_step(ci, PACKAGED_KO_TEST_STEP))
+    packaged_host = run_script(named_step(host, PACKAGED_KO_TEST_STEP))
     for fragment in ("tests/cmake/packaged_ko_test.cmake",
                      "tests/cmake/packaging_target_graph_test.cmake",
                      'echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"'):
         if fragment not in packaged_host:
             raise AssertionError(f"packaged-KO host step is missing {fragment!r}")
-    apk_host = run_script(named_step(ci, APK_FIXTURE_TEST_STEP))
+    apk_host = run_script(named_step(host, APK_FIXTURE_TEST_STEP))
     for fragment in ("tests/cmake/apk_packaging_gate_test.cmake",
                      "tests/cmake/apk_content_gate_test.cmake",
                      'echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"'):
@@ -1615,7 +1768,7 @@ def assert_pr3_gates(text: str) -> None:
                      'echo "::error::Debug APK is missing lib/arm64-v8a/libbootstrap.so"'):
         if fragment not in counter:
             raise AssertionError(f"debug APK counter is missing {fragment!r}")
-    all_markers = run_script(named_step(ci, ALL_MARKERS_STEP))
+    all_markers = run_script(named_step(host, ALL_MARKERS_STEP))
     if len(HOST_SUITE_MARKERS) != 7:
         raise AssertionError("internal: expected exactly seven host suite markers")
     if '-s "$RUNNER_TEMP/$marker"' not in all_markers:
@@ -1627,8 +1780,8 @@ def assert_pr3_gates(text: str) -> None:
         raise AssertionError("all-suites gate must state the 7/7 marker result")
 
     # 2. The JUnit assertion is strict: 36 tests, 0 failures/errors/skips.
-    junit = run_script(named_step(ci, JUNIT_STEP))
-    if junit != DFROOT_RUN_SCRIPTS[JUNIT_STEP]:
+    junit = run_script(named_step(host, JUNIT_STEP))
+    if junit != HOST_GATES_RUN_SCRIPTS[JUNIT_STEP]:
         raise AssertionError("JUnit XML assertion script is not the pinned script")
     for fragment in (
         "TEST-*.xml",
@@ -1644,7 +1797,7 @@ def assert_pr3_gates(text: str) -> None:
 
     # 3. CI-enforced KO policy: a positive verified run plus negative skip
     # checks that must fail under CI and for the release variant.
-    ko_policy = run_script(named_step(ci, KO_CI_POLICY_STEP))
+    ko_policy = run_script(named_step(host, KO_CI_POLICY_STEP))
     for fragment in (
         "CI=true cmake -DKO_FILE=",
         "if CI=true cmake",
@@ -1667,29 +1820,37 @@ def assert_pr3_gates(text: str) -> None:
             raise AssertionError(f"{job_name} cache assertion must require skip=OFF")
         if 'if [ -z "$caches" ]' not in cache_assert or "exit 1" not in cache_assert:
             raise AssertionError(f"{job_name} cache assertion must fail closed on no caches")
+    for job_name, job in ((HOST_GATES_JOB, host), ("build-dfroot", ci), ("build-release", release)):
         for step in steps(job):
-            if job_name == "build-dfroot" and step_property(step, "name") == KO_CI_POLICY_STEP:
+            if job_name == HOST_GATES_JOB and step_property(step, "name") == KO_CI_POLICY_STEP:
                 continue  # the only skip uses here are the two negative probes
             if "-DDFROOT_SKIP=ON" in run_script(step):
                 raise AssertionError(
                     f"{job_name}/{step_property(step, 'name')} must not enable KO skip"
                 )
 
-    # 4. The PR CI job uploads only the explicitly UNVERIFIED debug artifact.
+    # 4. PR/branch/manual events upload licence evidence only: no APK and no
+    # release claim. The Debug APK is a compile/content gate, not a product.
     if "WriteSigningProperties" in ci or ":app:assembleRelease" in ci:
         raise AssertionError("PR CI must not build a release variant or write signing material")
+    if "WriteSigningProperties" in host or ":app:assembleRelease" in host:
+        raise AssertionError("host-gates must not build a release variant or write signing material")
     release_action = "softprops/action-gh-release@" + ACTION_PINS["softprops/action-gh-release"][0]
     if any(step_property(step, "uses") == release_action for step in ci_steps):
         raise AssertionError("PR CI must never publish a release")
     ci_uploads = action_steps(ci, "actions/upload-artifact")
-    if len(ci_uploads) != 1 or mapping(ci_uploads[0], "with", 8).get("name") != CI_ARTIFACT_NAME:
-        raise AssertionError(f"PR CI must upload exactly one {CI_ARTIFACT_NAME} artifact")
+    if len(ci_uploads) != 1 or mapping(ci_uploads[0], "with", 8).get("name") != CI_EVIDENCE_ARTIFACT_NAME:
+        raise AssertionError(f"PR CI must upload exactly one {CI_EVIDENCE_ARTIFACT_NAME} artifact")
     scope = run_script(named_step(ci, CI_SCOPE_STEP))
     if scope != DFROOT_RUN_SCRIPTS[CI_SCOPE_STEP]:
         raise AssertionError("CI scope report is not the pinned 'no release claim' text")
-    for fragment in ("GITHUB_STEP_SUMMARY", "UNVERIFIED", "no release claim"):
+    for fragment in (
+        "GITHUB_STEP_SUMMARY", "UNVERIFIED", "no release claim",
+        "DFRoot-CI-evidence", "NO APK is distributed", "compile/content gate only",
+    ):
         if fragment not in scope:
             raise AssertionError(f"CI scope report is missing {fragment!r}")
+    assert_ci_evidence_upload_has_no_apk(text)
 
     # 5. build-release gates run in order, before any APK upload.
     ordered = [
@@ -1803,7 +1964,7 @@ def assert_exact_artifact_inputs(text: str) -> None:
     jobs = job_blocks(strip_yaml_comments(text))
     expected_uploads = {
         "build-lkms": {UPLOAD_ARTIFACT_NAMES["build-lkms"][0]: LKM_UPLOAD_PATH},
-        "build-dfroot": {CI_ARTIFACT_NAME: CI_UPLOAD_PATH},
+        "build-dfroot": {CI_EVIDENCE_ARTIFACT_NAME: CI_EVIDENCE_UPLOAD_PATH},
         "build-release": {
             RELEASE_ARTIFACT_NAME: RELEASE_UPLOAD_PATH,
             PROVENANCE_ARTIFACT_NAME: PROVENANCE_UPLOAD_PATH,
@@ -1841,13 +2002,17 @@ def validate_workflow(text: str) -> None:
     assert_no_secrets_bypass(text)
     assert_exact_test_ci_commands(text)
     assert_exact_step_names(text)
+    assert_job_graph(text)
     assert_exact_release_run_scripts(text)
     assert_exact_dfroot_run_scripts(text)
+    assert_exact_host_gates_run_scripts(text)
+    assert_five_cmake_suites(text)
     assert_pr3_gates(text)
     assert_required_steps_unskippable(text)
     assert_exact_command_lines(text)
     assert_release_scripts_do_not_reference_signing_files(text)
     assert_exact_artifact_inputs(text)
+    assert_ci_evidence_upload_has_no_apk(text)
     assert_exact_triggers(text)
     assert_ddk_image_digest(text)
 
@@ -1949,6 +2114,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("unsigned-apksigner.log", smoke)
         self.assertIn("no release APK was produced", smoke)
         self.assertIn("if ./gradlew :app:clean :app:assembleRelease", smoke)
+        assert_smoke_identity(gradle, smoke)
+
+    def test_signing_smoke_identity_is_isolated_from_production(self) -> None:
+        """The smoke APK can never be a production-named DFRoot_*.apk."""
+        smoke = (ROOT / "tests" / "signing" / "smoke_signed_release.sh").read_text(encoding="utf-8")
+        gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        assert_smoke_identity(gradle, smoke)
+        self.assertIn("-Pdfroot.signingSmokeSkipNative=true", smoke)
+        self.assertNotIn("SIGNED_APK=app/build/outputs/apk/release/DFRoot_", smoke)
+        for fragment in (
+            "df.root.signingsmoke", "4.8-gzif-signingsmoke",
+            "SigningSmoke-${vn}.apk", "DFRoot_${vn}.apk",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, gradle)
+        self.assertIn("SigningSmoke-4.8-gzif-signingsmoke.apk", smoke)
 
     def test_top_level_triggers_are_an_exact_allowlist(self) -> None:
         assert_exact_triggers(self.raw)
@@ -2021,6 +2202,30 @@ class WorkflowPolicyTests(unittest.TestCase):
             "${{ !startsWith(github.ref, 'refs/tags/v') }}",
         )
 
+    def test_job_graph_is_unconditional_host_gates_then_both_build_paths(self) -> None:
+        assert_job_graph(self.raw)
+        host = self.jobs[HOST_GATES_JOB]
+        self.assertIsNone(property_value(host, "if", 4))
+        self.assertEqual(property_value(host, "needs", 4), "build-lkms")
+        self.assertEqual(property_value(self.jobs["build-dfroot"], "needs", 4), HOST_GATES_JOB)
+        self.assertEqual(property_value(self.jobs["build-release"], "needs", 4), HOST_GATES_JOB)
+        self.assertEqual(property_value(self.jobs["publish"], "needs", 4), "build-release")
+        self.assertEqual(mapping(host, "permissions", 4), {"contents": "read"})
+        checkout = action_steps(host, "actions/checkout")[0]
+        self.assertEqual(mapping(checkout, "with", 8).get("persist-credentials"), "false")
+
+    def test_host_gates_carry_all_host_suites_and_the_checkout_sha_assertion(self) -> None:
+        assert_exact_host_gates_run_scripts(self.raw)
+        assert_five_cmake_suites(self.raw)
+        host = self.jobs[HOST_GATES_JOB]
+        script = run_script(named_step(host, CHECKOUT_SHA_STEP))
+        self.assertEqual(script, CHECKOUT_SHA_SCRIPT)
+        self.assertIn("git rev-parse 'HEAD^{commit}'", script)
+        self.assertIn('if [ "$head" != "$GITHUB_SHA" ]', script)
+        self.assertIn('./gradlew :app:testDebugUnitTest', "\n".join(
+            run_script(step) for step in steps(host)
+        ))
+
     def test_test_ci_precedes_and_gates_ddk_and_runs_all_fast_checks(self) -> None:
         names = list(self.jobs)
         self.assertLess(names.index("test-ci"), names.index("build-lkms"))
@@ -2076,7 +2281,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertNotIn(token, RELEASE_UPLOAD_PATH.lower())
                 self.assertNotIn(token, PUBLISH_FILES.lower())
-                self.assertNotIn(token, CI_UPLOAD_PATH.lower())
+                self.assertNotIn(token, CI_EVIDENCE_UPLOAD_PATH.lower())
 
     def test_gpl_license_text_is_sha256_pinned(self) -> None:
         """GPL-3.0.txt must remain the verbatim official GPLv3 text."""
@@ -2092,15 +2297,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn(b"GNU GENERAL PUBLIC LICENSE", data)
         self.assertIn(b"Version 2, June 1991", data)
 
-    def test_unsigned_ci_artifact_conveys_all_notices(self) -> None:
-        """The public unsigned CI artifact carries every licence/notice file."""
-        ci_entries = CI_UPLOAD_PATH.splitlines()
+    def test_ci_evidence_bundle_conveys_all_notices_and_no_apk(self) -> None:
+        """The public CI evidence bundle is exactly the licence/notice set."""
+        ci_entries = CI_EVIDENCE_UPLOAD_PATH.splitlines()
+        self.assertEqual(ci_entries, list(LICENSE_ASSETS))
+        self.assertFalse(any(".apk" in entry.lower() for entry in ci_entries))
+        self.assertFalse(any("outputs" in entry.lower() for entry in ci_entries))
         for asset in LICENSE_ASSETS:
             with self.subTest(asset=asset):
                 self.assertIn(asset, ci_entries)
                 self.assertTrue((ROOT / asset).is_file(), f"missing source asset {asset}")
                 self.assertGreater((ROOT / asset).stat().st_size, 0)
-        assert_safe_artifact_entries("path", CI_UPLOAD_PATH)
+        assert_safe_artifact_entries("path", CI_EVIDENCE_UPLOAD_PATH)
+        assert_ci_evidence_upload_has_no_apk(self.raw)
 
     def test_license_and_notice_assets_are_exact_release_allowlist(self) -> None:
         """Each licence asset is packaged, uploaded and published by name."""
@@ -2137,10 +2346,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(inputs.get("if-no-files-found"), "error")
         self.assertEqual(inputs.get("overwrite"), "true")
 
-    def test_ci_build_is_read_only_builds_debug_only_and_counts_it(self) -> None:
+    def test_ci_build_is_read_only_builds_debug_only_and_uploads_evidence(self) -> None:
         job = self.jobs["build-dfroot"]
-        self.assertEqual(property_value(job, "name", 4), "CI DFRoot APKs")
-        self.assertEqual(property_value(job, "needs", 4), "build-lkms")
+        self.assertEqual(property_value(job, "name", 4), "CI DFRoot evidence gates")
+        self.assertEqual(property_value(job, "needs", 4), HOST_GATES_JOB)
         self.assertEqual(len(action_steps(job, "actions/checkout")), 1)
         self.assertEqual(len(action_steps(job, "actions/setup-java")), 1)
         self.assertEqual(len(action_steps(job, "gradle/actions/setup-gradle")), 1)
@@ -2148,9 +2357,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(len(download), 1)
         self.assertEqual(mapping(download[0], "with", 8).get("name"), "df-lkm-android13-5.15")
         builds = [run_script(step) for step in steps(job) if "./gradlew" in run_script(step)]
-        self.assertEqual(len(builds), 2)  # JVM unit tests + debug-only APK build
-        self.assertIn(":app:testDebugUnitTest", builds[0])
-        self.assertIn("./gradlew :app:assembleDebug", builds[1])
+        self.assertEqual(len(builds), 1)  # Debug compile/content gate only
+        self.assertIn("./gradlew :app:assembleDebug", builds[0])
+        self.assertNotIn(":app:testDebugUnitTest", "\n".join(builds))
         self.assertNotIn(":app:assembleRelease", "\n".join(builds))
         self.assertNotIn("WriteSigningProperties", job)
 
@@ -2163,15 +2372,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("${#debug[@]} -ne 1", run_script(counter))
         self.assertNotIn("release=", run_script(counter))
         inputs = mapping(upload[0], "with", 8)
-        self.assertEqual(inputs.get("name"), CI_ARTIFACT_NAME)
-        self.assertEqual(inputs.get("path"), CI_UPLOAD_PATH)
+        self.assertEqual(inputs.get("name"), CI_EVIDENCE_ARTIFACT_NAME)
+        self.assertEqual(inputs.get("path"), CI_EVIDENCE_UPLOAD_PATH)
         self.assertEqual(inputs.get("if-no-files-found"), "error")
         self.assertEqual(inputs.get("overwrite"), "true")
+        assert_ci_evidence_upload_has_no_apk(self.raw)
+        self.assertNotIn(".apk", CI_EVIDENCE_UPLOAD_PATH.lower())
 
     def test_release_checks_ancestry_before_referencing_any_signing_secret(self) -> None:
         self.assertIn("# Fail before any signing secret is referenced.", self.raw)
         job = self.jobs["build-release"]
-        self.assertEqual(property_value(job, "needs", 4), "build-lkms")
+        self.assertEqual(property_value(job, "needs", 4), HOST_GATES_JOB)
         self.assertEqual(property_value(job, "environment", 4), "release")
         checkout = action_steps(job, "actions/checkout")
         self.assertEqual(len(checkout), 1)
@@ -2302,7 +2513,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             self.assertIn("exit 1", script)
         self.assertIn(
             "./gradlew :app:testDebugUnitTest",
-            run_script(named_step(self.jobs["build-dfroot"], JVM_TEST_STEP)),
+            run_script(named_step(self.jobs[HOST_GATES_JOB], JVM_TEST_STEP)),
         )
 
 
@@ -2863,12 +3074,12 @@ class MutationDetectionTests(unittest.TestCase):
     def test_pr_ci_cannot_be_turned_into_a_release_claim(self) -> None:
         cases = {
             "release artifact name": (
-                "          name: DFRoot-UNVERIFIED-CI\n",
+                "          name: DFRoot-CI-evidence\n",
                 "          name: DFRoot-release\n",
             ),
             "release claim in summary": (
-                '          echo "## CI artifact scope"\n',
-                '          echo "## CI artifact scope: signed release"\n',
+                '          echo "## CI evidence artifact scope"\n',
+                '          echo "## CI evidence artifact scope: signed release"\n',
             ),
             "assembleRelease in PR CI": (
                 "          if ./gradlew :app:assembleDebug --no-daemon --console=plain; then\n",
@@ -2882,6 +3093,113 @@ class MutationDetectionTests(unittest.TestCase):
                     assert_pr3_gates(mutated)
                 with self.assertRaises(AssertionError):
                     validate_workflow(mutated)
+
+    def test_reverting_the_host_gates_graph_is_rejected(self) -> None:
+        """Neither build path may bypass the unconditional host evidence job."""
+        cases = {
+            "build-release back to build-lkms": (
+                "  build-release:\n    name: Signed release APK\n    needs: host-gates\n",
+                "  build-release:\n    name: Signed release APK\n    needs: build-lkms\n",
+            ),
+            "build-dfroot back to build-lkms": (
+                "  build-dfroot:\n    name: CI DFRoot evidence gates\n    needs: host-gates\n",
+                "  build-dfroot:\n    name: CI DFRoot evidence gates\n    needs: build-lkms\n",
+            ),
+            "host-gates made conditional": (
+                "  host-gates:\n    name: Host evidence gates\n    needs: build-lkms\n",
+                "  host-gates:\n    name: Host evidence gates\n    needs: build-lkms\n"
+                "    if: ${{ !(" + TAG_PUSH + ") }}\n",
+            ),
+        }
+        for label, (old, new) in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(old, new)
+                with self.assertRaises(AssertionError):
+                    assert_job_graph(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_readding_an_apk_to_the_ci_upload_is_rejected(self) -> None:
+        """P2-04: PR/branch/manual uploads stay APK-free."""
+        anchor = "          path: |\n            GPL-3.0.txt\n"
+        cases = {
+            "debug APK": "            app/build/outputs/apk/debug/DFRoot_*.apk\n",
+            "release APK": "            app/build/outputs/apk/release/DFRoot_*.apk\n",
+            "generic APK glob": "            build/*.apk\n",
+        }
+        for label, apk_path in cases.items():
+            with self.subTest(mutation=label):
+                mutated = self.mutate(anchor, "          path: |\n" + apk_path + "            GPL-3.0.txt\n")
+                with self.assertRaisesRegex(AssertionError, "CI evidence upload must not include any APK path"):
+                    assert_ci_evidence_upload_has_no_apk(mutated)
+                with self.assertRaisesRegex(AssertionError, "upload path must be exactly"):
+                    assert_exact_artifact_inputs(mutated)
+                with self.assertRaises(AssertionError):
+                    validate_workflow(mutated)
+
+    def test_checkout_sha_assertion_cannot_be_weakened_or_skipped(self) -> None:
+        mutated = self.mutate(
+            "          head=$(git rev-parse 'HEAD^{commit}')\n",
+            "          head=$GITHUB_SHA\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "host-gates/Assert checked-out SHA run script"):
+            assert_exact_host_gates_run_scripts(mutated)
+        with self.assertRaises(AssertionError):
+            validate_workflow(mutated)
+        skipped = self.mutate(
+            "      - name: Assert checked-out SHA\n",
+            "      - name: Assert checked-out SHA\n        if: false\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "must not be skippable or tolerated"):
+            assert_required_steps_unskippable(skipped)
+        with self.assertRaises(AssertionError):
+            validate_workflow(skipped)
+
+    def test_host_suite_moved_back_into_build_dfroot_is_rejected(self) -> None:
+        moved = self.raw.replace(
+            "      - name: Build debug APK (compile/content gate only)\n",
+            "      - name: Host status-protocol tests\n"
+            "        run: |\n"
+            "          set -euo pipefail\n"
+            "          make -C tests/native test\n"
+            "          echo \"native-ok\" > \"$RUNNER_TEMP/marker-native\"\n"
+            "      - name: Build debug APK (compile/content gate only)\n",
+            1,
+        )
+        self.assertNotEqual(moved, self.raw)
+        with self.assertRaisesRegex(AssertionError, "must not repeat host-gates step"):
+            assert_pr3_gates(moved)
+        with self.assertRaises(AssertionError):
+            validate_workflow(moved)
+
+    def test_smoke_identity_reverts_are_rejected(self) -> None:
+        gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        smoke = (ROOT / "tests" / "signing" / "smoke_signed_release.sh").read_text(encoding="utf-8")
+        reverted_gradle = gradle.replace(
+            'applicationId = if (signingSmokeSkipNative) "df.root.signingsmoke" else "df.root"',
+            'applicationId = "df.root"',
+        )
+        reverted_smoke = smoke.replace(
+            "SIGNED_APK=app/build/outputs/apk/release/SigningSmoke-4.8-gzif-signingsmoke.apk",
+            "SIGNED_APK=app/build/outputs/apk/release/DFRoot_4.8-gzif.apk",
+        )
+        dropped_rejection = smoke.replace(
+            "if compgen -G 'app/build/outputs/apk/*/DFRoot_*.apk' >/dev/null; then\n"
+            "    printf 'ERROR: signing smoke produced a production-named DFRoot_*.apk.\\n' >&2\n"
+            "    exit 1\nfi\n",
+            "",
+        )
+        self.assertNotEqual(reverted_gradle, gradle)
+        self.assertNotEqual(reverted_smoke, smoke)
+        self.assertNotEqual(dropped_rejection, smoke)
+        for label, g, s in (
+            ("production applicationId", reverted_gradle, smoke),
+            ("production APK name", gradle, reverted_smoke),
+            ("no DFRoot rejection", gradle, dropped_rejection),
+        ):
+            with self.subTest(mutation=label):
+                with self.assertRaises(AssertionError):
+                    assert_smoke_identity(g, s)
 
     def test_comment_stripping_is_block_scalar_aware(self) -> None:
         sample = (
@@ -2921,8 +3239,8 @@ class BehavioralScriptTests(unittest.TestCase):
         cls.publisher_script = run_script(named_step(jobs["publish"], "Verify release checksum"))
         cls.verify_script = run_script(named_step(jobs["build-release"], "Verify signed release APK"))
         cls.counter_script = run_script(named_step(jobs["build-dfroot"], APK_COUNTER_COMMAND))
-        cls.all_markers_script = run_script(named_step(jobs["build-dfroot"], ALL_MARKERS_STEP))
-        cls.junit_script = run_script(named_step(jobs["build-dfroot"], JUNIT_STEP))
+        cls.all_markers_script = run_script(named_step(jobs[HOST_GATES_JOB], ALL_MARKERS_STEP))
+        cls.junit_script = run_script(named_step(jobs[HOST_GATES_JOB], JUNIT_STEP))
         cls.cache_assert_script = run_script(named_step(jobs["build-release"], CI_CACHE_ASSERT_STEP))
         cls.choke_script = run_script(named_step(jobs["build-release"], UPLOAD_CHOKE_STEP))
 

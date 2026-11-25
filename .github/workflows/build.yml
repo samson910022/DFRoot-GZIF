@@ -113,11 +113,12 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  build-dfroot:
-    name: CI DFRoot APKs
+  # UNCONDITIONAL host evidence gates. This job runs on every event, including
+  # protected tag pushes: a tagged release can never proceed without the full
+  # host suite evidence. It carries the reviewed PR#1 pinned actions only.
+  host-gates:
+    name: Host evidence gates
     needs: build-lkms
-    # Tag pushes take the protected, signed build-release path instead.
-    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -127,6 +128,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      # Fail before any gate if the checkout is not the exact commit being
+      # tested: evidence must always be attributable to GITHUB_SHA.
+      - name: Assert checked-out SHA
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse 'HEAD^{commit}')
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::git HEAD $head != GITHUB_SHA $GITHUB_SHA"
+            exit 1
+          fi
+          echo "Checked out exactly $GITHUB_SHA"
 
       - name: Set up Java 21
         uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
@@ -281,13 +294,47 @@ jobs:
           if [ "$missing" -ne 0 ]; then exit 1; fi
           echo "All native/CMake/JVM suites reached (7/7 markers)"
 
+  build-dfroot:
+    name: CI DFRoot evidence gates
+    needs: host-gates
+    # Tag pushes take the protected, signed build-release path instead.
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Download DF LKM (android13-5.15)
+        # The single-file archive is rooted at out/, so this places the KO at
+        # the exact path embedded by app/src/main/jni/CMakeLists.txt.
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: df-lkm-android13-5.15
+          path: app/src/main/jni/ko/
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
       # This job never has signing material. app/build.gradle.kts deliberately
       # disables/fails closed on the release variant without real signing
       # material, so these events build the debug-keystore-signed Debug APK
-      # only. It is uploaded below as an explicitly UNVERIFIED CI artifact; the
-      # protected tag path (build-release) is the only signed/distributable
-      # path and inherits the full gate chain below.
-      - name: Build debug APK (UNVERIFIED CI artifact)
+      # only, strictly as a compile/content gate. NO APK is uploaded or
+      # distributed from PR/branch/manual events: the CI upload below is a
+      # licence/notice evidence bundle only. The protected tag path
+      # (build-release) is the only signed/distributable path and inherits the
+      # unconditional host gates before it can run.
+      - name: Build debug APK (compile/content gate only)
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
@@ -345,21 +392,19 @@ jobs:
             exit 1
           fi
 
-      - name: Report UNVERIFIED CI artifact scope
+      - name: Report CI evidence-only artifact scope
         run: |
           {
-            echo "## CI artifact scope"
-            echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."
-            echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."
+            echo "## CI evidence artifact scope"
+            echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
+            echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload UNVERIFIED CI APKs
+      - name: Upload DFRoot-CI evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: DFRoot-UNVERIFIED-CI
+          name: DFRoot-CI-evidence
           path: |
-            app/build/outputs/apk/debug/DFRoot_*.apk
-            app/build/outputs/apk/release/DFRoot_*.apk
             GPL-3.0.txt
             LICENSE
             NOTICE
@@ -369,7 +414,7 @@ jobs:
 
   build-release:
     name: Signed release APK
-    needs: build-lkms
+    needs: host-gates
     # Tag-only, protected path. Every distributable APK is gate-verified below
     # before the signed artifact is uploaded and before publish can run.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}

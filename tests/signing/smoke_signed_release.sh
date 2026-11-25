@@ -75,8 +75,25 @@ make signing.properties
 [[ $(stat -c '%a' keystore.jks) == 600 ]]
 
 ./gradlew :app:assembleRelease --no-daemon --console=plain -Pdfroot.signingSmokeSkipNative=true
-SIGNED_APK=app/build/outputs/apk/release/DFRoot_4.8-gzif.apk
+
+# Identity isolation: this smoke uses a distinct applicationId/versionName and
+# must emit exactly one APK with the isolated SigningSmoke name. A production
+# DFRoot_*.apk must NEVER appear, even if some path tried to reuse this build.
+SIGNED_APK=app/build/outputs/apk/release/SigningSmoke-4.8-gzif-signingsmoke.apk
+[[ ${SIGNED_APK##*/} == 'SigningSmoke-4.8-gzif-signingsmoke.apk' ]]
 [[ -f $SIGNED_APK ]]
+if compgen -G 'app/build/outputs/apk/*/DFRoot_*.apk' >/dev/null; then
+    printf 'ERROR: signing smoke produced a production-named DFRoot_*.apk.\n' >&2
+    exit 1
+fi
+shopt -s nullglob
+release_apks=(app/build/outputs/apk/release/*.apk)
+shopt -u nullglob
+if [[ ${#release_apks[@]} -ne 1 || ${release_apks[0]} != "$SIGNED_APK" ]]; then
+    printf 'ERROR: expected exactly the isolated signing-smoke APK, found: %s\n' \
+        "${release_apks[*]:-<none>}" >&2
+    exit 1
+fi
 "$APKSIGNER" verify --verbose --print-certs "$SIGNED_APK"
 
 # With no real signing material, PR #3 disables the release variant outright:
@@ -88,8 +105,8 @@ if ./gradlew :app:clean :app:assembleRelease --no-daemon --console=plain \
     cat unsigned-release.log >&2
     exit 1
 fi
-if compgen -G 'app/build/outputs/apk/release/*.apk' >/dev/null; then
-    printf 'ERROR: an unsigned/dummy release APK was produced without real signing material.\n' >&2
+if compgen -G 'app/build/outputs/apk/*/*.apk' >/dev/null; then
+    printf 'ERROR: an unsigned/dummy APK was produced without real signing material.\n' >&2
     exit 1
 fi
 printf 'Unsigned/dummy release rejected as expected: no release APK was produced.\n'

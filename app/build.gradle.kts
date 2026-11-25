@@ -16,7 +16,9 @@ plugins {
 // SIGNING-SMOKE ONLY: tests/signing/smoke_signed_release.sh exercises signing
 // material and apksigner without the reviewed KO/NDK bytes. It opts out of the
 // native build with an explicit property; a distributable APK can never use it
-// because the release byte gate requires a verified libdfroot.so.
+// because the release byte gate requires a verified libdfroot.so. The smoke
+// build is isolated from production identity (applicationId, versionName and
+// output file name) so it can never be mistaken for a DFRoot_*.apk release.
 val signingSmokeSkipNative = providers.gradleProperty("dfroot.signingSmokeSkipNative").orNull == "true"
 
 val signingProps = Properties()
@@ -79,11 +81,14 @@ android {
     }
 
     defaultConfig {
-        applicationId = "df.root"
+        // Distinct identity for the signing smoke: even if its APK escaped the
+        // test harness, it could never be confused with a production DFRoot
+        // release by package name, version string or file name.
+        applicationId = if (signingSmokeSkipNative) "df.root.signingsmoke" else "df.root"
         minSdk = 32
         targetSdk = 36
         versionCode = 408
-        versionName = "4.8-gzif"
+        versionName = if (signingSmokeSkipNative) "4.8-gzif-signingsmoke" else "4.8-gzif"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -201,7 +206,9 @@ androidComponents {
     }
     onVariants { variant ->
         variant.outputs.forEach { output ->
-            output.outputFileName.set(output.versionName.map { vn -> "DFRoot_${vn}.apk" })
+            output.outputFileName.set(output.versionName.map { vn ->
+                if (signingSmokeSkipNative) "SigningSmoke-${vn}.apk" else "DFRoot_${vn}.apk"
+            })
         }
     }
 }
