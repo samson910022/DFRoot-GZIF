@@ -2,6 +2,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): verify goAsync claim gating, coalescing, prompt return, and narrow receiver ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): make finish observation deterministic and add real-store restart coverage. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): model the Start at Boot component state in production-path tests. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): drive OFF-at-admission work on a controllable executor and assert the correlated REJECTED outcome. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -377,12 +378,31 @@ public class BootReceiverBoundaryTest {
 
         ServiceController<ExploitService> controller = Robolectric.buildService(ExploitService.class)
                 .create().withIntent(request);
+        // Hold the blocking admission work on a controllable executor instead of
+        // the real single-thread daemon worker. onStartCommand only queues it;
+        // driving it explicitly removes the race against onDestroy() so the
+        // correlated OFF-at-admission outcome is deterministic.
+        CapturingExecutor admission = new CapturingExecutor();
+        controller.get().setAdmissionExecutorForTesting(admission);
         try {
             assertEquals(Service.START_NOT_STICKY,
                     controller.get().onStartCommand(request, 0, 91));
+            // The request is queued, not admitted inline by onStartCommand.
+            assertEquals(1, admission.tasks.size());
             assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
             assertEquals(0, workerTasks.get());
-            assertNull(coordinator.getSnapshot().getRequestFailure());
+
+            // Drive the queued worker explicitly. It re-checks the component,
+            // observes OFF, and publishes this request's REJECTED outcome before
+            // destroy() runs, so CANCELLED cannot win the claim.
+            admission.runAll();
+            assertEquals(0, admission.tasks.size());
+            RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+            assertEquals(RunCoordinator.State.IDLE, rejection.getState());
+            assertEquals(RunCoordinator.RequestOutcome.REJECTED, rejection.getRequestOutcome());
+            assertNotNull(rejection.getRequestFailure());
+            assertTrue(rejection.getRequestFailure().contains("DISABLED"));
+            assertEquals(0, workerTasks.get());
             assertNull(shadowApplication.getNextStartedService());
         } finally {
             controller.destroy();

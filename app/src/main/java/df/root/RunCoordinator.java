@@ -11,6 +11,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): persisted-attempt recovery is a post-process-death, trusted-caller-only boundary. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): unverified diagnostics name only the observed cause; an unknown exit or exception never claims native rc=7. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): gate unattended admission immediately before the durable publish and re-check authorization before engine start. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): publish request-correlated acceptance, rejection and cancellation without changing operation ownership. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -46,6 +47,18 @@ public final class RunCoordinator {
         RUNNING,
         INDETERMINATE,
         TERMINAL
+    }
+
+    /**
+     * Observable outcome of a specific client request. This is deliberately
+     * separate from {@link State}: a rejection or cancellation of request B
+     * must be reportable while request A's privileged operation stays active.
+     */
+    public enum RequestOutcome {
+        NONE,
+        ACCEPTED,
+        REJECTED,
+        CANCELLED
     }
 
     /** Engine implementations return only after actual completion, never merely on timeout. */
@@ -151,6 +164,9 @@ public final class RunCoordinator {
     private RunResult result;
     private String reason;
     private String requestFailure;
+    /** Request correlation published in snapshots; never an operation owner. */
+    private String requestId;
+    private RequestOutcome requestOutcome = RequestOutcome.NONE;
     private long logCharacters;
     private long logSequence;
     private boolean initializationDone;
@@ -418,12 +434,28 @@ public final class RunCoordinator {
      */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease) {
-        return submit(context, requestedMode, lease, null);
+        return submit(context, requestedMode, lease, (Long) null, null);
     }
 
     /** Generation-bound manual admission; boot and legacy callers may pass {@code null}. */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease, Long expectedGeneration) {
+        return submit(context, requestedMode, lease, expectedGeneration, null);
+    }
+
+    /** Request-correlated admission for callers that originate a user/service request. */
+    public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
+                             ResourceLease lease, String requestId) {
+        return submit(context, requestedMode, lease, null, requestId);
+    }
+
+    /**
+     * Admits one operation or rejects the request. The request ID is only a
+     * correlation token for the originating UI: it never transfers ownership
+     * and is never used to retry, replay or cancel accepted work.
+     */
+    public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
+                             ResourceLease lease, Long expectedGeneration, String requestId) {
         if (context == null) {
             return Submission.rejected(null, "context is required");
         }
@@ -491,6 +523,8 @@ public final class RunCoordinator {
                 // the authorization decision; noteRequestRejected() below only
                 // notifies observers, so a new submit cannot interleave here.
                 requestFailure = unauthorizedDetail;
+                this.requestId = requestId;
+                requestOutcome = RequestOutcome.REJECTED;
                 rejectedSnapshot = buildSnapshotLocked();
                 snapshot = rejectedSnapshot;
             }
@@ -522,6 +556,8 @@ public final class RunCoordinator {
                 result = null;
                 reason = null;
                 requestFailure = null;
+                this.requestId = requestId;
+                requestOutcome = RequestOutcome.ACCEPTED;
                 state = State.STARTING;
                 log.clear();
                 logCharacters = 0L;
@@ -533,10 +569,12 @@ public final class RunCoordinator {
         if (unauthorizedDetail != null) {
             // Fresh, observable rejection with an explicit reason. The caller
             // keeps its own lease; no barrier and no worker were created.
-            notifyListeners(rejectedSnapshot);
+            // Correlated delivery is not subject to the identity guard: a newer
+            // operation must never swallow this request's own outcome.
+            notifyListeners(rejectedSnapshot, true);
             return Submission.rejected(null, unauthorizedDetail);
         }
-        notifyListeners(admitted);
+        notifyListeners(admitted, true);
 
         final Operation acceptedOperation = operation;
         try {
@@ -560,8 +598,52 @@ public final class RunCoordinator {
     }
 
     /**
-     * Publishes a service-side request rejection without changing operation result
-     * semantics. Active work and cleanup always take precedence over this signal.
+     * Publishes a request-correlated outcome WITHOUT changing operation state,
+     * result, operation ID, mode, generation, durable attempt or log.
+     *
+     * <p>Unlike the legacy uncorrelated signal, this MUST work while another
+     * operation is ACTIVE or its cleanup is pending: request B can be rejected
+     * or cancelled while request A keeps exclusive ownership of the engine.</p>
+     *
+     * @param requestId the originating UI's request token ({@code null} allowed
+     *                  for legacy/unidentified senders)
+     * @param outcome   acceptance, rejection or cancellation of THAT request
+     * @param reason    honest cause for rejection/cancellation; may be null
+     */
+    void noteRequestOutcome(String requestId, RequestOutcome outcome, String reason) {
+        Objects.requireNonNull(outcome, "outcome");
+        Snapshot published;
+        synchronized (lock) {
+            this.requestId = requestId;
+            this.requestOutcome = outcome;
+            String detail = reason == null || reason.isEmpty() ? defaultReason(outcome) : reason;
+            this.requestFailure = detail;
+            published = buildSnapshotLocked();
+            snapshot = published;
+        }
+        // Deliberately bypass the identity guard: a concurrent newer snapshot
+        // must not silently swallow a request's own terminal outcome. The UI
+        // matches on request ID before acting on it.
+        notifyListeners(published, true);
+    }
+
+    private static String defaultReason(RequestOutcome outcome) {
+        switch (outcome) {
+            case REJECTED:
+                return "request rejected";
+            case CANCELLED:
+                return "request cancelled: service was destroyed before admission";
+            case ACCEPTED:
+            case NONE:
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * Legacy, uncorrelated rejection signal retained for callers that have no
+     * request token. It preserves the original "active work wins" suppression;
+     * correlated callers use {@link #noteRequestOutcome} instead.
      */
     void noteRequestRejected(String requestFailure) {
         Snapshot rejected;
@@ -574,6 +656,8 @@ public final class RunCoordinator {
             String detail = requestFailure == null || requestFailure.isEmpty()
                     ? "request rejected" : requestFailure;
             this.requestFailure = detail;
+            requestId = null;
+            requestOutcome = RequestOutcome.REJECTED;
             rejected = buildSnapshotLocked();
             snapshot = rejected;
         }
@@ -1105,14 +1189,26 @@ public final class RunCoordinator {
 
     private Snapshot buildSnapshotLocked() {
         return new Snapshot(state, operationId, mode, configGeneration, result, reason,
-                requestFailure, Collections.unmodifiableList(new ArrayList<>(log)));
+                requestFailure, requestId, requestOutcome,
+                Collections.unmodifiableList(new ArrayList<>(log)));
     }
 
     private void notifyListeners(Snapshot changed) {
+        notifyListeners(changed, false);
+    }
+
+    /**
+     * @param correlated true for request-outcome publications, which must reach
+     *                   the originating observer even if newer state has since
+     *                   been published (the observer matches on request ID).
+     */
+    private void notifyListeners(Snapshot changed, boolean correlated) {
         try {
             mainExecutor.execute(() -> {
                 // Posted callbacks can be delivered after a newer state or operation.
-                if (changed != snapshot) {
+                // Only ordinary state snapshots are suppressed; a correlated
+                // outcome is the acknowledgement its own request is waiting for.
+                if (!correlated && changed != snapshot) {
                     return;
                 }
                 for (Listener listener : listeners) {
@@ -1177,11 +1273,21 @@ public final class RunCoordinator {
         private final RunResult result;
         private final String reason;
         private final String requestFailure;
+        private final String requestId;
+        private final RequestOutcome requestOutcome;
         private final List<LogEntry> log;
 
         Snapshot(State state, String operationId, RunConfig.ExecutionMode mode,
                  long configGeneration, RunResult result, String reason,
                  String requestFailure, List<LogEntry> log) {
+            this(state, operationId, mode, configGeneration, result, reason, requestFailure,
+                    null, RequestOutcome.NONE, log);
+        }
+
+        Snapshot(State state, String operationId, RunConfig.ExecutionMode mode,
+                 long configGeneration, RunResult result, String reason,
+                 String requestFailure, String requestId, RequestOutcome requestOutcome,
+                 List<LogEntry> log) {
             this.state = state;
             this.operationId = operationId;
             this.mode = mode;
@@ -1189,6 +1295,8 @@ public final class RunCoordinator {
             this.result = result;
             this.reason = reason;
             this.requestFailure = requestFailure;
+            this.requestId = requestId;
+            this.requestOutcome = requestOutcome == null ? RequestOutcome.NONE : requestOutcome;
             this.log = log;
         }
 
@@ -1216,9 +1324,19 @@ public final class RunCoordinator {
             return reason;
         }
 
-        /** Last service-side request rejection, cleared atomically on accepted admission. */
+        /** Reason accompanying this snapshot's request outcome, when any. */
         public String getRequestFailure() {
             return requestFailure;
+        }
+
+        /** Request token this outcome belongs to; null for legacy/unidentified senders. */
+        public String getRequestId() {
+            return requestId;
+        }
+
+        /** Acceptance/rejection/cancellation of {@link #getRequestId()}. */
+        public RequestOutcome getRequestOutcome() {
+            return requestOutcome;
         }
 
         public List<LogEntry> getLog() {

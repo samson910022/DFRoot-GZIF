@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify Activity detachment, service-only requests, coordinator observation, and single-flight UI gating. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recheck service request wiring against operation-ID publication. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): cover request-correlated acknowledgement, overlapping rejections and cancelled service-local work. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -7,6 +8,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
@@ -265,8 +267,134 @@ public class MainActivityTest {
 
         assertEquals(1, starter.requests.size());
         assertEquals(Long.valueOf(41), starter.requests.get(0));
+        assertNotNull(starter.requestIds.get(0));
         assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
         assertEquals("", output.getText().toString());
+    }
+
+    /** An unrelated acceptance must not be mistaken for this Activity's acknowledgement. */
+    @Test
+    public void unrelatedAcceptedSnapshotDoesNotClearAnotherRequestsPending() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 42), true);
+        installIdleCoordinator();
+        MainActivity first = launch();
+        MainActivity second = launch();
+
+        first.findViewById(R.id.btnRun).performClick();
+        second.findViewById(R.id.btnRun).performClick();
+        Intent firstRequest = nextServiceRequest();
+        String firstRequestId = firstRequest.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(firstRequestId);
+        assertNotNull(nextServiceRequest().getStringExtra(ExploitService.EXTRA_REQUEST_ID));
+
+        ServiceController<ExploitService> controller = Robolectric.buildService(
+                ExploitService.class).create().withIntent(firstRequest);
+        serviceControllers.add(controller);
+        controller.get().setAdmissionExecutorForTesting(Runnable::run);
+        controller.startCommand(0, 201);
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot admitted = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.RequestOutcome.ACCEPTED, admitted.getRequestOutcome());
+        assertEquals(firstRequestId, admitted.getRequestId());
+        assertFalse(ReflectionHelpers.getField(first, "mManualStartPending"));
+        assertTrue("a different request's acceptance must not clear B's pending state",
+                ReflectionHelpers.getField(second, "mManualStartPending"));
+        assertEquals("", output(second));
+        assertFalse(second.findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, immediateEngine.calls.get());
+    }
+
+    /** A rejection for B while A is active must reach B only, without changing A. */
+    @Test
+    public void correlatedRejectionWhileAnotherOperationIsActiveClearsOnlyItsOwnPending() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 43), true);
+        installIdleCoordinator();
+        MainActivity first = launch();
+        MainActivity second = launch();
+
+        first.findViewById(R.id.btnRun).performClick();
+        second.findViewById(R.id.btnRun).performClick();
+        Intent firstRequest = nextServiceRequest();
+        Intent secondRequest = nextServiceRequest();
+        String secondRequestId = secondRequest.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(secondRequestId);
+
+        ServiceController<ExploitService> acceptedController = Robolectric.buildService(
+                ExploitService.class).create().withIntent(firstRequest);
+        serviceControllers.add(acceptedController);
+        acceptedController.get().setAdmissionExecutorForTesting(Runnable::run);
+        acceptedController.startCommand(0, 202);
+        coordinatorObservers.runAll();
+        RunCoordinator.Snapshot admitted = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.STARTING, admitted.getState());
+
+        ServiceController<ExploitService> rejectedController = Robolectric.buildService(
+                ExploitService.class).create().withIntent(secondRequest);
+        serviceControllers.add(rejectedController);
+        rejectedController.get().setAdmissionExecutorForTesting(Runnable::run);
+        rejectedController.startCommand(0, 203);
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, rejection.getRequestOutcome());
+        assertEquals(secondRequestId, rejection.getRequestId());
+        assertNotNull(rejection.getRequestFailure());
+        assertTrue(rejection.getRequestFailure().contains("active"));
+        assertEquals(admitted.getState(), rejection.getState());
+        assertSame(admitted.getResult(), rejection.getResult());
+        assertEquals(admitted.getOperationId(), rejection.getOperationId());
+        assertEquals(admitted.getConfigGeneration(), rejection.getConfigGeneration());
+        assertEquals(admitted.getLog(), rejection.getLog());
+
+        assertFalse(ReflectionHelpers.getField(second, "mManualStartPending"));
+        assertTrue(output(second).contains("Operation request rejected"));
+        assertTrue(output(second).contains("active"));
+        assertFalse("B's rejection must not be attributed to A",
+                output(first).contains("Operation request rejected"));
+        assertFalse(ReflectionHelpers.getField(first, "mManualStartPending"));
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse("active work must keep the foreground host alive",
+                Shadows.shadowOf(rejectedController.get()).isStoppedBySelf());
+    }
+
+    /** Destruction before admission cancels only service-local work, never an engine. */
+    @Test
+    public void destroyedBeforeAdmissionPublishesCancelledAndClearsPendingWithoutEngine() {
+        MainActivity activity = launchReady();
+
+        activity.findViewById(R.id.btnRun).performClick();
+        Intent request = nextServiceRequest();
+        String requestId = request.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(requestId);
+
+        ServiceController<ExploitService> controller = Robolectric.buildService(
+                ExploitService.class).create().withIntent(request);
+        QueueExecutor admission = new QueueExecutor();
+        controller.get().setAdmissionExecutorForTesting(admission);
+        controller.startCommand(0, 204);
+        assertTrue(admission.hasNext());
+        assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
+
+        controller.destroy();
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot cancelled = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.RequestOutcome.CANCELLED, cancelled.getRequestOutcome());
+        assertEquals(requestId, cancelled.getRequestId());
+        assertTrue(cancelled.getRequestFailure().contains("cancel"));
+        assertEquals(RunCoordinator.State.IDLE, cancelled.getState());
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(output(activity).contains("Operation request cancelled"));
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse(coordinatorWorker.hasNext());
+
+        // A task that is later dequeued must be a strict no-op.
+        admission.runAll();
+        assertSame(cancelled, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse(coordinatorWorker.hasNext());
     }
 
     @Test
@@ -276,8 +404,12 @@ public class MainActivityTest {
         MainActivity.installServiceStarterForTesting(activity, starter);
 
         activity.findViewById(R.id.btnRun).performClick();
+        coordinatorObservers.runAll();
 
         assertEquals(1, starter.calls);
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED,
+                coordinator.getSnapshot().getRequestOutcome());
         assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
         assertTrue(output(activity).contains("Unable to start operation service"));
     }
@@ -1243,10 +1375,12 @@ public class MainActivityTest {
 
     private static final class RecordingStarter implements MainActivity.ServiceStarter {
         final List<Long> requests = new ArrayList<>();
+        final List<String> requestIds = new ArrayList<>();
 
         @Override
-        public void startManual(long expectedGeneration) {
+        public void startManual(long expectedGeneration, String requestId) {
             requests.add(expectedGeneration);
+            requestIds.add(requestId);
         }
     }
 
@@ -1254,7 +1388,7 @@ public class MainActivityTest {
         int calls;
 
         @Override
-        public void startManual(long expectedGeneration) {
+        public void startManual(long expectedGeneration, String requestId) {
             calls++;
             throw new IllegalStateException("service start denied");
         }
@@ -1271,12 +1405,12 @@ public class MainActivityTest {
         }
 
         @Override
-        public void startManual(long expectedGeneration) {
+        public void startManual(long expectedGeneration, String requestId) {
             requests.add(expectedGeneration);
             FakeLease lease = new FakeLease();
             RunCoordinator.Submission submission = coordinator.submit(
                     RuntimeEnvironment.getApplication(), RunConfig.ExecutionMode.MANUAL, lease,
-                    expectedGeneration);
+                    expectedGeneration, requestId);
             (submission.isAccepted() ? acceptedLeases : rejectedLeases).add(lease);
         }
     }

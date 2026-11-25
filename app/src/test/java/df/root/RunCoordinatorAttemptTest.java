@@ -4,12 +4,15 @@
 // Modified 2026-11-25 (DFRoot GZIF): pin post-process-death-only persisted recovery and checked clears. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin honest unverified causes and no clear/admission from unconfirmed results. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove an OFF transition during a blocked publish yields a proven pre-effect precheck failure. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): prove a correlated rejection cannot clear the durable attempt of an active operation. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
@@ -100,6 +103,42 @@ public class RunCoordinatorAttemptTest {
         assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
                 new FakeLease()).isAccepted());
         assertEquals(2, engine.calls.get());
+    }
+
+    @Test
+    public void correlatedRejectionDuringAnActiveOperationKeepsTheDurableAttempt() throws Exception {
+        QueueExecutor queuedWorker = new QueueExecutor();
+        RunCoordinator coordinator = new RunCoordinator(repository, queuedWorker, Runnable::run,
+                engine, 0L, store, reader, Runnable::run);
+        coordinator.initialize();
+        FakeLease lease = new FakeLease();
+        engine.results.add(NativeResultMapper.map(0));
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                "ui-request-A").isAccepted());
+        RunCoordinator.Snapshot admitted = coordinator.getSnapshot();
+        OperationAttempt barrier = assertStoreAttempt(admitted.getOperationId());
+
+        coordinator.noteRequestOutcome("ui-request-B",
+                RunCoordinator.RequestOutcome.REJECTED, "operation A is active");
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertNotSame(admitted, rejection);
+        assertEquals("ui-request-B", rejection.getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, rejection.getRequestOutcome());
+        assertEquals(admitted.getState(), rejection.getState());
+        assertSame(admitted.getResult(), rejection.getResult());
+        assertEquals(barrier.getOperationId(), assertStoreAttempt(
+                admitted.getOperationId()).getOperationId());
+        assertEquals(0, lease.closeCount.get());
+        assertEquals(0, engine.calls.get());
+
+        // The admitted operation still runs exactly once to its confirmed result.
+        queuedWorker.runAll();
+        assertEquals(1, engine.calls.get());
+        assertNull(store.load());
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(repository.isFrozen());
     }
 
     @Test

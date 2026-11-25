@@ -4,6 +4,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): prove native rc7 keeps ownership until an explicit recovery. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin recovery to real engine completion and single-claim concurrency. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the final unattended gate, fail-closed reads, production wiring, and no revocation after engine start. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): prove request-correlated outcomes are fresh and never alter active operation ownership. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -116,6 +117,102 @@ public class RunCoordinatorTest {
         assertSame(starting, coordinator.getSnapshot());
         assertEquals(1, queuedWorker.size());
         assertEquals(0, lease.closeCount.get());
+    }
+
+    @Test
+    public void submitWithRequestIdPublishesAcceptedCorrelationAtomically() {
+        QueueExecutor queuedWorker = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(verifiedRepository(), queuedWorker,
+                Runnable::run);
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                "ui-request-A").isAccepted());
+
+        RunCoordinator.Snapshot admitted = coordinator.getSnapshot();
+        assertEquals("ui-request-A", admitted.getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.ACCEPTED, admitted.getRequestOutcome());
+        assertNull(admitted.getRequestFailure());
+        assertEquals(RunCoordinator.State.STARTING, admitted.getState());
+        assertEquals(0, lease.closeCount.get());
+        assertEquals(1, queuedWorker.size());
+    }
+
+    @Test
+    public void correlatedOutcomeDuringAnActiveOperationIsFreshAndLeavesOwnershipIntact()
+            throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        RunCoordinator coordinator = coordinator(repository, worker, Runnable::run);
+        FakeEngine.Plan plan = engine.blockingPlan();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                "ui-request-A").isAccepted());
+        assertTrue(plan.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        RunCoordinator.Snapshot admitted = coordinator.getSnapshot();
+        String operationId = admitted.getOperationId();
+        int logSize = admitted.getLog().size();
+
+        coordinator.noteRequestOutcome("ui-request-B",
+                RunCoordinator.RequestOutcome.REJECTED, "operation " + operationId + " is active");
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertNotSame(admitted, rejection);
+        assertEquals("ui-request-B", rejection.getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, rejection.getRequestOutcome());
+        assertTrue(rejection.getRequestFailure().contains("active"));
+        assertEquals(admitted.getState(), rejection.getState());
+        assertSame(admitted.getResult(), rejection.getResult());
+        assertEquals(operationId, rejection.getOperationId());
+        assertEquals(admitted.getMode(), rejection.getMode());
+        assertEquals(admitted.getConfigGeneration(), rejection.getConfigGeneration());
+        assertEquals(logSize, rejection.getLog().size());
+
+        assertEquals(RunCoordinator.State.RUNNING, rejection.getState());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+        assertEquals(1, engine.callCount());
+
+        RunResult observed = NativeResultMapper.map(0);
+        plan.finish(observed);
+        awaitTerminal(coordinator);
+        assertSame(observed, coordinator.getSnapshot().getResult());
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(repository.isFrozen());
+    }
+
+    @Test
+    public void correlatedOutcomeDuringCleanupIsPublishedWhileLegacyRejectionIsSuppressed()
+            throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        RunCoordinator coordinator = coordinator(repository, worker, Runnable::run);
+        engine.immediatePlan(NativeResultMapper.map(0));
+        BlockingCloseLease lease = new BlockingCloseLease();
+        try {
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                    "ui-request-A").isAccepted());
+            await(lease.closeEntered);
+            RunCoordinator.Snapshot duringCleanup = coordinator.getSnapshot();
+
+            coordinator.noteRequestRejected("legacy signal must be suppressed");
+            assertSame(duringCleanup, coordinator.getSnapshot());
+
+            coordinator.noteRequestOutcome("ui-request-C",
+                    RunCoordinator.RequestOutcome.CANCELLED, "service destroyed before admission");
+            RunCoordinator.Snapshot cancelled = coordinator.getSnapshot();
+            assertNotSame(duringCleanup, cancelled);
+            assertEquals("ui-request-C", cancelled.getRequestId());
+            assertEquals(RunCoordinator.RequestOutcome.CANCELLED, cancelled.getRequestOutcome());
+            assertEquals(duringCleanup.getState(), cancelled.getState());
+            assertSame(duringCleanup.getResult(), cancelled.getResult());
+            assertEquals(duringCleanup.getOperationId(), cancelled.getOperationId());
+            assertEquals(1, lease.closeCount.get());
+        } finally {
+            lease.releaseClose.countDown();
+        }
+        awaitTerminal(coordinator);
+        assertFalse(repository.isFrozen());
     }
 
     @Test

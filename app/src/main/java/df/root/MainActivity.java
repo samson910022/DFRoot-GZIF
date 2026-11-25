@@ -2,6 +2,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): request service-owned manual work and detach all execution/observation from the Activity lifecycle. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): add a read-only availability diagnostic from the authoritative preflight plan. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): compute the availability diagnostic off the UI thread with a stale-result guard. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): mint a request ID per click and clear pending only on that request's correlated outcome. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -31,6 +32,7 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -73,8 +75,9 @@ public class MainActivity extends Activity {
     private boolean mApplyingConfiguration;
     private long mClearedManagerGeneration = -1;
     private boolean mManualStartPending;
+    /** Click-time token; only an outcome for THIS request may clear pending state. */
+    private String mPendingRequestId;
     private RunCoordinator.Snapshot mSuppressedSnapshot;
-    private RunCoordinator.Snapshot mReportedRequestFailureSnapshot;
     private boolean mDestroyed;
     private long mDiagnosticSequence;
     private String mCachedDiagnostic = "";
@@ -93,8 +96,9 @@ public class MainActivity extends Activity {
         spinnerSuManager = findViewById(R.id.spinnerSuManager);
         mConfiguration = ConfigurationRepository.get(mDeCtx);
         mCoordinator = RunCoordinator.get(mDeCtx);
-        mServiceStarter = expectedGeneration ->
-                ExploitService.start(this, ExploitService.ACTION_MANUAL, expectedGeneration);
+        mServiceStarter = (expectedGeneration, requestId) ->
+                ExploitService.start(this, ExploitService.ACTION_MANUAL,
+                        expectedGeneration, requestId);
 
         PackageManager pm = getPackageManager();
         List<SuManagerEntry> entries = new ArrayList<>();
@@ -196,20 +200,26 @@ public class MainActivity extends Activity {
             return;
         }
         long expectedGeneration = confirmed.getGeneration();
-        // Optimistically block a second click until the coordinator publishes a new snapshot.
+        // One fresh token per click. No snapshot other than an outcome for THIS
+        // token (boot, another operation, an older request) may clear pending.
+        String requestId = UUID.randomUUID().toString();
+        mPendingRequestId = requestId;
+        // Optimistically block a second click until this request is acknowledged.
         mManualStartPending = true;
         mSuppressedSnapshot = mCoordinator.getSnapshot();
         mUiMessages.setLength(0);
         renderOutput();
         updateRunButton();
         try {
-            mServiceStarter.startManual(expectedGeneration);
+            mServiceStarter.startManual(expectedGeneration, requestId);
         } catch (RuntimeException e) {
             Log.w(TAG, "manual service start failed", e);
-            mManualStartPending = false;
-            mSuppressedSnapshot = null;
-            appendUiMessage("Unable to start operation service: " + e.getMessage() + "\n");
-            updateRunButton();
+            // No service was started: publish the correlated rejection for this
+            // request so the pending state is cleared through the same path as
+            // a service-side rejection.
+            mCoordinator.noteRequestOutcome(requestId,
+                    RunCoordinator.RequestOutcome.REJECTED,
+                    "Unable to start operation service: " + e.getMessage());
         }
     }
 
@@ -279,24 +289,44 @@ public class MainActivity extends Activity {
     }
 
     private void renderRunSnapshot(RunCoordinator.Snapshot snapshot) {
-        if (mDestroyed || snapshot == null) {
+        if (mDestroyed || snapshot == null || mCoordinator == null) {
             return;
         }
-        if (mSuppressedSnapshot != null && snapshot != mSuppressedSnapshot) {
-            mSuppressedSnapshot = null;
-            mManualStartPending = false;
+        // Operation rendering always uses the newest state; a correlated outcome
+        // published during another active operation must not regress its view.
+        RunCoordinator.Snapshot latest = mCoordinator.getSnapshot();
+        if (latest == null) {
+            return;
         }
-        if (snapshot.getRequestFailure() != null) {
-            if (mReportedRequestFailureSnapshot != snapshot) {
-                mReportedRequestFailureSnapshot = snapshot;
-                appendUiMessage("Operation request rejected: " + snapshot.getRequestFailure() + "\n");
+        if (mManualStartPending && mPendingRequestId != null
+                && mPendingRequestId.equals(snapshot.getRequestId())) {
+            if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.ACCEPTED) {
+                clearPendingRequest();
+            } else if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.REJECTED) {
+                clearPendingRequest();
+                appendUiMessage("Operation request rejected: "
+                        + requestDetail(snapshot) + "\n");
+            } else if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.CANCELLED) {
+                clearPendingRequest();
+                appendUiMessage("Operation request cancelled: "
+                        + requestDetail(snapshot) + "\n");
             }
-        } else {
-            mReportedRequestFailureSnapshot = null;
+            // NONE and any other request ID are unrelated and deliberately ignored.
         }
         renderOutput();
         updateRunButton();
-        showTerminalResultOnce(snapshot);
+        showTerminalResultOnce(latest);
+    }
+
+    private void clearPendingRequest() {
+        mManualStartPending = false;
+        mSuppressedSnapshot = null;
+        mPendingRequestId = null;
+    }
+
+    private static String requestDetail(RunCoordinator.Snapshot snapshot) {
+        String detail = snapshot.getRequestFailure();
+        return detail == null || detail.isEmpty() ? "no reason supplied" : detail;
     }
 
     private void renderOutput() {
@@ -481,7 +511,7 @@ public class MainActivity extends Activity {
     }
 
     interface ServiceStarter {
-        void startManual(long expectedGeneration);
+        void startManual(long expectedGeneration, String requestId);
     }
 
     static void installServiceStarterForTesting(MainActivity activity, ServiceStarter starter) {
