@@ -1,5 +1,52 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-25 — R4.3: publication confirmation narrows R2-14
+
+Fourth repair round on `fix/app-correctness-safety` (after `6348c71` / `b8526d8`).
+Scope: R2-14 only. No device/ADB, payload, privileged container, APK assembly,
+Java suite, loader pin, boot claim, preflight, kill/signal, progress-marker or
+rc-contract change. The reproduced early-observation race is closed in code at
+the detected-failure level; the abnormal-death instant remains an open
+hardware/OS gate and is NOT claimed proved safe (see residual window below).
+
+- **Code fix, not documentation or a passing reproduction.** `run_status_write()`
+  now publishes two checked markers in the same root: the intended
+  `dfroot_terminal_<operation_id>_rc<code>` and a matching
+  `dfroot_confirm_<operation_id>_rc<code>` (magic `DFROOT_CONFIRM 1`, validated
+  operation ID and code, unpredictable temp name, `O_EXCL|O_NOFOLLOW`,
+  regular-file `fstat`, full write, `fsync`, `fchmod 0644`, checked close, atomic
+  `link()`, temp unlink, directory fsync). It returns 0 / its intended exit code
+  only when **both** phases complete. Any failure in either phase publishes the
+  rc7 channel **before** retracting either final link, cleans temps, restores the
+  first diagnostic and returns -1 (writer exits 7).
+- **Reader.** `struct run_status_result.publication_confirmed` is set only for a
+  definitive non-7 verdict with a matching confirmation (same ID and code).
+  An intended marker without confirmation yields NO decision with an explicit
+  "not publication-confirmed; completion unverified" diagnostic; rc7 stays
+  authoritative without confirmation; two different observed codes (confirmed
+  or not) are rc7; foreign/malformed/wrong-magic confirmations cannot confirm a
+  run. `run_status_exit_code()`, `run_status_decide()` and the native reader
+  (`exp.c`) all refuse to act on an unacknowledged non-7 code and keep polling.
+- **Host-only seams.** `RUN_STATUS_FAULT_CONFIRM` fails only the confirmation
+  write; all hooks remain behind `RUN_STATUS_TEST_HOOKS`, absent from the
+  production `dfroot`/`bootstrap` targets.
+- **Tests.** `post_link_early_observation` is now fix verification (N at the
+  unconfirmed gate, R after rc7 publication, writer 7). Added
+  `confirmed_publication_yields_success`, `confirmation_failure_is_indeterminate`
+  and `unconfirmed_or_crossed_markers_never_confirm`. Existing tests were
+  strengthened where any publication failure now correctly yields rc7 instead
+  of a clean absence; none was deleted.
+- **Verification:** `cmake -S app/src/main/jni/host-tests -B
+  /mnt/240G_SSD/opencode_tmp/dfroot-hosttests-r4 && cmake --build ... -j && ctest
+  --test-dir ... --output-on-failure --no-tests=error` → **140/140 passed, 0
+  failed** (was 137), with `-Wall -Wextra -Werror -pedantic` clean. Production
+  `app/src/main/jni/CMakeLists.txt` defines no `RUN_STATUS_TEST_HOOKS`.
+- **Residual window (OPEN hardware/OS gate, NOT proved safe):** abnormal death
+  after the confirmation link but before its fsync, or between intended-marker
+  publication and confirmation, can still expose an early observation to an
+  external reader. Device crash/power-loss validation of `/dev` marker
+  durability remains required. No full Java suite or CI run was performed here.
+
 ## 2026-11-25 — Result-contract wording (R4.2, R2-12)
 
 - A **marker conflict** is rc=7 **indeterminate**, no longer rc=1: contradictory
@@ -33,7 +80,7 @@ all earlier sections below are historical.
 |---|---|---|
 | R2-12 | `6ebf9e3` | Terminal classifier failures map to rc=7; a single authoritative unverified-outcome predicate stops timeout/interruption flags masking an unknown exit; `RunCoordinator` retains lease/freeze/attempt on every unverified result or engine exception. |
 | R2-13 | `2a74dd0` | Incomplete/corrupt persisted attempts fail closed; a store poisoned by a failed checked commit cannot prove durable absence until a post-restart store re-reads durable state. |
-| R2-14 | `6012c21` | Post-link publication window stated as provable: pre-link failure leaves no final marker; rc=7 wins once published; only results acted on after publication completes are indeterminate. Deterministic concurrent-reader host test proves an early, unrevocable confirmed observation is possible. |
+| R2-14 | `6012c21` | Post-link publication window stated as provable: pre-link failure leaves no final marker; rc=7 wins once published; only results acted on after publication completes are indeterminate. Deterministic concurrent-reader host test proves an early, unrevocable confirmed observation is possible. **Superseded by the R4.3 confirmation protocol above.** |
 | R2-16 / R2-17 | `b87318f` | Boot-OFF is re-read at admission for queued unattended requests (OFF/unreadable fails closed, admitted work untouched); every rejected coordinator submission publishes a fresh snapshot so the Activity shows the real barrier reason and leaves its pending state (pre-submission Boot-OFF suppression is intentionally silent). |
 | R2-18 | `d32006e` | Checked attempt-store work moved to a bounded single-thread admission executor (claim-once/close-once); read-only availability diagnostic computed on a separate worker with sequence/generation guards. Boot OFF, durable barrier, single-flight and fail-closed diagnostics remain authoritative. |
 | R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion, not just timeout publication; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear and no UI/retry/boot-count proof; final-result messages drop bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no-root-probe policy unchanged. |
@@ -189,6 +236,10 @@ payload/privileged-container/APK-assembly validation was performed; CI remains a
 POST-PUSH gate. All changes are left uncommitted.
 
 ## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; uncommitted)
+
+**Historical within this branch:** this round only documented the post-link
+window; the R4.3 section at the top of this changelog supersedes it with a code
+fix (matching confirmation required before any definitive result).
 
 Third repair round on `fix/app-correctness-safety` (HEAD `2a74dd0`), left
 uncommitted. Scope: **R2-14 only** — the post-link publication observation

@@ -7,6 +7,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): inject a classifier observation failure and assert the reader exits rc7 with no confirmed result. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the whole post-link/pre-rc7 observation window with a deterministic concurrent reader. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): assert conflicting terminal observations map to indeterminate rc7, not definitive rc1. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): rework the post-link case into fix verification: unconfirmed markers yield no decision, and a matching confirmation is required for success. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -26,6 +27,7 @@ static const char FOREIGN_ID[] = "op-00000000-0000-0000-0000-000000000000";
 static char root[PATH_MAX];
 static char marker_path[PATH_MAX];
 static const char *source_dir;
+static const char *configured_id;
 
 static void die(const char *message)
 {
@@ -70,6 +72,7 @@ static void reset_root(const char *case_root)
 
 static void configure(const char *operation_id)
 {
+    configured_id = operation_id;
     if (run_status_configure(root, operation_id) != 0) {
         fprintf(stderr, "configure failed: %s\n", run_status_last_error());
         exit(1);
@@ -154,6 +157,7 @@ static void expect_no_temp_files(void)
 }
 
 static void expect_write_ok(int code);
+static void make_terminal_name(char *out, size_t capacity, const char *id, int code);
 
 static struct run_status_result classify(void)
 {
@@ -180,6 +184,88 @@ static void write_named_marker(const char *name, const char *payload)
 {
     make_path(marker_path, sizeof(marker_path), name);
     write_text(marker_path, payload);
+}
+
+static void make_confirm_name(char *out, size_t capacity, const char *id, int code)
+{
+    if (snprintf(out, capacity, "dfroot_confirm_%s_rc%d", id, code) < 0
+        || strlen(out) >= capacity) {
+        die("confirmation marker name is too long");
+    }
+}
+
+static void make_confirm_payload(char *out, size_t capacity, const char *id, int code)
+{
+    if (snprintf(out, capacity,
+                 "DFROOT_CONFIRM 1\noperation_id=%s\ncode=%d\n", id, code) < 0
+        || strlen(out) >= capacity) {
+        die("confirmation payload is too long");
+    }
+}
+
+/* Harmless hand-built fixtures for the crossed/unconfirmed marker cases. */
+static void write_terminal_fixture(const char *id, int code)
+{
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    make_terminal_name(name, sizeof(name), id, code);
+    make_test_payload(payload, sizeof(payload), id, code);
+    write_named_marker(name, payload);
+}
+
+static void write_confirm_fixture(const char *id, int code)
+{
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    make_confirm_name(name, sizeof(name), id, code);
+    make_confirm_payload(payload, sizeof(payload), id, code);
+    write_named_marker(name, payload);
+}
+
+static void expect_confirm_present(const char *id, int code)
+{
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    make_confirm_name(name, sizeof(name), id, code);
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "matching confirmation marker is missing: %s\n", name);
+        exit(1);
+    }
+}
+
+static void expect_no_confirm(const char *id, int code)
+{
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    make_confirm_name(name, sizeof(name), id, code);
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) == 0) {
+        fprintf(stderr, "confirmation marker was left behind: %s\n", name);
+        exit(1);
+    }
+    if (errno != ENOENT) {
+        perror("lstat confirmation marker");
+        exit(1);
+    }
+}
+
+static void expect_none_with_diagnostic(const char *needle)
+{
+    struct run_status_result result = classify();
+    if (result.verdict != RUN_STATUS_VERDICT_NONE
+        || run_status_exit_code(&result) != -1
+        || result.publication_confirmed != 0) {
+        fprintf(stderr, "expected no decision, got verdict=%d code=%d confirmed=%d\n",
+                (int)result.verdict, run_status_exit_code(&result),
+                result.publication_confirmed);
+        exit(1);
+    }
+    if (strstr(result.diagnostic, needle) == NULL) {
+        fprintf(stderr, "unconfirmed diagnostic '%s' lacks '%s'\n",
+                result.diagnostic, needle);
+        exit(1);
+    }
 }
 
 /* The bootstrap side of the protocol: no admitted snapshot, so only the
@@ -216,15 +302,37 @@ static void expect_terminal(int expected_code)
     if (result.diagnostic[0] == '\0') {
         die("terminal verdict did not provide a stable diagnostic");
     }
+    if (expected_code != RUN_STATUS_TERMINAL_INDETERMINATE
+        && !result.publication_confirmed) {
+        die("definitive terminal verdict lacked a matching confirmation");
+    }
+    if (expected_code == RUN_STATUS_TERMINAL_INDETERMINATE
+        && result.publication_confirmed != 0) {
+        die("indeterminate result was reported as publication-confirmed");
+    }
+}
+
+/* rc7 steady state: either the authoritative indeterminate channel or a
+ * conflict, both of which map to the same non-actionable indeterminate code. */
+static void expect_indeterminate(void)
+{
+    struct run_status_result result = classify();
+    if (run_status_exit_code(&result) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || result.publication_confirmed != 0) {
+        fprintf(stderr, "observation was actionable: verdict=%d code=%d confirmed=%d\n",
+                (int)result.verdict, result.code, result.publication_confirmed);
+        exit(1);
+    }
 }
 
 static void expect_no_terminal(void)
 {
     struct run_status_result result = classify();
     if (result.verdict != RUN_STATUS_VERDICT_NONE
-        || run_status_exit_code(&result) != -1) {
-        fprintf(stderr, "expected no terminal marker, got verdict=%d code=%d\n",
-                (int)result.verdict, result.code);
+        || run_status_exit_code(&result) != -1
+        || result.publication_confirmed != 0) {
+        fprintf(stderr, "expected no decision, got verdict=%d code=%d confirmed=%d\n",
+                (int)result.verdict, result.code, result.publication_confirmed);
         exit(1);
     }
     if (result.diagnostic[0] == '\0') {
@@ -238,6 +346,10 @@ static void expect_write_ok(int code)
         fprintf(stderr, "write rc=%d failed: %s\n", code, run_status_last_error());
         exit(1);
     }
+    /* A successful write publishes BOTH the intended final marker and its
+     * matching confirmation, with no debris. */
+    expect_confirm_present(configured_id, code);
+    expect_no_temp_files();
 }
 
 /* Match an exact branch-specific diagnostic: the fixed prefix must equal one
@@ -288,10 +400,13 @@ static void test_valid_code(int code)
     expect_no_temp_files();
 
     /* A second write of the same code must fail at the atomic link step: the
-     * final path is exclusive, so an existing marker is never overwritten. */
+     * final path is exclusive, so an existing marker is never overwritten.
+     * ANY publication failure now publishes rc7 first, so even though the
+     * original confirmed marker survives, the reader reports indeterminate. */
     expect_write_fail(code, "terminal marker link failed");
     expect_no_temp_files();
-    expect_terminal(code);
+    expect_confirm_present(OUR_ID, code);
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
 static void test_conflict(void)
@@ -450,7 +565,10 @@ static void test_no_follow(void)
      * enforced by the atomic link (EEXIST) and no temp file survives. */
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker link failed");
     expect_no_temp_files();
-    expect_no_terminal();
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    /* The pre-existing symlink is ignored and the failed publication published
+     * the indeterminate channel, never success. */
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
 static void test_fault(int fault, const char *expected_reason)
@@ -459,11 +577,13 @@ static void test_fault(int fault, const char *expected_reason)
     run_status_inject_fault(fault);
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, expected_reason);
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
-    /* Every injected fault happens before link(): the reader must see no
-     * final marker and no complete payload at all. */
+    /* Every injected fault here happens before link(): no intended marker and
+     * no confirmation is left, but rc7 is published first so the reader sees
+     * indeterminate rather than a clean absence or a definitive result. */
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
-    expect_no_terminal();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
 static void test_first_diagnostic_wins(int fault, const char *expected_reason)
@@ -474,8 +594,9 @@ static void test_first_diagnostic_wins(int fault, const char *expected_reason)
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, expected_reason);
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
-    expect_no_terminal();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
 static void test_bounded_wait(void)
@@ -602,6 +723,9 @@ static void test_shared_budget_wiring(void)
     expect_contains(e, "run_status_wait_continues( now - start, "
                        "RUN_STATUS_TERMINAL_READ_WAIT_MS)");
     expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
+    /* The reader consumes the classifier's acknowledgement flag: a non-7
+     * definitive code is actionable only after matching confirmation. */
+    expect_contains(e, "!result.publication_confirmed");
     expect_contains(e, "run_status_progress_markers[");
     /* The writer must route every terminal publication through the shared
      * success/failure mapping; no code may return its intended value after a
@@ -687,6 +811,7 @@ static void test_directory_fsync_failure(void)
                       "terminal marker directory fsync failed");
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
 
     struct run_status_result result = classify();
@@ -726,9 +851,15 @@ static void test_indeterminate_precedence(void)
 }
 
 /* End-to-end protocol check without executing bootstrap: an injected pre-link
- * failure maps to rc=7 on the writer side and NONE (-1) on the reader side. */
+ * failure maps to rc=7 on the writer side and to the reader's authoritative
+ * indeterminate channel (never success, never a clean absence). */
 static void test_publication_failure_protocol(void)
 {
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("case root path is too long");
+    }
     configure(OUR_ID);
     run_status_inject_fault(RUN_STATUS_FAULT_WRITE);
     int write_result = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
@@ -739,10 +870,13 @@ static void test_publication_failure_protocol(void)
         die("a failed publication was mapped to its intended success code");
     }
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
-    expect_no_terminal();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 
     /* The confirmed path still returns the intended code. */
+    reset_root(case_root);
+    configure(OUR_ID);
     expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
     if (run_status_publication_exit_code(0, RUN_STATUS_TERMINAL_SUCCESS)
         != RUN_STATUS_TERMINAL_SUCCESS) {
@@ -792,8 +926,11 @@ static void test_concurrent_failed_publish(void)
             ssize_t count = read(gate[0], &command, 1);
             if (count != 1) _exit(2);
             struct run_status_result result;
+            /* Only a definitive non-7 code is actionable. rc7 is the honest
+             * indeterminate outcome after the detected publication failure. */
             if (run_status_classify(&result) == 0
-                && result.verdict != RUN_STATUS_VERDICT_NONE) {
+                && result.verdict != RUN_STATUS_VERDICT_NONE
+                && result.code != RUN_STATUS_TERMINAL_INDETERMINATE) {
                 saw = 'B';
             }
             if (write(observed[1], &saw, 1) != 1) _exit(3);
@@ -837,8 +974,9 @@ static void test_concurrent_failed_publish(void)
     close(gate[1]); close(observed[0]); close(release[1]); close(paused[0]);
     run_status_set_writer_pause(-1, -1);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
-    expect_no_terminal();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
 /* Post-link failure with a gated concurrent reader. The writer is paused by
@@ -930,6 +1068,9 @@ static void test_post_link_gated_reader(void)
     if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         die("rc=7 channel was not published before retraction");
     }
+    /* The intended phase failed, so no confirmation phase ran: rc7 must win
+     * without any confirmation. */
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     struct run_status_result at_gate = classify();
     if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
         || at_gate.code != RUN_STATUS_TERMINAL_INDETERMINATE) {
@@ -967,6 +1108,7 @@ static void test_post_link_gated_reader(void)
     close(gate[1]); close(observed[0]); close(release[1]); close(paused[0]);
     run_status_set_retract_pause(-1, -1);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 
@@ -978,21 +1120,18 @@ static void test_post_link_gated_reader(void)
     expect_write_fail(RUN_STATUS_TERMINAL_SUCCESS, "terminal marker unlink failed");
     run_status_inject_fault(RUN_STATUS_FAULT_NONE);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
-/* Deterministic harmless test for the ENTIRE post-link failure window. The
- * writer pauses at the new post-link hook: link() has succeeded, so the intended
- * rc0 marker is complete and visible, while temp unlink, directory fsync,
- * failure detection and the rc=7 channel have not happened yet. A concurrent
- * reader MUST observe a confirmed terminal success here - that observation
- * cannot be retroactively revoked by the later rc=7 publication/retraction.
- * A one-shot temp-unlink failure is then injected; the writer pauses again
- * AFTER rc=7 is published but BEFORE the rc0 link is retracted, so the reader
- * must see rc=7 only in that coexistence window and after retraction. Every
- * poll is driven by an explicit pipe handshake: no sleeps, no scheduling luck,
- * no allocation. */
+/* FIX VERIFICATION (was a reproduction of the R2-14 race). The writer pauses
+ * immediately after the intended rc0 link(): the final marker is visible, but
+ * there is NO matching confirmation and NO rc7. A gated reader MUST report no
+ * decision (N), never success. A one-shot temp-unlink failure is then injected;
+ * rc7 is published BEFORE retraction, and the reader reports indeterminate (R)
+ * in the coexistence window and after retraction. Pipe handshakes only: no
+ * sleeps, no scheduling luck, no privileged payload. */
 static void test_post_link_early_observation(void)
 {
     configure(OUR_ID);
@@ -1047,7 +1186,9 @@ static void test_post_link_early_observation(void)
             if (count == 0) break;
             if (count != 1) _exit(2);
             struct run_status_result result;
-            char verdict = 'X';
+            /* N = no decision (keep polling), S = confirmed success,
+             * R = indeterminate. An unconfirmed intended marker must be N. */
+            char verdict = 'N';
             if (run_status_classify(&result) == 0
                 && result.verdict == RUN_STATUS_VERDICT_TERMINAL) {
                 if (result.code == RUN_STATUS_TERMINAL_SUCCESS) verdict = 'S';
@@ -1068,9 +1209,8 @@ static void test_post_link_early_observation(void)
         die("writer never reached the post-link pause");
     }
 
-    /* Prove the gate is the earliest observable instant: the intended rc0
-     * final path is a complete regular marker, rc7 does not exist yet, and the
-     * temp link is still present (unlink has not been attempted). */
+    /* Prove the gate has the intended marker only: rc7 and the matching
+     * confirmation do not exist yet, and the temp link is still present. */
     char name[RUN_STATUS_MARKER_NAME_MAX];
     if (snprintf(name, sizeof(name), "dfroot_terminal_%s_rc0", OUR_ID) < 0
         || strlen(name) >= sizeof(name)) {
@@ -1102,23 +1242,30 @@ static void test_post_link_early_observation(void)
     }
     closedir(directory);
     if (temp_count != 1) die("post-link gate was not before temp unlink");
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
 
+    /* The visible intended marker is unconfirmed: no decision, no exit code,
+     * and an honest diagnostic. This is the exact race R2-14 reported, now
+     * handled conservatively instead of acted on as success. */
     struct run_status_result at_gate = classify();
-    if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
-        || at_gate.code != RUN_STATUS_TERMINAL_SUCCESS) {
-        fprintf(stderr, "post-link gate did not expose the intended success: "
-                        "verdict=%d code=%d\n", (int)at_gate.verdict, at_gate.code);
+    if (at_gate.verdict != RUN_STATUS_VERDICT_NONE
+        || run_status_exit_code(&at_gate) != -1
+        || at_gate.publication_confirmed != 0
+        || strstr(at_gate.diagnostic, "not publication-confirmed") == NULL
+        || strstr(at_gate.diagnostic, "completion unverified") == NULL) {
+        fprintf(stderr, "unconfirmed post-link marker was acted on: verdict=%d code=%d "
+                        "confirmed=%d diagnostic='%s'\n",
+                (int)at_gate.verdict, at_gate.code, at_gate.publication_confirmed,
+                at_gate.diagnostic);
         exit(1);
     }
 
-    /* The early observation is real and repeatable while the writer is paused:
-     * the reader can classify a confirmed terminal verdict here. */
     for (int i = 0; i < READER_POLLS; i++) {
         if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
             die("early-window reader handshake failed");
         }
-        if (byte != 'S') {
-            die("reader could not observe confirmed success in the post-link window");
+        if (byte != 'N') {
+            die("reader acted on an unconfirmed post-link marker");
         }
     }
 
@@ -1144,6 +1291,7 @@ static void test_post_link_early_observation(void)
     if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
         die("rc7 channel was not published before retraction");
     }
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     at_gate = classify();
     if (at_gate.verdict != RUN_STATUS_VERDICT_TERMINAL
         || at_gate.code != RUN_STATUS_TERMINAL_INDETERMINATE) {
@@ -1204,8 +1352,291 @@ static void test_post_link_early_observation(void)
     run_status_set_post_link_pause(-1, -1);
     run_status_set_retract_pause(-1, -1);
     expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
     expect_no_temp_files();
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+}
+
+/* A normal publication is definitive only after BOTH markers are present.
+ * No gate, no fault injection: the writer completes and the reader confirms. */
+static void test_confirmed_publication_yields_success(void)
+{
+    configure(OUR_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
+
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    make_terminal_name(name, sizeof(name), OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("intended success marker was missing after a confirmed write");
+    }
+    expect_confirm_present(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+
+    struct run_status_result result = classify();
+    if (result.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || result.code != RUN_STATUS_TERMINAL_SUCCESS
+        || result.publication_confirmed != 1
+        || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_SUCCESS) {
+        fprintf(stderr, "confirmed success was not definitive: verdict=%d code=%d "
+                        "confirmed=%d\n", (int)result.verdict, result.code,
+                result.publication_confirmed);
+        exit(1);
+    }
+    struct run_status_decision decision = decide_from_reader(&result);
+    if (decision.outcome != RUN_STATUS_OUTCOME_TERMINAL
+        || decision.code != RUN_STATUS_TERMINAL_SUCCESS) {
+        die("confirmed success was not reported as a terminal decision");
+    }
+    if (run_status_publication_exit_code(0, RUN_STATUS_TERMINAL_SUCCESS)
+        != RUN_STATUS_TERMINAL_SUCCESS) {
+        die("confirmed writer did not exit with its intended rc0");
+    }
+    expect_no_temp_files();
+}
+
+/* A fault confined to the confirmation phase: the intended marker is linked
+ * but no matching confirmation can ever appear. Every gated poll must show
+ * no decision before rc7 is published and indeterminate afterwards. */
+static void test_confirmation_failure_is_indeterminate(void)
+{
+    configure(OUR_ID);
+    int gate[2], observed[2];
+    int post_release[2], post_paused[2];
+    int retract_release[2], retract_paused[2];
+    int diagnostic[2];
+    if (pipe(gate) != 0 || pipe(observed) != 0
+        || pipe(post_release) != 0 || pipe(post_paused) != 0
+        || pipe(retract_release) != 0 || pipe(retract_paused) != 0
+        || pipe(diagnostic) != 0) {
+        die("confirmation-failure pipes failed");
+    }
+    run_status_set_post_link_pause(post_release[0], post_paused[1]);
+    run_status_set_retract_pause(retract_release[0], retract_paused[1]);
+
+    pid_t writer = fork();
+    if (writer < 0) die("confirmation-failure writer fork failed");
+    if (writer == 0) {
+        close(gate[0]); close(gate[1]);
+        close(observed[0]); close(observed[1]);
+        close(post_release[1]); close(post_paused[0]);
+        close(retract_release[1]); close(retract_paused[0]);
+        close(diagnostic[0]);
+        run_status_inject_fault(RUN_STATUS_FAULT_CONFIRM);
+        int rc = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+        const char *message = run_status_last_error();
+        size_t length = message == NULL ? 0 : strlen(message);
+        if (length > RUN_STATUS_DIAGNOSTIC_MAX) length = RUN_STATUS_DIAGNOSTIC_MAX;
+        if (length > 0 && write(diagnostic[1], message, length) != (ssize_t)length) {
+            _exit(2);
+        }
+        close(diagnostic[1]);
+        _exit(rc == 0 ? 0 : RUN_STATUS_TERMINAL_INDETERMINATE);
+    }
+
+    pid_t reader = fork();
+    if (reader < 0) die("confirmation-failure reader fork failed");
+    if (reader == 0) {
+        close(gate[1]);
+        close(observed[0]);
+        close(post_release[0]); close(post_release[1]);
+        close(post_paused[0]); close(post_paused[1]);
+        close(retract_release[0]); close(retract_release[1]);
+        close(retract_paused[0]); close(retract_paused[1]);
+        close(diagnostic[0]); close(diagnostic[1]);
+        char command;
+        for (;;) {
+            ssize_t count = read(gate[0], &command, 1);
+            if (count == 0) break;
+            if (count != 1) _exit(2);
+            struct run_status_result result;
+            char verdict = 'N';
+            if (run_status_classify(&result) == 0
+                && result.verdict == RUN_STATUS_VERDICT_TERMINAL) {
+                if (result.code == RUN_STATUS_TERMINAL_SUCCESS) verdict = 'S';
+                if (result.code == RUN_STATUS_TERMINAL_INDETERMINATE) verdict = 'R';
+            }
+            if (write(observed[1], &verdict, 1) != 1) _exit(3);
+        }
+        _exit(0);
+    }
+
+    close(gate[0]); close(observed[1]);
+    close(post_release[0]); close(post_paused[1]);
+    close(retract_release[0]); close(retract_paused[1]);
+    close(diagnostic[1]);
+
+    char byte;
+    if (read(post_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("confirmation-failure writer never reached the post-link pause");
+    }
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_none_with_diagnostic("not publication-confirmed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "p", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("confirmation-failure early reader handshake failed");
+        }
+        if (byte != 'N') die("reader reported success before confirmation was published");
+    }
+
+    if (write(post_release[1], "g", 1) != 1) die("post-link release failed");
+    if (read(retract_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("confirmation-failure writer never reached the retract pause");
+    }
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "c", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("confirmation-failure coexistence reader handshake failed");
+        }
+        if (byte != 'R') die("reader reported success after confirmation failure");
+    }
+    if (write(retract_release[1], "g", 1) != 1) die("retract release failed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "a", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("confirmation-failure steady-state reader handshake failed");
+        }
+        if (byte != 'R') die("reader reported success in the rc7 steady state");
+    }
+
+    char message[RUN_STATUS_DIAGNOSTIC_MAX + 1];
+    size_t length = 0;
+    for (;;) {
+        ssize_t count = read(diagnostic[0], message + length, sizeof(message) - 1 - length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            perror("read confirmation-failure diagnostic");
+            exit(1);
+        }
+        if (count == 0) break;
+        length += (size_t)count;
+        if (length == sizeof(message) - 1) break;
+    }
+    message[length] = '\0';
+    const char expected_error[] = "confirmation marker write failed";
+    if (strncmp(message, expected_error, sizeof(expected_error) - 1) != 0) {
+        fprintf(stderr, "confirmation failure diagnostic was lost: '%s'\n", message);
+        exit(1);
+    }
+
+    int status = 0;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status)
+        || WEXITSTATUS(status) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("confirmation-failure writer did not exit rc=7");
+    }
+    close(gate[1]);
+    if (waitpid(reader, &status, 0) != reader || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("confirmation-failure reader fixture failed");
+    }
+    close(observed[0]);
+    close(post_release[1]); close(post_paused[0]);
+    close(retract_release[1]); close(retract_paused[0]);
+    close(diagnostic[0]);
+    run_status_set_post_link_pause(-1, -1);
+    run_status_set_retract_pause(-1, -1);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+}
+
+/* Crossed/missing/malformed confirmations must never turn any observation into
+ * success. All fixtures are harmless hand-written files with no privileged
+ * operation involved. */
+static void test_unconfirmed_or_crossed_markers_never_confirm(void)
+{
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("case root path is too long");
+    }
+
+    /* 1. Intended rc0 with no confirmation: no decision at all. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_none_with_diagnostic("not publication-confirmed");
+
+    /* 2. Confirmation with no intended marker: still no decision. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_none_with_diagnostic("has no terminal marker");
+
+    /* 3. Two different confirmed codes: rc7, never definitive rc0/rc1. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    {
+        struct run_status_result result = classify();
+        if (result.verdict != RUN_STATUS_VERDICT_CONFLICT
+            || result.code != RUN_STATUS_TERMINAL_INDETERMINATE
+            || result.publication_confirmed != 0
+            || run_status_exit_code(&result) != RUN_STATUS_TERMINAL_INDETERMINATE
+            || strstr(result.diagnostic, "rc=0") == NULL
+            || strstr(result.diagnostic, "rc=6") == NULL) {
+            fprintf(stderr, "two confirmed codes did not map to rc7: verdict=%d code=%d\n",
+                    (int)result.verdict, result.code);
+            exit(1);
+        }
+    }
+
+    /* 4. rc7 coexists with a confirmed rc0: rc7 remains authoritative. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_INDETERMINATE);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_indeterminate();
+
+    /* 5. Crossed codes: a confirmed rc6 plus a stray rc0 confirmation, and
+     *    an unconfirmed rc0 plus a confirmed rc6, are both indeterminate. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_indeterminate();
+
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    write_confirm_fixture(OUR_ID, RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
+    expect_indeterminate();
+
+    /* 6. A confirmation whose payload names another run, or whose magic is a
+     *    terminal payload, cannot confirm our intended marker. */
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    {
+        char foreign_payload[RUN_STATUS_PAYLOAD_MAX];
+        make_confirm_payload(foreign_payload, sizeof(foreign_payload), FOREIGN_ID,
+                             RUN_STATUS_TERMINAL_SUCCESS);
+        char name[RUN_STATUS_MARKER_NAME_MAX];
+        make_confirm_name(name, sizeof(name), OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+        write_named_marker(name, foreign_payload);
+    }
+    expect_none_with_diagnostic("not publication-confirmed");
+
+    reset_root(case_root);
+    configure(OUR_ID);
+    write_terminal_fixture(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    {
+        char terminal_payload[RUN_STATUS_PAYLOAD_MAX];
+        make_test_payload(terminal_payload, sizeof(terminal_payload), OUR_ID,
+                          RUN_STATUS_TERMINAL_SUCCESS);
+        char name[RUN_STATUS_MARKER_NAME_MAX];
+        make_confirm_name(name, sizeof(name), OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+        write_named_marker(name, terminal_payload);
+    }
+    expect_none_with_diagnostic("not publication-confirmed");
 }
 
 /* A harmless fake child: it blocks reading a pipe and never executes a
@@ -1695,6 +2126,8 @@ static void test_pre_admission_decide_pure(void)
     for (size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
         admitted.verdict = RUN_STATUS_VERDICT_TERMINAL;
         admitted.code = codes[i];
+        admitted.publication_confirmed =
+            codes[i] == RUN_STATUS_TERMINAL_INDETERMINATE ? 0 : 1;
         snprintf(admitted.diagnostic, sizeof(admitted.diagnostic),
                  "terminal rc=%d for operation %s", codes[i], OUR_ID);
         run_status_decide(&admitted, 1, &decision);
@@ -1837,7 +2270,10 @@ static void run_case(const char *name)
             || memcmp(after, "pre-existing\n", strlen("pre-existing\n")) != 0) {
             die("a failed publication overwrote the pre-existing final path");
         }
-        expect_no_terminal();
+        expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+        /* The link failure publishes rc7; the pre-existing garbage marker is
+         * ignored and never becomes a definitive result. */
+        expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
     } else if (!strcmp(name, "no_follow")) {
         test_no_follow();
     } else if (!strcmp(name, "fault_write")) {
@@ -1864,6 +2300,12 @@ static void run_case(const char *name)
         test_post_link_gated_reader();
     } else if (!strcmp(name, "post_link_early_observation")) {
         test_post_link_early_observation();
+    } else if (!strcmp(name, "confirmed_publication_yields_success")) {
+        test_confirmed_publication_yields_success();
+    } else if (!strcmp(name, "confirmation_failure_is_indeterminate")) {
+        test_confirmation_failure_is_indeterminate();
+    } else if (!strcmp(name, "unconfirmed_or_crossed_markers_never_confirm")) {
+        test_unconfirmed_or_crossed_markers_never_confirm();
     } else if (!strcmp(name, "late_load_command_timeout")) {
         test_live_child_timeout(1);
     } else if (!strcmp(name, "soft_reboot_command_timeout")) {

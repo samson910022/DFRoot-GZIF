@@ -6,6 +6,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): map reader deadline expiry to rc7, never a definitive failure while children are alive. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): a terminal classifier observation failure is indeterminate rc7, never a definitive rc1/rc0. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): accept a definitive non-7 code only when its matching publication confirmation was observed. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -602,9 +603,18 @@ static int exploit(void) {
         struct run_status_decision decision;
         run_status_decide(&result, pre_admission_failure, &decision);
         if (decision.outcome != RUN_STATUS_OUTCOME_NONE) {
-            printf("%s\n", decision.diagnostic);
-            rc = decision.code;
-            goto done;
+            /* Defense in depth: the classifier already requires a matching
+             * confirmation for a non-7 definitive code (rc7 needs none). Never
+             * act on an unacknowledged completion; keep polling instead. */
+            int unacknowledged = decision.outcome == RUN_STATUS_OUTCOME_TERMINAL
+                                 && result.verdict == RUN_STATUS_VERDICT_TERMINAL
+                                 && decision.code != RUN_STATUS_TERMINAL_INDETERMINATE
+                                 && !result.publication_confirmed;
+            if (!unacknowledged) {
+                printf("%s\n", decision.diagnostic);
+                rc = decision.code;
+                goto done;
+            }
         }
 
         int64_t now = monotonic_ms();

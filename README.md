@@ -47,13 +47,15 @@ device validation; see `PORTING-GZIF.md`.
 `/dev/dfm6` remains the owner-visible **late-load SUCCESS progress diagnostic**;
 when that legacy marker is observed the app still prints `ksud start: SUCCESS`.
 It is progress only. Native returns **only after a run-scoped terminal marker
-bound to the admitted operation ID** is observed; if the reader deadline expires
-without a confirmed marker it returns **rc=7 indeterminate** — never success and
-never a definitive failure. A global marker alone can no longer end a run.
+bound to the admitted operation ID AND its matching publication-confirmation
+marker** are observed. An intended final marker on its own is indeterminate and
+keeps the reader polling; if the reader deadline expires without a confirmed
+marker it returns **rc=7 indeterminate** — never success and never a definitive
+failure. A global marker alone can no longer end a run.
 
 | Code | Meaning |
 |---|---|
-| `0` | normal terminal success: the admitted run published its success marker |
+| `0` | normal terminal success: the admitted run published its success marker and a matching confirmation marker |
 | `1` | bootstrap/terminal error — run-config, module, staging, or an **observed nonzero late-load exit** (`run_status_late_load_wait_code`); an unobserved exit or timeout is rc=7, not rc=1 |
 | `2` | native `setup()` failure before any operation starts (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
 | `3` | native patch failure |
@@ -62,10 +64,11 @@ never a definitive failure. A global marker alone can no longer end a run.
 | `7` | **indeterminate** — completion could not be confirmed: bounded writer wait or reader deadline expiry, unconfirmed/failed terminal publication, contradictory/conflicting terminal markers, or pre-admission uncertainty. Never a success. |
 
 A **marker conflict** is therefore rc=7 indeterminate, never a definitive error
-or success: two different terminal observations disprove each other and confirm
-no completed outcome. An unconfirmed/contradictory observation also never
-authorizes another operation — the owner, lease, configuration freeze, and
-durable attempt barrier are retained until explicit recovery.
+or success: two different terminal observations (confirmed or not) disprove each
+other and confirm no completed outcome. An unconfirmed or contradictory
+observation also never authorizes another operation — the owner, lease,
+configuration freeze, and durable attempt barrier are retained until explicit
+recovery. rc=7 itself is authoritative without a confirmation.
 
 A late-load timeout, an unobserved child exit, an unconfirmed publication, and a
 reader deadline expiry are all rc=7 indeterminate: privileged children may still
@@ -74,16 +77,32 @@ be running, so the app keeps ownership until a trusted caller clears the barrier
 the app does not run `su` or inspect root state to decide a result. Verify root
 yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
 
-**Publication window (precise guarantee).** A **pre-link** failure leaves no
-final marker at all. Once the rc=7 indeterminate channel is published it
-**outranks** success and conflicts, so no reader classifying afterwards can
-report SUCCESS. In the brief interval between a successful `link()` and that
-rc=7 publication an external reader can observe the intended marker as a
-confirmed terminal verdict, and that observation cannot be retroactively
-revoked. We therefore do **not** claim that a failed publication is never
-observable as confirmed; we claim only that any result the app acts on **after
-publication completes** is indeterminate. The safety policy is unchanged: rc=7
-precedence and indeterminate ownership still apply.
+**Publication window (acknowledgement protocol).** Terminal publication is
+two-phase in the same root: an intended final marker
+`dfroot_terminal_<operation_id>_rc<code>`, then a matching confirmation
+`dfroot_confirm_<operation_id>_rc<code>` with magic `DFROOT_CONFIRM 1`. Both use
+the same checked pipeline (unpredictable same-directory temp, `O_EXCL` /
+`O_NOFOLLOW`, regular-file check, full write, `fsync`, `fchmod 0644`, checked
+close, atomic `link()`, temp unlink, directory fsync). The writer returns its
+intended code **only after both phases are fully published**; a non-7 definitive
+code is accepted by the reader **only when a confirmation matching both the
+operation ID and the code exists**. An intended marker without its confirmation
+yields **no decision** (keep polling) with a "not publication-confirmed;
+completion unverified" diagnostic — it is never acted on as success. On **any**
+detected publication failure (including a confirmation-step failure), rc7 is
+published **before** any final link is retracted, temps are cleaned, and the
+writer exits 7; the indeterminate channel needs no confirmation and outranks
+success and conflicts. A duplicate/conflicting publication also publishes rc7.
+
+**Residual window — OPEN hardware/OS gate, not proved safe.** `link()` makes the
+final pathname visible before temp unlink and directory fsync complete. If the
+writer dies abnormally after the confirmation link but before its fsync, an
+external reader can still observe a definitive-looking result that was never
+durably acknowledged. If it dies between intended-marker publication and
+confirmation, the reader sees only an unconfirmed marker and must not decide.
+These abnormal-death instants are not closed by host tests; device crash/power-
+loss validation of `/dev` marker durability remains required. The safety policy
+is unchanged: rc7 precedence and indeterminate ownership still apply.
 
 ## Operation ownership, boot, and soft reboot
 
@@ -271,6 +290,7 @@ gates in this section are current.
 | R2-12 | `6ebf9e3` | Unverified observations no longer masquerade as success: terminal classifier failures map to rc=7, one authoritative unverified-outcome predicate prevents timeout/interruption flags from hiding an unknown exit, and `RunCoordinator` retains ownership and the durable attempt on every unverified result or engine exception. |
 | R2-13 | `2a74dd0` | Uncertain persisted attempt records fail closed: incomplete/corrupt records are a barrier, not absence; a store is poisoned after a failed checked commit so its process-local cache cannot prove durable absence until a post-restart store re-reads durable state. |
 | R2-14 | `6012c21` | The post-link publication window is documented as provable, not stronger: pre-link failures leave no final marker; once rc=7 is published it outranks success/conflicts; only results acted on **after publication completes** are indeterminate. A deterministic concurrent-reader host test proves an early confirmed observation is possible and cannot be revoked. |
+| R2-14 (R4.3) | — | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification, with three new confirmation-protocol cases. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
 | R2-16 / R2-17 | `b87318f` | Queued unattended requests re-read the Start-at-Boot component setting at admission and fail closed on OFF/unreadable without touching an admitted operation; every rejected submission publishes a fresh rejection snapshot so the Activity leaves its pending state and shows the real barrier reason. |
 | R2-18 | `d32006e` | Checked attempt-store work runs on a bounded single-thread admission executor with claim-once/close-once ownership, and the read-only availability diagnostic runs on a separate worker with sequence/generation guards. No safety check is bypassed: Boot OFF, the durable barrier, single-flight and fail-closed diagnostics stay authoritative. |
 | R2-19 + R2-04 caveat | `1252b3d` | Recovery requires confirmed engine completion (`engineFinished` only after `engine.run()` returns/throws) before an in-process clear; persisted-attempt recovery is a trusted-caller, post-process-death acknowledgement with a checked clear; final-result messages no longer claim a bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code and no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and the no-root-probe policy are unchanged. |
@@ -345,6 +365,16 @@ ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
   not claim a failed publication is never observable as confirmed; we claim only
   that any result the app acts on **after publication completes** is
   indeterminate (writer exits rc=7, reader's steady-state marker is rc=7).
+  **Superseded by the R4.3 two-phase acknowledgement below**: a reader no longer
+  acts on the early intended marker; confirmation is required.
+- **Confirmation protocol (R4.3, uncommitted).** `run_status_write()` publishes
+  the intended final marker and then a matching `dfroot_confirm_` marker before
+  returning success; the classifier accepts a non-7 code only when the
+  confirmation matches both operation ID and code. An intended marker without
+  confirmation yields no decision. Any detected failure publishes rc7 first,
+  then retracts links and cleans temps, with the writer exiting 7. Abnormal
+  death after the confirmation link but before its fsync, or between the two
+  phases, remains an **open hardware gate**, not a proved-safe window.
 - **rc=7 indeterminate contract for missing confirmation (`12a633b`, `ce781f8`,
   `7c1f39a`).** Bounded, non-killing native waits map timeouts and unobserved
   exits to rc=7 (late-load and soft-reboot); the reader's own deadline expiry

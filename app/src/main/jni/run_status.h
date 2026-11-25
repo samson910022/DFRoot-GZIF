@@ -8,6 +8,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): map a terminal classifier observation failure to rc7 through one shared helper. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): scope the publication guarantee to what is provable across the post-link observation window. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): contradictory terminal markers map to indeterminate rc7, never definitive rc1. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): a definitive terminal code requires a matching publication-confirmation marker; unconfirmed markers yield no decision. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
@@ -33,15 +34,15 @@
  *   (a) the writer's process exit code when a publication fails or cannot be
  *       confirmed (run_status_publication_exit_code), and
  *   (b) a run-scoped rc=7 marker, the reader's dedicated indeterminate channel.
- * A PRE-LINK publication failure leaves NO marker at all, so the reader cannot
- * propagate a writer rc=7 to itself: it surfaces its own read-deadline expiry
- * as rc=7 (RUN_STATUS_TERMINAL_INDETERMINATE), never SUCCESS or a definitive
- * failure, because privileged children may still be alive. rc=2 remains only
- * for setup() failures before any operation starts. A POST-LINK unconfirmed
- * publication publishes the rc=7 marker, which the reader maps to
+ * A publication failure (pre-link OR post-link, including a missing
+ * confirmation) publishes the rc=7 marker, which the reader maps to
  * RESULT_INDETERMINATE. Once that rc=7 marker exists, neither channel reports
- * SUCCESS; the unavoidable post-link/pre-rc7 observation window is documented
- * on run_status_write() below. */
+ * SUCCESS. A reader that cannot observe its own terminal marker (or only sees
+ * an unconfirmed one) surfaces its read-deadline expiry as rc=7
+ * (RUN_STATUS_TERMINAL_INDETERMINATE), never SUCCESS or a definitive failure,
+ * because privileged children may still be alive. rc=2 remains only for
+ * setup() failures before any operation starts. See run_status_write() for the
+ * two-phase acknowledgement protocol and its residual abnormal-death window. */
 enum run_status_code {
     RUN_STATUS_TERMINAL_SUCCESS = 0,
     RUN_STATUS_TERMINAL_ERROR = 1,
@@ -69,6 +70,11 @@ enum run_status_verdict {
 struct run_status_result {
     enum run_status_verdict verdict;
     int code;                       /* -1 for NONE; single code; 7 (indeterminate) for CONFLICT */
+    /* 1 only for a definitive non-7 TERMINAL verdict backed by a matching
+     * confirmation marker (same operation ID and same code). Remains 0 for
+     * NONE, CONFLICT and rc7: indeterminate never needs confirmation and must
+     * never be presented as an acknowledged success. */
+    int publication_confirmed;
     char diagnostic[RUN_STATUS_DIAGNOSTIC_MAX];
 };
 
@@ -97,32 +103,36 @@ struct run_status_decision {
 int run_status_configure(const char *root, const char *operation_id);
 const char *run_status_last_error(void);
 
-/* Checked, exclusive terminal marker publication. The complete payload is
- * first written to an unpredictable same-directory temp file (O_EXCL,
- * O_NOFOLLOW, O_CLOEXEC, regular-file type, full EINTR-safe write, fsync,
- * fchmod 0644 while still open, checked close). Only then is it linked
- * atomically to the run-scoped final path, the temp link removed, and the
- * directory fsynced. Returns 0 only when every step succeeded; any PRE-LINK
- * failure leaves no final path and no temp debris.
+/* Checked, exclusive, two-phase terminal marker publication. Phase 1 writes the
+ * intended final marker, phase 2 writes a MATCHING CONFIRMATION marker
+ * (`dfroot_confirm_<operation_id>_rc<code>` with magic `DFROOT_CONFIRM 1`).
+ * Each phase uses the same checked pipeline for its payload: an unpredictable
+ * same-directory temp file (O_EXCL, O_NOFOLLOW, O_CLOEXEC, regular-file type,
+ * full EINTR-safe write, fsync, fchmod 0644 while still open, checked close),
+ * an atomic link() to the run-scoped final path, temp unlink, directory fsync.
  *
- * A POST-LINK failure (temp unlink or directory fsync) is unconfirmed. The
- * indeterminate (rc=7) reader channel is published FIRST, then our own intended
- * final link is retracted, and the temp unlink is retried. Publishing rc=7
- * before retraction closes the coexistence window: the classifier scans all
- * markers before deciding, and rc=7 outranks success AND conflicts, so a
- * concurrent reader can never return SUCCESS once the indeterminate channel
- * exists. The caller MUST NOT report the intended code on failure.
+ * Returns 0 (and run_status_publication_exit_code() yields the intended code)
+ * ONLY when BOTH phases completed: the intended final marker AND its matching
+ * confirmation are linked, their temps are unlinked and the directory is
+ * fsynced. A reader only accepts a non-7 definitive code when it observes that
+ * matching confirmation; an intended marker without confirmation yields NO
+ * decision, never success.
  *
- * PROVABLE OBSERVATION CONTRACT: link() makes the complete final marker visible
- * BEFORE temp unlink and directory fsync can succeed. An external reader that
- * polls in the brief post-link/pre-rc7 window can classify the intended marker
- * and observe a confirmed terminal verdict (rc0 success included); that
- * observation cannot be retroactively revoked by the later rc=7 publication and
- * retraction. This protocol therefore does NOT claim that a failed publication
- * is never observable as confirmed. It claims only that any result the app acts
- * on AFTER publication completes is indeterminate: the writer exits rc=7, and
- * the rc=7 marker is the reader's steady-state verdict. The safety policy is
- * unchanged - rc=7 precedence and indeterminate ownership still apply. */
+ * On ANY failure in either phase the indeterminate (rc=7) reader channel is
+ * published FIRST, then the intended and confirmation final links are
+ * retracted, temps are cleaned, the first diagnostic is restored, and -1 is
+ * returned (writer exits rc7). Publishing rc7 before retraction means a
+ * concurrent reader sees indeterminate - never a clean absence and never an
+ * actionable success. For an rc=7 intended code the indeterminate channel
+ * already exists and is deliberately kept. rc7 itself is authoritative on the
+ * reader side without any confirmation.
+ *
+ * RESIDUAL WINDOW (OPEN hardware/OS gate, NOT proved safe): abnormal death
+ * after the confirmation link() but before its temp unlink/directory fsync, or
+ * between the intended marker publication and confirmation publication, can
+ * still present an early observation to an external reader. The former may
+ * look definitive; the latter stays unconfirmed and yields no decision. Device
+ * validation of crash/power-loss behaviour remains required. */
 int run_status_write(int code);
 
 /* The single source of truth for the writer's exit mapping: a confirmed
@@ -130,16 +140,25 @@ int run_status_write(int code);
  * RUN_STATUS_TERMINAL_INDETERMINATE (7), never a success code. */
 int run_status_publication_exit_code(int write_result, int intended_code);
 
-/* Classify markers for the configured operation. Foreign operation IDs and
- * malformed payloads are ignored; conflicting codes are indeterminate rc=7
- * (completion unverified) with a stable diagnostic, never a definitive rc0/rc1.
- * The whole directory is scanned before any verdict is
- * chosen, and an rc=7 indeterminate marker takes precedence over every other
- * code (including success and conflicts), independent of readdir order. Thus a
- * reader can never read SUCCESS while the indeterminate channel is present,
- * even before the intended marker is retracted. BEFORE rc=7 is published, a
- * complete intended marker is legitimately classifiable (see run_status_write).
- * Returns 0 when *out is filled, -1 on internal error. */
+/* Classify terminal AND confirmation markers for the configured operation.
+ * Foreign operation IDs, malformed payloads, links and non-regular entries are
+ * ignored. The whole directory is scanned before any verdict is chosen.
+ *
+ *   - An rc=7 terminal marker is authoritative by itself (rc7 never needs a
+ *     confirmation) and outranks every other code, independent of readdir order.
+ *   - A non-7 code is DEFINITIVE only when a valid confirmation marker for the
+ *     SAME operation ID and SAME code also exists; then
+ *     out->publication_confirmed is 1.
+ *   - An intended marker WITHOUT its matching confirmation yields NONE with an
+ *     explicit "not publication-confirmed" diagnostic - no decision, keep
+ *     polling, never success.
+ *   - Two different observed codes (confirmed or not) are a conflict: rc=7,
+ *     completion unverified, never a definitive rc0/rc1.
+ *
+ * A foreign/stale/malformed confirmation cannot confirm another run: its
+ * magic, operation ID and code must all match, with the same validated
+ * safe-open/regular-file discipline as terminal markers. Returns 0 when *out
+ * is filled, -1 on internal error. */
 int run_status_classify(struct run_status_result *out);
 
 /* Narrowly scoped I/O scan of the RESERVED identity only. Returns 1 solely for
@@ -256,7 +275,12 @@ enum run_status_fault {
     RUN_STATUS_FAULT_FSYNC_DIR = 1 << 3,
     /* Fail one temp unlink (the post-link one) with EIO, then auto-clear so the
      * unconfirmed path's retry can succeed. Models a transient unlink failure. */
-    RUN_STATUS_FAULT_UNLINK_TEMP = 1 << 4
+    RUN_STATUS_FAULT_UNLINK_TEMP = 1 << 4,
+    /* Fail ONLY the confirmation-phase payload write with EIO. The intended
+     * final marker is already linked, so the unconfirmed path is deterministic:
+     * no matching confirmation exists and rc7 must be published before any
+     * retraction. The rc7 fallback clears all injected faults. */
+    RUN_STATUS_FAULT_CONFIRM = 1 << 5
 };
 void run_status_inject_fault(int fault);
 
@@ -268,11 +292,10 @@ void run_status_inject_classifier_failure(int enabled);
  * on notify_fd that it is paused, then blocks reading one byte from wait_fd.
  * Both fds may be -1 to disable a seam.
  *   - set_writer_pause: just before the first payload write (temp exists).
- *   - set_post_link_pause: immediately AFTER link() succeeds and BEFORE temp
- *     unlink, directory fsync and failure detection - the earliest instant
- *     the final pathname is observable. The intended marker is complete here
- *     and rc=7 does not exist yet. A reader that classifies here observes the
- *     intended terminal verdict; the later rc=7 publication cannot revoke it.
+ *   - set_post_link_pause: immediately AFTER the intended marker's link()
+ *     succeeds and BEFORE temp unlink, directory fsync and the confirmation
+ *     phase - the earliest instant the intended pathname is observable. No
+ *     confirmation and no rc=7 exist yet, so a reader MUST report no decision.
  *   - set_retract_pause: in the unconfirmed path, AFTER the rc=7 channel is
  *     published but BEFORE the intended final marker is retracted. Both
  *     markers are visible at this point, so a reader that classifies here

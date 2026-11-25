@@ -8,6 +8,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): add a shared classifier-failure rc7 mapping and a harmless host injection seam. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link/pre-confirmation observation window with a host-only hook. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map contradictory terminal markers to indeterminate rc7 instead of definitive rc1. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): require a matching confirmation marker for every definitive non-7 code; publish rc7 on any publication failure before retraction. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -26,6 +27,14 @@ static char status_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
 static int status_configured;
 static char status_error[RUN_STATUS_DIAGNOSTIC_MAX];
 static unsigned long status_temp_counter;
+
+/* Two marker namespaces in the same root. Both use the identical checked
+ * path/validation/write discipline; only the magic and filename prefix differ. */
+enum marker_kind {
+    MARKER_TERMINAL = 0,
+    MARKER_CONFIRM = 1
+};
+static const char *marker_word(enum marker_kind kind);
 
 #ifdef RUN_STATUS_TEST_HOOKS
 static int injected_fault;
@@ -82,6 +91,22 @@ static int status_fail(const char *message)
 static int status_fail_errno(const char *what)
 {
     snprintf(status_error, sizeof(status_error), "%s: %s", what, strerror(errno));
+    return -1;
+}
+
+/* Phase-specific diagnostics retain the exact historical "terminal marker ..."
+ * wording for the intended phase and use "confirmation marker ..." for phase 2. */
+static int status_fail_phase(enum marker_kind kind, const char *what)
+{
+    snprintf(status_error, sizeof(status_error), "%s marker %s",
+             marker_word(kind), what);
+    return -1;
+}
+
+static int status_fail_phase_errno(enum marker_kind kind, const char *what)
+{
+    snprintf(status_error, sizeof(status_error), "%s marker %s: %s",
+             marker_word(kind), what, strerror(errno));
     return -1;
 }
 
@@ -181,26 +206,42 @@ static const char *code_suffix(int code)
     }
 }
 
-static int marker_path(char *path, size_t capacity, const char *root,
-                       const char *operation_id, int code)
+static const char *marker_prefix(enum marker_kind kind)
+{
+    return kind == MARKER_CONFIRM ? "dfroot_confirm_" : "dfroot_terminal_";
+}
+
+static const char *marker_header(enum marker_kind kind)
+{
+    return kind == MARKER_CONFIRM ? "DFROOT_CONFIRM 1\n" : "DFROOT_TERMINAL 1\n";
+}
+
+static const char *marker_word(enum marker_kind kind)
+{
+    return kind == MARKER_CONFIRM ? "confirmation" : "terminal";
+}
+
+static int marker_path_kind(char *path, size_t capacity, const char *root,
+                            const char *operation_id, int code, enum marker_kind kind)
 {
     const char *suffix = code_suffix(code);
     if (suffix == NULL) {
         return -1;
     }
-    int written = snprintf(path, capacity, "%s/dfroot_terminal_%s_%s",
-                           root, operation_id, suffix);
+    int written = snprintf(path, capacity, "%s/%s%s_%s",
+                           root, marker_prefix(kind), operation_id, suffix);
     if (written < 0 || (size_t)written >= capacity) {
         return -1;
     }
     return 0;
 }
 
-static int make_payload(char *payload, size_t capacity, const char *operation_id, int code)
+static int make_payload_kind(char *payload, size_t capacity, const char *operation_id,
+                             int code, enum marker_kind kind)
 {
     int written = snprintf(payload, capacity,
-                           "DFROOT_TERMINAL 1\noperation_id=%s\ncode=%d\n",
-                           operation_id, code);
+                           "%soperation_id=%s\ncode=%d\n",
+                           marker_header(kind), operation_id, code);
     if (written < 0 || (size_t)written >= capacity) {
         return -1;
     }
@@ -208,10 +249,13 @@ static int make_payload(char *payload, size_t capacity, const char *operation_id
 }
 
 /* Parse an in-memory payload. Rejects control characters, foreign or unsafe
- * IDs, unknown codes, and any trailing bytes. */
-static int parse_payload(char *payload, size_t length, char *operation_id_out, int *code_out)
+ * IDs, unknown codes, a wrong magic header (so a terminal payload can never
+ * confirm itself), and any trailing bytes. */
+static int parse_payload_kind(char *payload, size_t length, char *operation_id_out,
+                              int *code_out, enum marker_kind kind)
 {
-    static const char header[] = "DFROOT_TERMINAL 1\n";
+    const char *header = marker_header(kind);
+    size_t header_length = strlen(header);
     static const char id_prefix[] = "operation_id=";
     static const char code_prefix[] = "code=";
 
@@ -229,10 +273,10 @@ static int parse_payload(char *payload, size_t length, char *operation_id_out, i
     }
     payload[length] = '\0';
 
-    if (strncmp(payload, header, sizeof(header) - 1) != 0) {
+    if (strncmp(payload, header, header_length) != 0) {
         return -1;
     }
-    const char *id_line = payload + sizeof(header) - 1;
+    const char *id_line = payload + header_length;
     if (strncmp(id_line, id_prefix, sizeof(id_prefix) - 1) != 0) {
         return -1;
     }
@@ -273,11 +317,12 @@ static int parse_payload(char *payload, size_t length, char *operation_id_out, i
     return 0;
 }
 
-static int read_marker(const char *path, char *operation_id_out, int *code_out)
+static int read_marker_kind(const char *path, char *operation_id_out,
+                            int *code_out, enum marker_kind kind)
 {
     /* O_NONBLOCK keeps a malicious FIFO at a marker path from stalling the
      * reader: the fstat() regular-file check below rejects it immediately.
-     * It has no effect on the regular marker files themselves. */
+     * O_NOFOLLOW rejects symlinks. It has no effect on regular marker files. */
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0) {
         return -1;
@@ -308,7 +353,7 @@ static int read_marker(const char *path, char *operation_id_out, int *code_out)
         }
     }
     close(fd);
-    return parse_payload(buffer, length, operation_id_out, code_out);
+    return parse_payload_kind(buffer, length, operation_id_out, code_out, kind);
 }
 
 int run_status_classify(struct run_status_result *out)
@@ -338,11 +383,20 @@ int run_status_classify(struct run_status_result *out)
         return -1;
     }
 
-    static const char prefix[] = "dfroot_terminal_";
-    unsigned int found = 0;
+    unsigned int terminal_codes = 0;
+    unsigned int confirm_codes = 0;
     struct dirent *entry;
     while ((entry = readdir(directory)) != NULL) {
-        if (strncmp(entry->d_name, prefix, sizeof(prefix) - 1) != 0) {
+        enum marker_kind kind;
+        size_t terminal_prefix_length = strlen(marker_prefix(MARKER_TERMINAL));
+        size_t confirm_prefix_length = strlen(marker_prefix(MARKER_CONFIRM));
+        if (strncmp(entry->d_name, marker_prefix(MARKER_TERMINAL),
+                    terminal_prefix_length) == 0) {
+            kind = MARKER_TERMINAL;
+        } else if (strncmp(entry->d_name, marker_prefix(MARKER_CONFIRM),
+                           confirm_prefix_length) == 0) {
+            kind = MARKER_CONFIRM;
+        } else {
             continue;
         }
         char path[RUN_STATUS_PATH_MAX];
@@ -354,22 +408,28 @@ int run_status_classify(struct run_status_result *out)
         int code = -1;
         /* Malformed payloads, foreign IDs, links, and non-regular entries are
          * all ignored: only valid markers for the admitted operation count.
-         * Unlinked temp files use the dfroot_tmp_ prefix and never count. */
-        if (read_marker(path, marker_operation_id, &code) != 0
+         * A confirmation additionally needs its own magic header, so a
+         * terminal payload can never confirm itself. Temp files use the
+         * dfroot_tmp_ prefix and never count. */
+        if (read_marker_kind(path, marker_operation_id, &code, kind) != 0
             || strcmp(marker_operation_id, status_operation_id) != 0) {
             continue;
         }
         int index = code_index(code);
         if (index >= 0) {
-            found |= 1u << index;
+            if (kind == MARKER_CONFIRM) {
+                confirm_codes |= 1u << index;
+            } else {
+                terminal_codes |= 1u << index;
+            }
         }
     }
     closedir(directory);
 
     /* The indeterminate publication-failure channel outranks every other
-     * code, including success and a conflict. A reader can therefore never
-     * report success for a publication the writer did not confirm. */
-    if ((found & (1u << code_index(RUN_STATUS_TERMINAL_INDETERMINATE))) != 0) {
+     * code, including success and a conflict. rc7 never needs a confirmation:
+     * it is the reader's authoritative uncertainty channel. */
+    if ((terminal_codes & (1u << code_index(RUN_STATUS_TERMINAL_INDETERMINATE))) != 0) {
         out->verdict = RUN_STATUS_VERDICT_TERMINAL;
         out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
         snprintf(out->diagnostic, sizeof(out->diagnostic),
@@ -377,9 +437,10 @@ int run_status_classify(struct run_status_result *out)
         return 0;
     }
 
+    unsigned int observed = terminal_codes | confirm_codes;
     int count = 0;
     for (size_t i = 0; i < sizeof(code_order) / sizeof(code_order[0]); i++) {
-        if ((found & (1u << code_index(code_order[i]))) != 0) {
+        if ((observed & (1u << code_index(code_order[i]))) != 0) {
             count++;
         }
     }
@@ -390,45 +451,68 @@ int run_status_classify(struct run_status_result *out)
                  "no terminal marker for operation %s", status_operation_id);
         return 0;
     }
-    if (count == 1) {
-        out->verdict = RUN_STATUS_VERDICT_TERMINAL;
+
+    if (count > 1) {
+        /* Two different observed codes disprove each other, whether or not
+         * either has a confirmation. Never a definitive rc0/rc1. */
+        out->verdict = RUN_STATUS_VERDICT_CONFLICT;
+        out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "conflicting markers; completion unverified for operation %s:",
+                 status_operation_id);
+        size_t used = strlen(out->diagnostic);
         for (size_t i = 0; i < sizeof(code_order) / sizeof(code_order[0]); i++) {
-            if ((found & (1u << code_index(code_order[i]))) != 0) {
-                out->code = code_order[i];
+            if ((observed & (1u << code_index(code_order[i]))) == 0) {
+                continue;
+            }
+            int written = snprintf(out->diagnostic + used, sizeof(out->diagnostic) - used,
+                                   " rc=%d", code_order[i]);
+            if (written < 0 || (size_t)written >= sizeof(out->diagnostic) - used) {
                 break;
             }
+            used += (size_t)written;
         }
-        snprintf(out->diagnostic, sizeof(out->diagnostic),
-                 "terminal rc=%d for operation %s", out->code, status_operation_id);
         return 0;
     }
 
-    out->verdict = RUN_STATUS_VERDICT_CONFLICT;
-    /* Contradictory observations prove no completed outcome: keep the code
-     * indeterminate so a reader can never turn a conflict into a definitive
-     * error or success. The verdict still records that markers disagreed. */
-    out->code = RUN_STATUS_TERMINAL_INDETERMINATE;
-    snprintf(out->diagnostic, sizeof(out->diagnostic),
-             "conflicting markers; completion unverified for operation %s:",
-             status_operation_id);
-    size_t used = strlen(out->diagnostic);
+    /* Exactly one observed non-7 code. It is definitive ONLY if both the
+     * intended final marker and a matching confirmation (same operation ID,
+     * same code) are present and valid. */
+    int only_code = -1;
     for (size_t i = 0; i < sizeof(code_order) / sizeof(code_order[0]); i++) {
-        if ((found & (1u << code_index(code_order[i]))) == 0) {
-            continue;
-        }
-        int written = snprintf(out->diagnostic + used, sizeof(out->diagnostic) - used,
-                               " rc=%d", code_order[i]);
-        if (written < 0 || (size_t)written >= sizeof(out->diagnostic) - used) {
+        if ((observed & (1u << code_index(code_order[i]))) != 0) {
+            only_code = code_order[i];
             break;
         }
-        used += (size_t)written;
+    }
+    int intended = (terminal_codes & (1u << code_index(only_code))) != 0;
+    int confirmed = (confirm_codes & (1u << code_index(only_code))) != 0;
+    if (intended && confirmed) {
+        out->verdict = RUN_STATUS_VERDICT_TERMINAL;
+        out->code = only_code;
+        out->publication_confirmed = 1;
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "publication-confirmed terminal rc=%d for operation %s",
+                 only_code, status_operation_id);
+        return 0;
+    }
+
+    out->verdict = RUN_STATUS_VERDICT_NONE;
+    if (intended) {
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "terminal marker rc=%d for operation %.64s is not publication-confirmed; "
+                 "completion unverified", only_code, status_operation_id);
+    } else {
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "confirmation marker rc=%d for operation %.64s has no terminal marker; "
+                 "completion unverified", only_code, status_operation_id);
     }
     return 0;
 }
 
 /* Reserved-identity diagnostic scan. It deliberately does NOT reuse the
  * general classification loop: only the exact final path for the reserved
- * identity and rc=1 is read, and read_marker() already enforces a regular,
+ * identity and rc=1 is read, and read_marker_kind() already enforces a regular,
  * O_NOFOLLOW final file plus a well-formed payload. Both the filename and the
  * payload must name the reserved operation and carry rc=1, so a stale marker
  * that merely borrows the identity, a marker for another code, a temp file,
@@ -439,13 +523,13 @@ int run_status_pre_admission_failure(void)
         return 0;
     }
     char path[RUN_STATUS_PATH_MAX];
-    if (marker_path(path, sizeof(path), status_root, RUN_STATUS_PRE_ADMISSION_ID,
-                    RUN_STATUS_TERMINAL_ERROR) != 0) {
+    if (marker_path_kind(path, sizeof(path), status_root, RUN_STATUS_PRE_ADMISSION_ID,
+                         RUN_STATUS_TERMINAL_ERROR, MARKER_TERMINAL) != 0) {
         return 0;
     }
     char marker_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
     int code = -1;
-    if (read_marker(path, marker_operation_id, &code) != 0
+    if (read_marker_kind(path, marker_operation_id, &code, MARKER_TERMINAL) != 0
         || strcmp(marker_operation_id, RUN_STATUS_PRE_ADMISSION_ID) != 0
         || code != RUN_STATUS_TERMINAL_ERROR) {
         return 0;
@@ -476,7 +560,14 @@ void run_status_decide(const struct run_status_result *admitted,
     }
 
     int admitted_code = run_status_exit_code(admitted);
-    if (admitted_code >= 0) {
+    /* Defense in depth: a non-7 code without its matching confirmation is not
+     * actionable even if a caller hands us a hand-built classifier result.
+     * rc7 (including CONFLICT) is authoritative without confirmation. */
+    int actionable = admitted_code >= 0
+                     && !(admitted->verdict == RUN_STATUS_VERDICT_TERMINAL
+                          && admitted_code != RUN_STATUS_TERMINAL_INDETERMINATE
+                          && !admitted->publication_confirmed);
+    if (actionable) {
         /* TERMINAL or CONFLICT: both end the admitted operation's observation,
          * but CONFLICT maps to rc=7 indeterminate (never a definitive rc=1).
          * Preserve its diagnostic. */
@@ -547,7 +638,8 @@ static void status_temp_entropy(unsigned char *out, size_t length)
 /* Write the complete payload to an unpredictable same-directory temp file.
  * On any failure the temp link is removed, so the reader sees no terminal
  * marker at all. On success the caller receives the temp pathname to link. */
-static int status_write_temp(const char *payload, char *temp_path, size_t capacity, int code)
+static int status_write_temp(const char *payload, char *temp_path, size_t capacity,
+                             int code, enum marker_kind kind)
 {
     unsigned char entropy[16];
     status_temp_entropy(entropy, sizeof(entropy));
@@ -559,8 +651,9 @@ static int status_write_temp(const char *payload, char *temp_path, size_t capaci
     int fd = -1;
     for (int attempt = 0; attempt < 8; attempt++) {
         int written = snprintf(temp_path, capacity,
-                               "%s/dfroot_tmp_%s_rc%d_%016llx_%ld_%d",
-                               status_root, status_operation_id, code,
+                               "%s/dfroot_tmp_%s_%cc_rc%d_%016llx_%ld_%d",
+                               status_root, status_operation_id,
+                               kind == MARKER_CONFIRM ? 'c' : 't', code,
                                (unsigned long long)nonce, (long)getpid(), attempt);
         if (written < 0 || (size_t)written >= capacity) {
             return status_fail("terminal temp path is too long");
@@ -608,8 +701,11 @@ static int status_write_temp(const char *payload, char *temp_path, size_t capaci
     while (offset < length) {
         ssize_t written;
 #ifdef RUN_STATUS_TEST_HOOKS
-        /* Inject EIO through the same write/error branch production uses. */
-        if ((injected_fault & RUN_STATUS_FAULT_WRITE) != 0) {
+        /* Inject EIO through the same write/error branch production uses.
+         * FAULT_CONFIRM is scoped to the confirmation phase only; the rc7
+         * fallback clears every injected fault before it writes. */
+        if ((kind == MARKER_CONFIRM && (injected_fault & RUN_STATUS_FAULT_CONFIRM) != 0)
+            || (injected_fault & RUN_STATUS_FAULT_WRITE) != 0) {
             errno = EIO;
             written = -1;
         } else
@@ -621,11 +717,11 @@ static int status_write_temp(const char *payload, char *temp_path, size_t capaci
             if (errno == EINTR) {
                 continue;
             }
-            result = status_fail_errno("terminal marker write failed");
+            result = status_fail_phase_errno(kind, "write failed");
             goto done;
         }
         if (written == 0) {
-            result = status_fail("terminal marker write made no progress");
+            result = status_fail_phase(kind, "write made no progress");
             goto done;
         }
         offset += (size_t)written;
@@ -642,13 +738,13 @@ static int status_write_temp(const char *payload, char *temp_path, size_t capaci
         fsync_result = fsync(fd);
     }
     if (fsync_result != 0 && errno != EINVAL && errno != ENOTSUP) {
-        result = status_fail_errno("terminal marker fsync failed");
+        result = status_fail_phase_errno(kind, "fsync failed");
         goto done;
     }
     /* Only a complete, fsynced payload becomes world-readable. The descriptor
      * is still open here, so no pathname-based chmod race is introduced. */
     if (fchmod(fd, 0644) != 0) {
-        result = status_fail_errno("terminal marker fchmod failed");
+        result = status_fail_phase_errno(kind, "fchmod failed");
         goto done;
     }
 
@@ -664,7 +760,7 @@ done:
         if (close_result != 0 && result == 0) {
             /* Preserve the first diagnostic: a close failure must not
              * overwrite a write or fsync failure that already happened. */
-            result = status_fail_errno("terminal marker close failed");
+            result = status_fail_phase_errno(kind, "close failed");
         }
     }
     if (result != 0) {
@@ -709,16 +805,16 @@ static int status_fsync_directory(void)
 /* Best-effort dedicated reader channel for an unconfirmed publication. This
  * uses the same checked pipeline but deliberately ignores injected faults: the
  * fallback is a separate operation and must succeed when the real filesystem
- * is healthy. Never called recursively for rc=7 itself. */
+ * is healthy. It publishes NO confirmation: rc7 is authoritative by itself. */
 static void status_publish_indeterminate(void)
 {
     char final_path[RUN_STATUS_PATH_MAX];
     char temp_path[RUN_STATUS_PATH_MAX];
     char payload[RUN_STATUS_PAYLOAD_MAX];
-    if (marker_path(final_path, sizeof(final_path), status_root, status_operation_id,
-                    RUN_STATUS_TERMINAL_INDETERMINATE) != 0
-        || make_payload(payload, sizeof(payload), status_operation_id,
-                        RUN_STATUS_TERMINAL_INDETERMINATE) != 0) {
+    if (marker_path_kind(final_path, sizeof(final_path), status_root, status_operation_id,
+                         RUN_STATUS_TERMINAL_INDETERMINATE, MARKER_TERMINAL) != 0
+        || make_payload_kind(payload, sizeof(payload), status_operation_id,
+                             RUN_STATUS_TERMINAL_INDETERMINATE, MARKER_TERMINAL) != 0) {
         return;
     }
 #ifdef RUN_STATUS_TEST_HOOKS
@@ -726,7 +822,7 @@ static void status_publish_indeterminate(void)
     injected_fault = RUN_STATUS_FAULT_NONE;
 #endif
     if (status_write_temp(payload, temp_path, sizeof(temp_path),
-                          RUN_STATUS_TERMINAL_INDETERMINATE) == 0) {
+                          RUN_STATUS_TERMINAL_INDETERMINATE, MARKER_TERMINAL) == 0) {
         if (link(temp_path, final_path) == 0) {
             (void)unlink(temp_path);
             (void)status_fsync_directory();
@@ -739,6 +835,68 @@ static void status_publish_indeterminate(void)
 #endif
 }
 
+/* One fully checked publication phase. Returns 0 only after the final link is
+ * present, its temp is unlinked and the directory is fsynced. *linked records
+ * whether the atomic link happened, so the caller can retract exactly what it
+ * published. link() fails with EEXIST for a pre-existing final path, so a
+ * foreign/stale marker is never replaced. */
+static int publish_marker(int code, enum marker_kind kind,
+                          char *final_path, size_t final_capacity,
+                          char *temp_path, size_t temp_capacity, int *linked)
+{
+    char payload[RUN_STATUS_PAYLOAD_MAX];
+    *linked = 0;
+    if (marker_path_kind(final_path, final_capacity, status_root, status_operation_id,
+                         code, kind) != 0
+        || make_payload_kind(payload, sizeof(payload), status_operation_id, code, kind) != 0) {
+        return status_fail("terminal/confirmation marker path or payload is too long");
+    }
+    if (status_write_temp(payload, temp_path, temp_capacity, code, kind) != 0) {
+        return -1;
+    }
+    if (link(temp_path, final_path) != 0) {
+        int result = status_fail_phase_errno(kind, "link failed");
+        (void)status_unlink_temp(temp_path);
+        return result;
+    }
+    *linked = 1;
+#ifdef RUN_STATUS_TEST_HOOKS
+    /* EARLIEST observable instant for the intended phase: the complete final
+     * marker is linked, but its temp unlink, directory fsync and the entire
+     * confirmation phase have not happened, and rc=7 does not exist. A reader
+     * MUST report no decision here. A broken handshake fails closed like any
+     * other post-link failure. */
+    if (kind == MARKER_TERMINAL
+        && status_gated_pause(&post_link_wait_fd, &post_link_notify_fd,
+                              "post-link pause notification failed",
+                              "post-link pause ended unexpectedly") != 0) {
+        return -1;
+    }
+#endif
+    if (status_unlink_temp(temp_path) != 0) {
+        (void)status_fail_phase_errno(kind, "unlink failed");
+        return -1;
+    }
+    if (status_fsync_directory() != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+/* A transient temp-unlink fault clears itself on the first attempt; retry so
+ * a failed publication never leaves debris. ENOENT means already cleaned. */
+static void status_cleanup_temp(const char *temp_path)
+{
+    if (temp_path[0] == '\0') {
+        return;
+    }
+    for (int attempt = 0; attempt < 2; attempt++) {
+        if (status_unlink_temp(temp_path) == 0 || errno == ENOENT) {
+            break;
+        }
+    }
+}
+
 int run_status_write(int code)
 {
     if (code_index(code) < 0) {
@@ -747,79 +905,59 @@ int run_status_write(int code)
     if (!status_configured) {
         return status_fail("marker protocol is not configured");
     }
-    char final_path[RUN_STATUS_PATH_MAX];
-    char temp_path[RUN_STATUS_PATH_MAX];
-    char payload[RUN_STATUS_PAYLOAD_MAX];
-    if (marker_path(final_path, sizeof(final_path), status_root, status_operation_id, code) != 0
-        || make_payload(payload, sizeof(payload), status_operation_id, code) != 0) {
-        return status_fail("terminal marker path or payload is too long");
-    }
+    char terminal_path[RUN_STATUS_PATH_MAX] = {0};
+    char terminal_temp[RUN_STATUS_PATH_MAX] = {0};
+    char confirm_path[RUN_STATUS_PATH_MAX] = {0};
+    char confirm_temp[RUN_STATUS_PATH_MAX] = {0};
+    int terminal_linked = 0;
+    int confirm_linked = 0;
 
-    if (status_write_temp(payload, temp_path, sizeof(temp_path), code) != 0) {
-        return -1;
-    }
-
-    /* link() is atomic and fails with EEXIST if the run-scoped final path is
-     * already present, so conflict detection is preserved: we never replace a
-     * marker published by another code. */
-    if (link(temp_path, final_path) != 0) {
-        int result = status_fail_errno("terminal marker link failed");
-        (void)status_unlink_temp(temp_path);
-        return result;
-    }
-#ifdef RUN_STATUS_TEST_HOOKS
-    /* EARLIEST observable instant: link() succeeded, so the complete final
-     * marker exists, but temp unlink, directory fsync and failure detection
-     * have not run yet and rc=7 does not exist yet. Host-only gate for the
-     * deterministic reader test that proves this window is classifiable as the
-     * intended verdict. A broken handshake is itself an unconfirmed failure:
-     * fail closed through the same rc=7 path as any other post-link failure. */
-    if (status_gated_pause(&post_link_wait_fd, &post_link_notify_fd,
-                           "post-link pause notification failed",
-                           "post-link pause ended unexpectedly") != 0) {
+    /* Phase 1: the intended final marker. Phase 2: its matching confirmation.
+     * Only completion of BOTH phases counts as a confirmed publication. */
+    if (publish_marker(code, MARKER_TERMINAL, terminal_path, sizeof(terminal_path),
+                       terminal_temp, sizeof(terminal_temp), &terminal_linked) != 0) {
         goto unconfirmed;
     }
-#endif
-    if (status_unlink_temp(temp_path) != 0) {
-        (void)status_fail_errno("terminal marker unlink failed");
-        goto unconfirmed;
-    }
-    if (status_fsync_directory() != 0) {
+    if (publish_marker(code, MARKER_CONFIRM, confirm_path, sizeof(confirm_path),
+                       confirm_temp, sizeof(confirm_temp), &confirm_linked) != 0) {
         goto unconfirmed;
     }
     return 0;
 
 unconfirmed:
     {
-        /* The final link is visible but not durably confirmed. Publish the
-         * indeterminate reader channel FIRST: the classifier scans the whole
-         * directory before deciding and rc=7 outranks success, so even while
-         * the intended marker is still present a concurrent reader returns
-         * rc=7, never SUCCESS. Only then retract our own final link. The
-         * original diagnostic is preserved for the caller (bootstrap maps -1
-         * to rc=7, never to the intended success/error code). */
+        /* The indeterminate reader channel is published FIRST, before ANY
+         * final link is retracted, so a concurrent reader sees indeterminate
+         * and never a clean absence or an actionable success. rc=7 needs no
+         * confirmation. For an rc=7 intended code the channel already exists
+         * and is deliberately kept. The first diagnostic is restored for the
+         * caller: bootstrap maps -1 to rc=7, never to the intended code. */
         char first_error[RUN_STATUS_DIAGNOSTIC_MAX];
         snprintf(first_error, sizeof(first_error), "%s", status_error);
 
-        /* A transient temp-unlink failure must not leave debris behind. Retry
-         * here (the one-shot test fault has already cleared itself); a second
-         * failure is tolerated because the temp name is never classified. */
-        for (int attempt = 0; attempt < 2; attempt++) {
-            if (status_unlink_temp(temp_path) == 0 || errno == ENOENT) {
-                break;
-            }
-        }
-        if (code != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        if (!(code == RUN_STATUS_TERMINAL_INDETERMINATE && terminal_linked)) {
             status_publish_indeterminate();
         }
 #ifdef RUN_STATUS_TEST_HOOKS
-        /* Both the intended marker and the rc=7 marker are visible here. The
-         * gated reader test classifies in exactly this coexistence window. */
+        /* Both the intended marker and the rc=7 channel are visible here when
+         * a post-link failure happened. The gated reader test classifies in
+         * exactly this coexistence window. */
         (void)status_gated_pause(&retract_wait_fd, &retract_notify_fd,
                                  "retract pause notification failed",
                                  "retract pause ended unexpectedly");
 #endif
-        (void)unlink(final_path);
+        if (code != RUN_STATUS_TERMINAL_INDETERMINATE) {
+            if (confirm_linked) {
+                (void)unlink(confirm_path);
+            }
+            if (terminal_linked) {
+                (void)unlink(terminal_path);
+            }
+        } else if (confirm_linked) {
+            (void)unlink(confirm_path);
+        }
+        status_cleanup_temp(terminal_temp);
+        status_cleanup_temp(confirm_temp);
         snprintf(status_error, sizeof(status_error), "%s", first_error);
         return -1;
     }
@@ -990,8 +1128,14 @@ int run_status_exit_code(const struct run_status_result *result)
         return -1;
     }
     if (result->verdict == RUN_STATUS_VERDICT_CONFLICT) {
-        /* Two different confirmed codes disagree, so neither is proven. */
+        /* Two different observed codes disagree, so neither is proven. */
         return RUN_STATUS_TERMINAL_INDETERMINATE;
+    }
+    /* A definitive non-7 code is actionable only with a matching
+     * confirmation. rc7 stays authoritative without one. */
+    if (result->code != RUN_STATUS_TERMINAL_INDETERMINATE
+        && !result->publication_confirmed) {
+        return -1;
     }
     return result->code;
 }
