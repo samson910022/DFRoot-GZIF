@@ -1005,6 +1005,8 @@ This section records the fourth repair round on `fix/app-correctness-safety`
 (final local HEAD `74d35f5`). **§5/§11/§12/§14 remain the 2026-11-17 historical hardware ledger;
 §15–§18 remain prior repair-round records.** R4 closes Re-review 3 findings
 **R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**.
+**Current status (R5, 689f378): R2-14 and R2-16 are SCOPED / OPEN gates,
+not closed and not proved safe — see README.md and CHANGELOG.md R5 sections.**
 Every phase was host-verified only; no device/ADB, payload, privileged
 container, cold boot, soft reboot, APK assembly, dependency or binary change.
 

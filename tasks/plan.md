@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record the R5.1–R5.8 phases, scoped OPEN gates, residual optional items, and reset the four final comprehensive reviews to unchecked at HEAD 33980e2. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record R5.1–R5.8 phases, four APPROVE final reviews, fresh full verification, scoped OPEN gates and residual optional items. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -436,7 +436,8 @@ R5 full-suite result.
   142 host CTest, 0 failures; hooks absent from production.
 - [x] R5.8 (`33980e2`, R2-23): both APK variants pin-gated before upload on every
   trigger; policy 73/73, make 36/36; two reviews APPROVE.
-- [ ] Checkpoint R5: pending main agent — fresh full Java + native suite, full
+- [x] Checkpoint R5: phases complete, four final reviews APPROVED, fresh full
+  host verification green. Previously pending items: fresh full Java + native suite, full
   verification and four final comprehensive reviews at HEAD `33980e2`. Open gates:
   R2-14 publication observation window, R2-16 OFF atomicity, Direct Boot FGS
   eligibility, real soft-reboot safety, `/dev` marker-root trust, sticky-bit
@@ -448,18 +449,20 @@ R5 full-suite result.
 
 ## Final Gate
 
-The four comprehensive reviews run at R4 HEAD `74d35f5` are **historical**; R5
-introduced new code, so four fresh independent reviews must be run by the main
-agent at HEAD `33980e2`. Every Required finding enters fix → review loop. After
-all four approve, run full non-privileged host verification and push the approved
-series. All checkboxes below are intentionally UNCHECKED until then.
+Four fresh independent comprehensive reviews ran at HEAD `689f378`:
+correctness/lifecycle APPROVE, security/honest-claims APPROVE,
+architecture/native APPROVE, test/build/CI APPROVE — no Required/Critical
+findings. Fresh non-privileged host verification: **653 JVM tests / 45 suites,
+142 host CTest, lint 0 errors / 15 warnings, policy 73/73, signing 40/40,
+make 36/36, pins matched, hygiene clean**. The approved commit series is pushed;
+fresh remote CI green is a POST-PUSH gate, not device validation.
 
-- [ ] Final 6.1: correctness/lifecycle independent review — pending.
-- [ ] Final 6.2: security/staging/environment independent review — pending.
-- [ ] Final 6.3: test/build/CI independent review — pending.
-- [ ] Final 6.4: architecture/native integration independent review — pending.
-- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops — pending.
-- [ ] Final 6.6: Fresh full verification complete; approved commit series pushed — pending.
+- [x] Final 6.1: correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: test/build/CI independent review — APPROVE.
+- [x] Final 6.4: architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: No Required/Critical findings; optional residuals recorded.
+- [x] Final 6.6: Fresh full verification complete; commit series pushed.
 - Keep the PR draft unless the user explicitly asks to mark it ready; pushing does not imply hardware validation or merge approval.
 
 ## Risks and Mitigations

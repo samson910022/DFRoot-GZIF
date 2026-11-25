@@ -1,5 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration, final host verification and four APPROVE comprehensive reviews. See NOTICE. -->
-<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record R5.1–R5.8 phases/checkpoint, scoped OPEN gates, residual optional items, and reset the four final comprehensive reviews to unchecked at HEAD 33980e2. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R5 final): record R5.1–R5.8 phases/checkpoint, four APPROVE final reviews, fresh full verification, scoped OPEN gates and residual optional items. See NOTICE. -->
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
@@ -648,8 +648,9 @@ or APK assembly.
 Authoritative record of the third repair round on `fix/app-correctness-safety`
 (final local HEAD `1252b3d`), after a mid-round rebase onto merged PR #1
 (`origin/master` `9f60e16`). Earlier phase records above remain historical.
-Findings closed: **R2-12, R2-13, R2-14, R2-16, R2-17, R2-18, R2-19 and the
-R2-04 caveat**. All R3 work was host-verified only; no device/ADB/payload/
+Findings closed at that historical round: **R2-12, R2-13, R2-14, R2-16,
+R2-17, R2-18, R2-19 and the R2-04 caveat**. R2-14/R2-16 were later SCOPED /
+OPEN in R5 — see the R5 section below. All R3 work was host-verified only; no device/ADB/payload/
 privileged-container/APK validation, dependency change or binary change.
 
 - [x] R3.1 (`6ebf9e3`, R2-12): map terminal classifier failures to rc=7, add one
@@ -706,8 +707,9 @@ privileged-container/APK validation, dependency change or binary change.
 
 ## Fourth repair round (R4, 2026-11-26) — phases, checkpoint and gates
 
-Committed local HEAD `74d35f5` covers R4.1–R4.9. Findings closed: **R2-13, R2-12, R2-14
-(narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**. Host verification
+Committed local HEAD `74d35f5` covers R4.1–R4.9. Findings closed at that
+historical round: **R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18,
+R2-20, R2-21 and R2-22**. R2-14/R2-16 were later SCOPED / OPEN in R5. Host verification
 only; no device/hardware/ADB/payload/privileged-container/cold-boot/soft-reboot/
 APK-assembly validation, no dependency or binary change, no full-suite/CI claim.
 
@@ -783,7 +785,9 @@ fresh full-suite or CI-green claim (623/45 and 140/138 are prior-round baselines
   fixtures; 142 host CTest; two reviews APPROVE.
 - [x] R5.8 `33980e2` (R2-23): both APK variants pin-gated before upload; policy
   73/73, make 36/36; two reviews APPROVE.
-- [ ] Checkpoint R5: pending main agent — fresh full host verification and four
+- [x] Checkpoint R5: phases complete, four final reviews APPROVED, full host
+  verification green; four final checks below completed by the main agent.
+  Previously pending item: fresh full host verification and four
   final comprehensive reviews at HEAD `33980e2`. Open gates: R2-14 publication
   window, R2-16 OFF atomicity, Direct Boot FGS, real soft reboot, `/dev` marker
   trust, sticky-bit owner, AES key in argv, no recovery UI, BOOT_COUNT diagnostic.
@@ -794,18 +798,23 @@ fresh full-suite or CI-green claim (623/45 and 140/138 are prior-round baselines
 
 ## Final Comprehensive Review
 
-The four comprehensive reviews recorded for R4 at `74d35f5` are **historical**.
-R5 introduced new code, so four fresh independent reviews must be run by the main
-agent at HEAD `33980e2`; any Required/Critical finding enters a fix → review loop.
-All checkboxes below are intentionally UNCHECKED until that gate completes.
+Four fresh independent comprehensive reviews were run at HEAD `689f378`
+(final R5 state): correctness/lifecycle APPROVE, security/honest-claims APPROVE,
+architecture/native APPROVE, test/build/CI APPROVE. No Required/Critical
+findings; the reviewers' optional/hardening items are recorded below, not
+silently accepted. Fresh host verification by the main agent: **653 JVM tests /
+45 suites, 0 failures/errors/skips**, **142 host CTest**, lint 0 errors /
+15 warnings, workflow policy 73/73, signing 40/40, make 36/36, pins matched,
+`git diff --check` clean. The approved commit series is pushed; a fresh remote
+CI green run after push remains the POST-PUSH gate.
 
-- [ ] Final 6.1: Correctness/lifecycle independent review — pending (main agent).
-- [ ] Final 6.2: Security/staging/environment independent review — pending (main agent).
-- [ ] Final 6.3: Test/build/CI independent review — pending (main agent).
-- [ ] Final 6.4: Architecture/native integration independent review — pending (main agent).
-- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops — pending.
-- [ ] Final 6.6: Fresh full verification complete; approved commit series is
-  committed and pushed by the main agent — pending.
+- [x] Final 6.1: Correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: Security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: Test/build/CI independent review — APPROVE.
+- [x] Final 6.4: Architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: No Required/Critical findings; optional residuals recorded.
+- [x] Final 6.6: Fresh full verification complete; approved commit series is
+  committed and pushed by the main agent.
 
 Residual optional items recorded, not silently accepted: the signed-release
 job not running packaged-pin verification itself (inherited PR #1 policy), the
