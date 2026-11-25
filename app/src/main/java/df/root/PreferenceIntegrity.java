@@ -3,6 +3,9 @@
 // validation and lifecycle-safe listeners (P2-08/P2-10). See NOTICE.
 // Round-4 follow-up: unattributable faults latch WILDCARD, fail-closed is
 // sticky across beginWrite/finishWriteSuccess, and valid restores gate at boot.
+// Round-5: a restored WILDCARD stays sticky, marker completion is reported to
+// the caller, and a launch reservation excludes preference writes for the whole
+// launch operation (including the final quarantine re-check).
 package df.root;
 
 import android.content.Context;
@@ -72,6 +75,16 @@ public final class PreferenceIntegrity {
         void onIntegrityChanged();
     }
 
+    /**
+     * Outcome of reserving a write-ahead transaction or a launch. OK means the
+     * caller owns the token; LAUNCH_BUSY means a launch owns it (or another
+     * launch is already in progress); FAIL_CLOSED means quarantine/uninitialized
+     * state forbids the operation. No outcome ever implies boot was enabled.
+     */
+    public enum TokenResult {
+        OK, LAUNCH_BUSY, FAIL_CLOSED
+    }
+
     /** Durable side effect invoked at the failure boundary (never auto-enables). */
     interface BootGate {
         void disableBootLaunch();
@@ -112,6 +125,8 @@ public final class PreferenceIntegrity {
     private static boolean sMarkerValid;        // set only after strict read-back validation
     private static boolean sRestoredAfterRestart;
     private static boolean sFailClosed;
+    /** Set only by tryBeginLaunch(); cleared in a finally by its owner. */
+    private static boolean sLaunchHeld;
 
     private PreferenceIntegrity() {}
 
@@ -184,8 +199,15 @@ public final class PreferenceIntegrity {
                 sRestoredAfterRestart = true;
                 sMarkerActive = true;
                 sMarkerValid = true;
-                sAmbiguousKeys.addAll(data.keys.isEmpty()
-                        ? Collections.singleton(WILDCARD) : data.keys);
+                Set<String> restoredKeys = data.keys.isEmpty()
+                        ? Collections.singleton(WILDCARD) : data.keys;
+                sAmbiguousKeys.addAll(restoredKeys);
+                // A restored WILDCARD is an unattributable fault. Keep the
+                // restored marker authoritative (do NOT failClosedLocked(),
+                // which would discard it): only the sticky prohibition carries
+                // over the restart. No key can clear it. The durable gate below
+                // still runs for every restored quarantine.
+                if (restoredKeys.contains(WILDCARD)) noteFailClosedLocked();
                 // Record that this restart observed the persisted quarantine.
                 if (!writeMarkerLocked(SENTINEL_RESTORED)) failClosedLocked();
                 else restoredValid = true;
@@ -243,22 +265,34 @@ public final class PreferenceIntegrity {
     /**
      * Write-ahead step: durably publish a PENDING marker for this key BEFORE the
      * caller commits. Any fault latches quarantine and disables boot
-     * synchronously, and false means the caller MUST NOT attempt the commit.
+     * synchronously, and anything other than {@link TokenResult#OK} means the
+     * caller MUST NOT attempt the commit. {@link #beginWrite(String)} is the
+     * boolean wrapper for callers that do not need the refusal reason.
      */
     public static boolean beginWrite(String key) {
+        return beginWriteEx(key) == TokenResult.OK;
+    }
+
+    /**
+     * While a launch token is held, preference writes fail fast: no marker, no
+     * fault latching and no gate call. The launch owns the whole decision window
+     * (preference read through the final quarantine check and native run).
+     */
+    public static TokenResult beginWriteEx(String key) {
         synchronized (LOCK) {
+            if (sLaunchHeld) return TokenResult.LAUNCH_BUSY;
             String k = keyFor(key);
             if (!sInitialized) {
                 sAmbiguousKeys.add(k);
                 failClosedLocked();
-                return false;
+                return TokenResult.FAIL_CLOSED;
             }
             if (sFailClosed) {
                 // Sticky fail-closed: an unattributable fault can never be
                 // cleared by starting a new, unrelated transaction.
                 sAmbiguousKeys.add(WILDCARD);
                 disableBootSafelyLocked(); // synchronous gate call, no commit
-                return false;
+                return TokenResult.FAIL_CLOSED;
             }
             sAmbiguousKeys.add(k);
             sPending.put(k, sPending.getOrDefault(k, 0) + 1);
@@ -267,44 +301,87 @@ public final class PreferenceIntegrity {
                 // No commit will follow: resolve this write-ahead as ambiguous.
                 decrementPendingLocked(k);
                 sPendingValidated.remove(k);
-                return false;
+                return TokenResult.FAIL_CLOSED;
             }
             sPendingValidated.add(k);
-            return true;
+            return TokenResult.OK;
+        }
+    }
+
+    /**
+     * Reserve the single launch token. Refused when a launch already owns it,
+     * when a write transaction is in flight, or when quarantine/fail-closed
+     * state makes the preference snapshot untrustworthy. The caller MUST call
+     * {@link #releaseLaunch()} in a finally block, on every path.
+     */
+    public static TokenResult tryBeginLaunch() {
+        synchronized (LOCK) {
+            if (sLaunchHeld) return TokenResult.LAUNCH_BUSY;
+            if (!sInitialized || sQuarantined || sFailClosed || totalPendingLocked() > 0) {
+                return TokenResult.FAIL_CLOSED; // never a permission to launch
+            }
+            sLaunchHeld = true;
+            return TokenResult.OK;
+        }
+    }
+
+    /** Idempotent release of the launch token; never changes quarantine state. */
+    public static void releaseLaunch() {
+        synchronized (LOCK) {
+            sLaunchHeld = false;
+        }
+    }
+
+    /** Test-only observation of the reservation and in-flight state. */
+    static boolean launchHeldForTest() {
+        synchronized (LOCK) {
+            return sLaunchHeld;
+        }
+    }
+
+    static int pendingForTest(String key) {
+        synchronized (LOCK) {
+            Integer count = sPending.get(keyFor(key));
+            return count == null ? 0 : count;
         }
     }
 
     /**
      * Commit succeeded: drop this key from the in-flight set and republish.
-     * The latch is cleared only for a fully validated PENDING -> commit cycle
-     * of the SAME key, and never while a sticky fail-closed fault is latched.
+     * Returns true ONLY when this key's PENDING -> commit cycle was validated
+     * and the resulting state was durably recorded. Every fail-closed branch
+     * returns false, so a caller can never report a commit as saved on an
+     * incomplete marker/retirement. The latch is cleared only for a fully
+     * validated cycle of the SAME key, never for WILDCARD or a sticky fault.
      */
-    public static void finishWriteSuccess(String key) {
-        boolean changed = false;
+    public static boolean finishWriteSuccess(String key) {
+        boolean changed;
+        boolean success = false;
         synchronized (LOCK) {
+            boolean beforeMarker = sMarkerActive && sMarkerValid;
+            boolean beforeQuarantined = sQuarantined;
             String k = keyFor(key);
             if (!sInitialized) {
-                boolean before = sQuarantined;
                 failClosedLocked();
-                changed = !before;
             } else if (sFailClosed) {
                 // Unattributable faults stay quarantined for every key, even if
                 // a caller reports a successful commit for an unrelated one.
                 sAmbiguousKeys.add(WILDCARD);
-                sPending.remove(k);
+                decrementPendingLocked(k); // no pending leak on refusal
                 sPendingValidated.remove(k);
                 disableBootSafelyLocked();
             } else if (!sPendingValidated.contains(k)) {
                 // No validated write-ahead for this key: success cannot prove
                 // that memory and the XML agree, so fail closed.
-                boolean before = sQuarantined;
                 failClosedLocked();
-                changed = !before;
-            } else {
-                boolean before = sMarkerActive && sMarkerValid;
                 decrementPendingLocked(k);
                 sPendingValidated.remove(k);
-                sAmbiguousKeys.remove(k);
+            } else {
+                decrementPendingLocked(k);
+                sPendingValidated.remove(k);
+                // WILDCARD is never key-clearable; keep it until a genuinely
+                // attributed recovery (which sticky fail-closed forbids).
+                if (!WILDCARD.equals(k) && !sPending.containsKey(k)) sAmbiguousKeys.remove(k);
                 boolean ok;
                 if (totalPendingLocked() > 0) {
                     ok = writeMarkerLocked(SENTINEL_PENDING);
@@ -319,11 +396,13 @@ public final class PreferenceIntegrity {
                     sMarkerValid = false;
                     sRestoredAfterRestart = false;
                 }
-                changed |= before != (sMarkerActive && sMarkerValid);
-                if (ok && totalPendingLocked() == 0 && sAmbiguousKeys.isEmpty()) changed = true;
+                success = ok && !sFailClosed && !WILDCARD.equals(k);
             }
+            changed = beforeMarker != (sMarkerActive && sMarkerValid)
+                    || beforeQuarantined != sQuarantined;
         }
         if (changed) notifyListeners();
+        return success;
     }
 
     /**
@@ -365,6 +444,7 @@ public final class PreferenceIntegrity {
         synchronized (LOCK) {
             if (!sInitialized || sFailClosed || key == null || key.isEmpty()) return;
             String k = keyFor(key);
+            if (WILDCARD.equals(k)) return; // an unattributable fault is never key-clearable
             if (sPending.containsKey(k) || !sAmbiguousKeys.remove(k)) return;
             if (sAmbiguousKeys.isEmpty()) {
                 if (!deleteMarkerLocked()) return; // fail closed: keep quarantine
@@ -436,6 +516,7 @@ public final class PreferenceIntegrity {
             sMarkerValid = false;
             sRestoredAfterRestart = false;
             sFailClosed = false;
+            sLaunchHeld = false;
             sAmbiguousKeys.clear();
             sPending.clear();
             sPendingValidated.clear();

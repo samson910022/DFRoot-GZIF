@@ -19,6 +19,9 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * JVM-only tests for PreferencePersister using a fake SharedPreferences that
@@ -188,12 +191,94 @@ public class PreferencePersisterTest {
         assertFalse(markerFile.exists());
     }
 
+    @Test
+    public void markerCompletionFailureIsReportedAndNeverReturnedAsSuccess() throws Exception {
+        PreferenceIntegrity.MarkerIo failDelete = new PreferenceIntegrity.MarkerIo() {
+            @Override
+            public boolean publish(File m, byte[] bytes) {
+                try {
+                    Files.write(m.toPath(), bytes);
+                    return true;
+                } catch (java.io.IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
+            @Override
+            public boolean delete(File m) {
+                return false; // retirement not durably recorded
+            }
+        };
+        PreferenceIntegrity.resetForTest();
+        PreferenceIntegrity.setMarkerIoForTest(failDelete);
+        PreferenceIntegrity.init(markerFile);
+        PreferencePersister integrityPersister = new PreferencePersister(prefs, reporter);
+
+        assertFalse("failed marker completion must not be reported as saved",
+                integrityPersister.putBoolean("soft_reboot", true));
+        assertEquals(1, reporter.failures.size());
+        assertTrue(reporter.failures.get(0).detail.contains("integrity marker"));
+        assertEquals("commit did run, but the transaction is still uncertain",
+                1, prefs.commitCalls);
+        assertTrue(PreferenceIntegrity.isQuarantined());
+    }
+
+    @Test
+    public void overlappingWritesAreSerializedAcrossBeginCommitAndFinish() throws Exception {
+        CountDownLatch firstCommitEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch secondAttempted = new CountDownLatch(1);
+        AtomicInteger hooks = new AtomicInteger();
+        // Block the FIRST commit inside the transaction; no sleeps or device APIs.
+        prefs.commitHook = () -> {
+            if (hooks.getAndIncrement() == 0) {
+                firstCommitEntered.countDown();
+                try {
+                    releaseFirst.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+        };
+        boolean[] firstResult = new boolean[1];
+        boolean[] secondResult = new boolean[1];
+        Thread first = new Thread(() -> firstResult[0] =
+                persister.putString("su_manager", "pkg.one"));
+        Thread second = new Thread(() -> {
+            secondAttempted.countDown();
+            secondResult[0] = persister.putBoolean("soft_reboot", true);
+        });
+
+        first.start();
+        assertTrue(firstCommitEntered.await(5, TimeUnit.SECONDS));
+        second.start();
+        assertTrue(secondAttempted.await(5, TimeUnit.SECONDS));
+        // The second writer cannot reach begin/commit while the first owns the
+        // transaction lock, so its decision cannot overlap the first one.
+        assertEquals(1, prefs.commitCalls);
+        assertTrue(new String(Files.readAllBytes(markerFile.toPath()), StandardCharsets.UTF_8)
+                .contains("su_manager"));
+
+        releaseFirst.countDown();
+        first.join(5000);
+        second.join(5000);
+        assertFalse(first.isAlive());
+        assertFalse(second.isAlive());
+        assertTrue(firstResult[0]);
+        assertTrue(secondResult[0]);
+        assertEquals(2, prefs.commitCalls);
+        assertEquals(0, reporter.failures.size());
+        assertFalse(PreferenceIntegrity.isQuarantined());
+        assertFalse(markerFile.exists());
+    }
+
     /** SharedPreferences fake with separate in-memory and on-disk maps. */
     private static final class FakePreferences implements SharedPreferences {
         final Map<String, Object> memory = new HashMap<>();
         final Map<String, Object> disk = new HashMap<>();
         boolean commitResult = true;
         boolean throwOnCommit;
+        Runnable commitHook;
         int commitCalls;
 
         @Override
@@ -286,6 +371,7 @@ public class PreferencePersisterTest {
             @Override
             public boolean commit() {
                 commitCalls++;
+                if (commitHook != null) commitHook.run();
                 if (throwOnCommit) throw new IllegalStateException("fake disk failure");
                 if (!commitResult) return false; // memory stays changed, disk does not
                 if (cleared) disk.clear();

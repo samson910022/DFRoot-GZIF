@@ -271,6 +271,122 @@ public class PreferenceIntegrityTest {
         assertTrue(marker.exists());
     }
 
+    @Test
+    public void failedMarkerCompletionNeverConfirmsTheCommitAndStaysQuarantined() {
+        PreferenceIntegrity.MarkerIo failDelete = new PreferenceIntegrity.MarkerIo() {
+            @Override
+            public boolean publish(File m, byte[] bytes) {
+                try {
+                    Files.write(m.toPath(), bytes);
+                    return true;
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            }
+
+            @Override
+            public boolean delete(File m) {
+                return false; // marker cannot be durably retired
+            }
+        };
+        reinitWith(failDelete);
+        assertTrue(PreferenceIntegrity.beginWrite("su_manager"));
+        assertFalse("an incomplete marker must not confirm a successful commit",
+                PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertEquals(0, PreferenceIntegrity.pendingForTest("su_manager")); // no leak
+        assertTrue(PreferenceIntegrity.isQuarantined());
+        assertTrue(marker.exists());
+        assertFalse(PreferenceIntegrity.durableMarkerActive()); // fail-closed, not trusted
+        assertTrue(gate.disableCalls >= 1);
+        // Sticky fault: neither a new transaction nor an unrelated key can clear it.
+        assertFalse(PreferenceIntegrity.beginWrite("other.key"));
+        assertFalse(PreferenceIntegrity.finishWriteSuccess("other.key"));
+        assertEquals(0, PreferenceIntegrity.pendingForTest("other.key"));
+        assertTrue(PreferenceIntegrity.isQuarantined());
+    }
+
+    @Test
+    public void restoredWildcardStaysStickyAndNoKeyCanClearIt() throws Exception {
+        writeMarker(PreferenceIntegrity.SENTINEL_AMBIGUOUS + "\n*\n");
+        reinitWith(null);
+        assertTrue(PreferenceIntegrity.isQuarantined());
+        assertTrue(PreferenceIntegrity.restoredAfterRestart());
+        // The restored marker remains authoritative; only the sticky fault is added.
+        assertTrue(PreferenceIntegrity.durableMarkerActive());
+        String restored = markerContent();
+        assertTrue(restored.contains(PreferenceIntegrity.SENTINEL_RESTORED));
+        assertTrue(restored.contains("*"));
+        assertTrue(gate.disableCalls >= 1); // gate still ran for the restored marker
+
+        assertFalse(PreferenceIntegrity.beginWrite("su_manager"));
+        assertFalse(PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertFalse(PreferenceIntegrity.finishWriteSuccess("*"));
+        PreferenceIntegrity.markConsistent("su_manager");
+        PreferenceIntegrity.markConsistent("*");
+        assertTrue(PreferenceIntegrity.isQuarantined());
+        assertTrue(PreferenceIntegrity.durableMarkerActive());
+        assertTrue(markerContent().contains("*"));
+    }
+
+    @Test
+    public void launchTokenExcludesWritesAndRefusesConcurrentLaunch() {
+        assertEquals(PreferenceIntegrity.TokenResult.OK, PreferenceIntegrity.tryBeginLaunch());
+        assertTrue(PreferenceIntegrity.launchHeldForTest());
+        // Writes fail fast while a launch owns the decision window: no marker,
+        // no quarantine latch, no boot-disable side effect.
+        assertEquals(PreferenceIntegrity.TokenResult.LAUNCH_BUSY,
+                PreferenceIntegrity.beginWriteEx("su_manager"));
+        assertFalse(PreferenceIntegrity.beginWrite("su_manager"));
+        assertFalse(marker.exists());
+        assertFalse(PreferenceIntegrity.isQuarantined());
+        assertEquals(0, gate.disableCalls);
+        assertEquals(PreferenceIntegrity.TokenResult.LAUNCH_BUSY,
+                PreferenceIntegrity.tryBeginLaunch());
+        PreferenceIntegrity.releaseLaunch();
+        assertFalse(PreferenceIntegrity.launchHeldForTest());
+
+        // An in-flight write-ahead latches quarantine, so a launch fails closed
+        // until that transaction is resolved.
+        assertEquals(PreferenceIntegrity.TokenResult.OK,
+                PreferenceIntegrity.beginWriteEx("su_manager"));
+        assertEquals(PreferenceIntegrity.TokenResult.FAIL_CLOSED,
+                PreferenceIntegrity.tryBeginLaunch());
+        assertFalse(PreferenceIntegrity.launchHeldForTest());
+        assertTrue(PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertEquals(PreferenceIntegrity.TokenResult.OK, PreferenceIntegrity.tryBeginLaunch());
+        PreferenceIntegrity.releaseLaunch();
+
+        // Quarantine (and uninitialized state) refuse a launch outright.
+        PreferenceIntegrity.markAmbiguous("su_manager");
+        assertEquals(PreferenceIntegrity.TokenResult.FAIL_CLOSED,
+                PreferenceIntegrity.tryBeginLaunch());
+        assertFalse(PreferenceIntegrity.launchHeldForTest());
+        PreferenceIntegrity.resetForTest();
+        assertEquals(PreferenceIntegrity.TokenResult.FAIL_CLOSED,
+                PreferenceIntegrity.tryBeginLaunch());
+        assertFalse(PreferenceIntegrity.launchHeldForTest());
+    }
+
+    @Test
+    public void finishWithoutValidatedWriteAheadFailsClosedWithoutPendingLeak() {
+        assertFalse(PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertTrue(PreferenceIntegrity.isQuarantined());
+        assertTrue(gate.disableCalls >= 1);
+        assertEquals(0, PreferenceIntegrity.pendingForTest("su_manager"));
+        assertFalse(PreferenceIntegrity.beginWrite("su_manager"));
+        assertEquals(0, PreferenceIntegrity.pendingForTest("su_manager"));
+
+        // Overlapping same-key transactions also resolve every pending count.
+        reinitWith(null);
+        assertTrue(PreferenceIntegrity.beginWrite("su_manager"));
+        assertTrue(PreferenceIntegrity.beginWrite("su_manager"));
+        assertEquals(2, PreferenceIntegrity.pendingForTest("su_manager"));
+        assertTrue(PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertFalse(PreferenceIntegrity.finishWriteSuccess("su_manager"));
+        assertEquals(0, PreferenceIntegrity.pendingForTest("su_manager"));
+        assertTrue(PreferenceIntegrity.isQuarantined());
+    }
+
     private static final class RecordingGate implements PreferenceIntegrity.BootGate {
         int disableCalls;
 

@@ -107,6 +107,62 @@ public class ListenerLifecycleTest {
         assertFalse(BootUiPolicy.desiredChecked(false));
     }
 
+    @Test
+    public void onlyExplicitComponentSettingsAreVerifiedObservations() {
+        // PackageManager integer values: 1 ENABLED, 2 DISABLED, 0 DEFAULT.
+        BootUiPolicy.BootComponentState enabled = BootUiPolicy.fromPackageManagerState(1);
+        BootUiPolicy.BootComponentState disabled = BootUiPolicy.fromPackageManagerState(2);
+        BootUiPolicy.BootComponentState unknown = BootUiPolicy.fromPackageManagerState(0);
+        assertEquals(BootUiPolicy.BootComponentState.ENABLED, enabled);
+        assertEquals(BootUiPolicy.BootComponentState.DISABLED, disabled);
+        assertEquals(BootUiPolicy.BootComponentState.UNKNOWN, unknown);
+        assertEquals(BootUiPolicy.BootComponentState.UNKNOWN,
+                BootUiPolicy.fromPackageManagerState(99));
+
+        assertTrue(BootUiPolicy.desiredChecked(enabled));
+        assertFalse(BootUiPolicy.desiredChecked(disabled));
+        assertFalse("UNKNOWN is shown conservatively, not verified OFF",
+                BootUiPolicy.desiredChecked(unknown));
+        assertTrue(BootUiPolicy.verifiedDisabled(disabled));
+        assertFalse(BootUiPolicy.verifiedDisabled(unknown));
+        assertFalse(BootUiPolicy.verifiedDisabled(enabled));
+
+        // The user may always try OFF; ON needs a trustworthy, verified state.
+        assertTrue(BootUiPolicy.mayChangeTo(false, unknown, true));
+        assertTrue(BootUiPolicy.mayChangeTo(false, unknown, false));
+        assertFalse(BootUiPolicy.mayChangeTo(true, unknown, false));
+        assertFalse(BootUiPolicy.mayChangeTo(true, unknown, true));
+        assertTrue(BootUiPolicy.mayChangeTo(true, disabled, false));
+        assertFalse(BootUiPolicy.mayChangeTo(true, disabled, true));
+
+        // Framework re-application is accepted only for an observed matching state.
+        assertTrue(BootUiPolicy.acceptFrameworkChange(true, enabled));
+        assertTrue(BootUiPolicy.acceptFrameworkChange(false, disabled));
+        assertFalse(BootUiPolicy.acceptFrameworkChange(true, disabled));
+        assertFalse("UNKNOWN rejects every framework write",
+                BootUiPolicy.acceptFrameworkChange(false, unknown));
+        assertFalse(BootUiPolicy.acceptFrameworkChange(true, unknown));
+    }
+
+    @Test
+    public void readbackFailureIsNotEvidenceOfDisabledAndNeverAutoEnables() {
+        BootUiPolicy.BootComponentState failure = BootUiPolicy.fromReadbackFailure();
+        assertEquals(BootUiPolicy.BootComponentState.UNKNOWN, failure);
+        assertFalse("a failed observation is not verified OFF",
+                BootUiPolicy.verifiedDisabled(failure));
+        assertFalse(BootUiPolicy.desiredChecked(failure));
+        assertFalse("recovery never auto-enables an unverifiable component",
+                BootUiPolicy.onRecovery(failure, true));
+        assertTrue("the switch stays usable so the user can try turning it OFF",
+                BootUiPolicy.mayChangeTo(false, failure, true));
+        assertFalse(BootUiPolicy.acceptFrameworkChange(false, failure));
+        assertFalse(BootUiPolicy.acceptFrameworkChange(true, failure));
+        // Quarantine disables independently of the observation and marker health.
+        assertTrue(BootUiPolicy.disableOnQuarantine(true, true));
+        assertTrue(BootUiPolicy.disableOnQuarantine(true, false));
+        assertFalse(BootUiPolicy.disableOnQuarantine(false, false));
+    }
+
     private static final class CountingListener implements PreferenceIntegrity.Listener {
         int calls;
 

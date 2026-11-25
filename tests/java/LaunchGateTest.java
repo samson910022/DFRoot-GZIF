@@ -31,6 +31,12 @@ public class LaunchGateTest {
         // Numeric contract with status_protocol.h / StatusRc.
         assertEquals(8, StatusRc.RC_PREF_STATE_UNCERTAIN);
         assertEquals(9, StatusRc.RC_ALREADY_HOOKED);
+        // A launch reservation is part of the same early gate: only OK proceeds.
+        assertEquals(-1, ExploitRunner.launchTokenRc(PreferenceIntegrity.TokenResult.OK));
+        assertEquals(StatusRc.RC_PREF_STATE_UNCERTAIN,
+                ExploitRunner.launchTokenRc(PreferenceIntegrity.TokenResult.LAUNCH_BUSY));
+        assertEquals(StatusRc.RC_PREF_STATE_UNCERTAIN,
+                ExploitRunner.launchTokenRc(PreferenceIntegrity.TokenResult.FAIL_CLOSED));
     }
 
     @Test

@@ -1,18 +1,58 @@
 // Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): pure UI policy for
 // truthful boot switches and lifecycle-safe quarantine handling (P2-10). See NOTICE.
+// Round-5: state observation is tri-state; a failed/DEFAULT readback is UNKNOWN,
+// never evidence that automatic startup was disabled. See NOTICE.
 package df.root;
 
 /**
  * Host-testable boot UI policy. No Android imports: it only describes what the
  * UI must display or permit, and never enables a feature on its own.
+ *
+ * PackageManager's integer state is mapped at the boundary by
+ * {@link #fromPackageManagerState(int)} so this class stays usable in JVM tests.
  */
 public final class BootUiPolicy {
 
     private BootUiPolicy() {}
 
-    /** The switch must mirror the actual component state, never a cached hope. */
+    /** Observation of the component setting, not a cached hope. */
+    public enum BootComponentState {
+        ENABLED, DISABLED, UNKNOWN
+    }
+
+    /**
+     * Map PackageManager's COMPONENT_ENABLED_STATE_* integer. Only an explicit
+     * ENABLED or DISABLED is evidence of anything: DEFAULT, unknown constants
+     * and failed observation are all UNKNOWN (never "OFF").
+     */
+    public static BootComponentState fromPackageManagerState(int pmState) {
+        // 1 = COMPONENT_ENABLED_STATE_ENABLED, 2 = ..._DISABLED, 0 = ..._DEFAULT.
+        if (pmState == 1) return BootComponentState.ENABLED;
+        if (pmState == 2) return BootComponentState.DISABLED;
+        return BootComponentState.UNKNOWN;
+    }
+
+    /** A PackageManager exception or missing context: state is unavailable. */
+    public static BootComponentState fromReadbackFailure() {
+        return BootComponentState.UNKNOWN;
+    }
+
+    /** The switch mirrors observation; UNKNOWN is shown conservatively as off. */
+    public static boolean desiredChecked(BootComponentState state) {
+        return state == BootComponentState.ENABLED;
+    }
+
+    /** Convenience for callers that already reduced the observation to a boolean. */
     public static boolean desiredChecked(boolean actualComponentEnabled) {
         return actualComponentEnabled;
+    }
+
+    /**
+     * True only for an actually observed DISABLED component. An unverifiable
+     * readback must never be displayed or recorded as "auto-startup disabled".
+     */
+    public static boolean verifiedDisabled(BootComponentState state) {
+        return state == BootComponentState.DISABLED;
     }
 
     /**
@@ -25,9 +65,18 @@ public final class BootUiPolicy {
     }
 
     /**
-     * The user may always turn automatic startup OFF. Turning it ON is refused
-     * while preference state is uncertain.
+     * The user may always try to turn automatic startup OFF, even when the
+     * current state is UNKNOWN (the switch stays enabled). Turning it ON is
+     * refused while preferences are quarantined or the state is unverifiable.
      */
+    public static boolean mayChangeTo(boolean value, BootComponentState state,
+                                      boolean quarantined) {
+        if (!value) return true;
+        if (state == BootComponentState.UNKNOWN) return false;
+        return !quarantined;
+    }
+
+    /** Boolean convenience for pure quarantine-only checks. */
     public static boolean mayChangeTo(boolean value, boolean quarantined) {
         return !quarantined || !value;
     }
@@ -36,6 +85,10 @@ public final class BootUiPolicy {
      * Recovery never auto-enables anything: the switch follows the actual
      * component state, even if it used to be checked before the quarantine.
      */
+    public static boolean onRecovery(BootComponentState state, boolean previouslyChecked) {
+        return desiredChecked(state);
+    }
+
     public static boolean onRecovery(boolean actualComponentEnabled, boolean previouslyChecked) {
         return desiredChecked(actualComponentEnabled);
     }
@@ -43,10 +96,15 @@ public final class BootUiPolicy {
     /**
      * TwoStatePreference applies the requested value after a listener returns
      * true. Accept that framework write ONLY when the actual component state
-     * already equals the request; otherwise return false so our explicit
-     * setChecked(actual) is not overwritten and the UI cannot claim OFF while
-     * BootReceiver is still ENABLED.
+     * was observed and already equals the request. UNKNOWN rejects every
+     * framework write so the switch cannot claim OFF (or ON) without evidence.
      */
+    public static boolean acceptFrameworkChange(boolean requestedValue,
+                                                 BootComponentState actual) {
+        if (actual == BootComponentState.UNKNOWN) return false;
+        return desiredChecked(actual) == requestedValue;
+    }
+
     public static boolean acceptFrameworkChange(boolean requestedValue,
                                                  boolean actualComponentEnabled) {
         return actualComponentEnabled == requestedValue;
