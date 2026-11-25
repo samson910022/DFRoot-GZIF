@@ -5,6 +5,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): cover stopped-Activity outcome reconciliation from the bounded ledger without replay. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.2): pin the synchronous start-failure path to the lock-free ledger write with blocked checked storage and a throwing starter. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): keep failure reports observable on the existing queue seam and pin Activity reconciliation when both dispatchers reject. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.1): cover the bounded, lifecycle-scoped read-only outcome watch on a continuously visible Activity. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -88,6 +89,7 @@ public class MainActivityTest {
     private QueueExecutor coordinatorWorker;
     private QueueExecutor coordinatorObservers;
     private ImmediateEngine immediateEngine;
+    private ManualOutcomeWatchScheduler outcomeWatch;
 
     @Before
     public void setUp() {
@@ -99,6 +101,9 @@ public class MainActivityTest {
         // existing synchronous assertions are unchanged; async behavior is
         // covered separately with controlled executors.
         MainActivity.installDiagnosticExecutorsForTesting(Runnable::run, Runnable::run);
+        // Deterministic read-only watch: no real delayed task ever exists.
+        outcomeWatch = new ManualOutcomeWatchScheduler();
+        MainActivity.installOutcomeWatchSchedulerForTesting(outcomeWatch);
         ShadowToast.reset();
         installManager(SuManager.CLASSIC.getPackageName());
         installManager(SuManager.NEXT.getPackageName());
@@ -127,6 +132,7 @@ public class MainActivityTest {
         }
         MainActivity.resetAvailabilityEnvironmentForTesting();
         MainActivity.resetDiagnosticExecutorsForTesting();
+        MainActivity.resetOutcomeWatchSchedulerForTesting();
         RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
@@ -415,6 +421,234 @@ public class MainActivityTest {
         assertEquals(0, immediateEngine.calls.get());
         assertEquals(0, coordinatorWorker.commands.size());
         assertSame("reconciliation is read-only", before, coordinator.getSnapshot());
+    }
+
+    /** R6.1: the SAME visible Activity reconciles its dropped reporter rejection via the watch. */
+    @Test
+    public void visibleActivityReconcilesDroppedReporterRejectionWithoutLifecycleRestart() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 71), true);
+        coordinatorWorker = new QueueExecutor();
+        coordinatorObservers = new QueueExecutor();
+        immediateEngine = new ImmediateEngine();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
+                immediateEngine, 0L, command -> {
+                    throw new RejectedExecutionException("reporter full");
+                });
+        RunCoordinator.setInstanceForTesting(coordinator);
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+
+        activity.findViewById(R.id.btnRun).performClick();
+        assertTrue("a click arms exactly one watch tick immediately", outcomeWatch.hasPending());
+        Intent request = nextServiceRequest();
+        String requestId = request.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(requestId);
+
+        ServiceController<ExploitService> serviceController = Robolectric.buildService(
+                ExploitService.class).create().withIntent(request);
+        serviceControllers.add(serviceController);
+        serviceController.get().setAdmissionExecutorForTesting(command -> {
+            throw new RejectedExecutionException("admission full");
+        });
+        serviceController.startCommand(0, 811);
+
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+        assertSame("no observer publication happened", before, coordinator.getSnapshot());
+        RunCoordinator.RequestOutcomeRecord recorded = coordinator.getRequestOutcome(requestId);
+        assertNotNull(recorded);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, recorded.getOutcome());
+        assertTrue(recorded.getReason().contains("admission dispatch failed"));
+        assertTrue("still pending while no notification is delivered",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+
+        outcomeWatch.runAll(); // read-only ticks only; no stop/start of the Activity
+
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("admission dispatch failed"));
+        assertSame("read-only reconciliation never changed the snapshot", before,
+                coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertFalse("no further tick was armed", outcomeWatch.hasPending());
+    }
+
+    /** R6.1: a synchronous start failure is reconciled while visible, even with no observer. */
+    @Test
+    public void synchronousStartFailureWithDroppedReporterIsReconciledWhileVisible() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 72), true);
+        coordinatorWorker = new QueueExecutor();
+        coordinatorObservers = new QueueExecutor();
+        immediateEngine = new ImmediateEngine();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
+                immediateEngine, 0L, command -> {
+                    throw new RejectedExecutionException("reporter full");
+                });
+        RunCoordinator.setInstanceForTesting(coordinator);
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+        FailingStarter starter = new FailingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+
+        activity.findViewById(R.id.btnRun).performClick();
+
+        assertEquals(1, starter.calls);
+        assertTrue("the watch is armed after both success and synchronous failure",
+                outcomeWatch.hasPending());
+        assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(0, coordinatorObservers.commands.size());
+        assertSame(before, coordinator.getSnapshot());
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        RunCoordinator.RequestOutcomeRecord recorded = coordinator.getRequestOutcome(requestId);
+        assertNotNull(recorded);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, recorded.getOutcome());
+        assertEquals("Unable to start operation service: service start denied",
+                recorded.getReason());
+
+        outcomeWatch.runAll();
+
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("Unable to start operation service"));
+        assertTrue(output(activity).contains("service start denied"));
+        assertFalse(output(activity).contains("outcome unconfirmed"));
+        assertSame(before, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("the failed starter started no service and the watch replays nothing",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+    }
+
+    /** R6.1: ordinary correlated observer delivery clears pending and cancels the watch. */
+    @Test
+    public void correlatedObserverDeliveryCancelsTheWatch() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 73), true);
+        installIdleCoordinator();
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+
+        activity.findViewById(R.id.btnRun).performClick();
+        Intent request = nextServiceRequest();
+        String requestId = request.getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(requestId);
+        assertTrue(outcomeWatch.hasPending());
+        int scheduledBefore = outcomeWatch.schedules;
+
+        coordinator.noteRequestOutcome(requestId, RunCoordinator.RequestOutcome.REJECTED,
+                "rejection delivered to the observer");
+        coordinatorObservers.runAll();
+
+        assertFalse("correlated delivery cancels the watch", outcomeWatch.hasPending());
+        assertEquals("no further tick was scheduled", scheduledBefore, outcomeWatch.schedules);
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(1, occurrences(output(activity),
+                "rejection delivered to the observer"));
+        assertFalse(output(activity).contains("outcome unconfirmed"));
+        assertEquals(0, immediateEngine.calls.get());
+
+        outcomeWatch.runAll(); // no pending tick can run
+        assertEquals(scheduledBefore, outcomeWatch.schedules);
+        assertEquals(1, occurrences(output(activity), "rejection delivered to the observer"));
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+    }
+
+    /** R6.1: the 25-tick window is exact, and stop/destroy leave no pending tick. */
+    @Test
+    public void outcomeWatchIsBoundedAndCancelledOnStopAndDestroy() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 74), true);
+        installIdleCoordinator();
+        int cap = (Integer) ReflectionHelpers.getStaticField(
+                MainActivity.class, "OUTCOME_WATCH_MAX_TICKS");
+        assertEquals(25, cap);
+
+        MainActivity capped = launch();
+        MainActivity.installServiceStarterForTesting(capped, new RecordingStarter());
+        capped.findViewById(R.id.btnRun).performClick();
+        assertTrue(outcomeWatch.hasPending());
+
+        outcomeWatch.runAll();
+
+        assertEquals("exactly one tick per armed interval", cap, outcomeWatch.schedules);
+        assertEquals("the last tick ran, but nothing was re-armed", cap, outcomeWatch.ticks);
+        assertFalse(outcomeWatch.hasPending());
+
+        ActivityController<MainActivity> lifecycle = launchController();
+        MainActivity activity = lifecycle.get();
+        MainActivity.installServiceStarterForTesting(activity, new RecordingStarter());
+        assertFalse(outcomeWatch.hasPending());
+        activity.findViewById(R.id.btnRun).performClick();
+        assertTrue(outcomeWatch.hasPending());
+
+        lifecycle.stop();
+        assertFalse("stop cancels the pending tick", outcomeWatch.hasPending());
+        lifecycle.start();
+        assertTrue("a still-pending request re-arms on start", outcomeWatch.hasPending());
+        outcomeWatch.runNext();
+        assertTrue(outcomeWatch.hasPending());
+
+        lifecycle.destroy();
+        activityControllers.remove(lifecycle);
+        assertFalse("destroy cancels the pending tick", outcomeWatch.hasPending());
+        int ticksAfterDestroy = outcomeWatch.ticks;
+        outcomeWatch.runAll();
+        assertEquals("no tick can run after destruction", ticksAfterDestroy, outcomeWatch.ticks);
+        assertEquals(0, immediateEngine.calls.get());
+    }
+
+    /** R6.1: no ledger record means honest uncertainty — one status, still disabled, no replay. */
+    @Test
+    public void unconfirmedStatusIsShownOnceAndNeverClearsOrReplays()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 75), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 47L, Runnable::run);
+        MainActivity activity = launch();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        MainActivity.installServiceStarterForTesting(activity, new RecordingStarter());
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        OperationAttempt beforeAttempt = attemptStore.load();
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        outcomeWatch.runAll();
+
+        String unconfirmed = "Operation request outcome unconfirmed: no acknowledgement "
+                + "was received; no automatic retry or recovery is available in this app.";
+        assertEquals("the explicit status is shown once", 1,
+                occurrences(output(activity), unconfirmed));
+        assertFalse(output(activity).contains("Operation request rejected"));
+        assertFalse(output(activity).contains("Operation request cancelled"));
+        assertFalse(output(activity).contains("no reason supplied"));
+        assertTrue("the unconfirmed click stays pending",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(requestId, ReflectionHelpers.getField(activity, "mPendingRequestId"));
+        assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame(beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertFalse(outcomeWatch.hasPending());
+
+        // A forced extra tick stays harmless and silent for the same token.
+        ReflectionHelpers.callInstanceMethod(activity, "runOutcomeWatchTick");
+        assertEquals(1, occurrences(output(activity), unconfirmed));
+        assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame(beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
     }
 
     /** Destruction before admission cancels only service-local work, never an engine. */
@@ -1750,6 +1984,71 @@ public class MainActivityTest {
         info.packageName = packageName;
         Shadows.shadowOf(RuntimeEnvironment.getApplication().getPackageManager())
                 .installPackage(info);
+    }
+
+    /** Holds the single read-only tick; cancels and delayed posts are deterministic. */
+    private static final class ManualOutcomeWatchScheduler
+            implements MainActivity.OutcomeWatchScheduler {
+        private Runnable pending;
+        final List<Long> delays = new ArrayList<>();
+        int schedules;
+        int cancels;
+        int ticks;
+
+        @Override
+        public void schedule(Runnable tick, long delayMs) {
+            pending = tick;
+            delays.add(delayMs);
+            schedules++;
+        }
+
+        @Override
+        public void cancel() {
+            pending = null;
+            cancels++;
+        }
+
+        boolean hasPending() {
+            return pending != null;
+        }
+
+        void runNext() {
+            Runnable next = pending;
+            pending = null;
+            assertNotNull("no watch tick was pending", next);
+            ticks++;
+            next.run();
+        }
+
+        void runAll() {
+            int guard = 0;
+            while (hasPending()) {
+                runNext();
+                assertTrue("watch tick cap was exceeded", ++guard <= 100);
+            }
+        }
+    }
+
+    /** Counts attempt-store clears so unconfirmed UI status cannot mutate durable state. */
+    private static final class CountingAttemptStore implements OperationAttemptStore {
+        private final OperationAttemptStore delegate = OperationAttemptStore.inMemory();
+        int clears;
+
+        @Override
+        public OperationAttempt load() throws Failure {
+            return delegate.load();
+        }
+
+        @Override
+        public boolean publish(OperationAttempt attempt) throws Failure {
+            return delegate.publish(attempt);
+        }
+
+        @Override
+        public boolean clear(String operationId) throws Failure {
+            clears++;
+            return delegate.clear(operationId);
+        }
     }
 
     private static final class RecordingStarter implements MainActivity.ServiceStarter {

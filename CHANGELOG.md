@@ -1,5 +1,19 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R6.1: bounded read-only outcome watch for a visible Activity — PR #2
+
+Short note (R6.5 consolidates): `MainActivity` arms a per-Activity main-looper
+outcome watch immediately after each manual start request, re-arms on
+start/resume while the same request is still pending, and cancels it on stop,
+destroy or correlated clearing. At most 25 read-only ticks (200 ms apart) call
+the unchanged ledger-only reconciliation; cap exhaustion with no record shows
+one explicit UI-only "outcome unconfirmed" status instead of silent pending,
+without fabricating a rejection, replaying, retrying, cancelling, clearing any
+durable attempt or enabling the run control. A static test-only scheduler seam
+is unset in production. Focused `MainActivityTest` verification is recorded in
+the R6.5 consolidation; R2-14 and R2-16 remain OPEN gates, and no device, ADB,
+payload, privileged-container or APK work was done. No commit/stage/push.
+
 ## 2026-11-26 — Fifth repair round (R5.1–R5.8) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **fifth repair round** (final local HEAD `33980e2`)

@@ -24,6 +24,19 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
 
+## Sixth repair round (R6.1) — short note (2026-11-26)
+
+Short contract note (R6.5 consolidates): a continuously visible Activity now
+runs a bounded, lifecycle-scoped **read-only** outcome watch (25 ticks at 200 ms,
+cancelled on stop/destroy). Each tick only calls the existing ledger-only
+reconciliation for that Activity's own request; if no record exists after the
+window, the UI states once that the outcome is unconfirmed and that no automatic
+retry or recovery exists in this app. Nothing is authorized, replayed, retried,
+cancelled or cleared, and the run control stays disabled while unconfirmed. This
+is an honest UI status, **not** evidence about the privileged operation; R2-14
+and R2-16 remain OPEN safety gates. No device/ADB/payload/privileged work was
+performed.
+
 ## Supported managers
 
 DFRoot GZIF supports exactly two manager packages. Each is bound to one bundled,

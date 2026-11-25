@@ -4,6 +4,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): compute the availability diagnostic off the UI thread with a stale-result guard. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): mint a request ID per click and clear pending only on that request's correlated outcome. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): reconcile an owned request outcome from the replayable ledger on start; read-only, no replay or privileged effect. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.1): add a bounded, lifecycle-scoped read-only outcome watch so a visible Activity reconciles its own outcome without a best-effort notification; unconfirmed stays uncertified. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -13,6 +14,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -48,6 +50,12 @@ public class MainActivity extends Activity {
     private static final String PENDING_DIAGNOSTIC_TEXT = "Checking availability...";
     private static final String UNAVAILABLE_DIAGNOSTIC_TEXT =
             "Run unavailable: availability could not be determined from read-only observations";
+    // ~5 s of read-only checks; never an authorization, retry or recovery window.
+    private static final long OUTCOME_WATCH_INTERVAL_MS = 200L;
+    private static final int OUTCOME_WATCH_MAX_TICKS = 25;
+    private static final String UNCONFIRMED_OUTCOME_MESSAGE =
+            "Operation request outcome unconfirmed: no acknowledgement was received; "
+                    + "no automatic retry or recovery is available in this app.\n";
     private static String sLastResultToastOperationId;
 
     // Read-only diagnostic scheduling only; the Activity never executes operations.
@@ -55,6 +63,9 @@ public class MainActivity extends Activity {
     private static final Executor DEFAULT_DIAGNOSTIC_MAIN = ConfigurationRepository.newMainExecutor();
     private static volatile Executor sDiagnosticWorker = DEFAULT_DIAGNOSTIC_WORKER;
     private static volatile Executor sDiagnosticMain = DEFAULT_DIAGNOSTIC_MAIN;
+
+    /** Test-only seam; unset means each Activity owns a main-looper Handler. */
+    private static volatile OutcomeWatchScheduler sOutcomeWatchScheduler;
 
     private Button btnRun;
     private ScrollView outputScroll;
@@ -82,6 +93,11 @@ public class MainActivity extends Activity {
     private boolean mDestroyed;
     private long mDiagnosticSequence;
     private String mCachedDiagnostic = "";
+    private OutcomeWatchScheduler mOutcomeWatchScheduler;
+    private int mOutcomeWatchTicks;
+    private String mOutcomeWatchRequestId;
+    private String mUnconfirmedReportedRequestId;
+    private boolean mOutcomeWatchVisible;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -100,6 +116,10 @@ public class MainActivity extends Activity {
         mServiceStarter = (expectedGeneration, requestId) ->
                 ExploitService.start(this, ExploitService.ACTION_MANUAL,
                         expectedGeneration, requestId);
+        // A test seam may inject one deterministic scheduler; production keeps a
+        // per-Activity main-looper scheduler so one instance cannot cancel another.
+        mOutcomeWatchScheduler = sOutcomeWatchScheduler == null
+                ? new HandlerOutcomeWatchScheduler() : sOutcomeWatchScheduler;
 
         PackageManager pm = getPackageManager();
         List<SuManagerEntry> entries = new ArrayList<>();
@@ -160,7 +180,23 @@ public class MainActivity extends Activity {
         renderRunSnapshot(mCoordinator.getSnapshot());
         // The listener was removed in onStop(): an outcome delivered while this
         // Activity was stopped may no longer occupy the single snapshot slot.
+        mOutcomeWatchVisible = true;
         reconcilePendingRequest();
+        armOutcomeWatchIfPending();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        mOutcomeWatchVisible = true;
+        reconcilePendingRequest();
+        armOutcomeWatchIfPending();
+    }
+
+    @Override
+    protected void onPause() {
+        mOutcomeWatchVisible = false;
+        super.onPause();
     }
 
     /**
@@ -196,8 +232,66 @@ public class MainActivity extends Activity {
         updateRunButton();
     }
 
+    /** One bounded, read-only tick: reconcile only, never act on the operation. */
+    private void runOutcomeWatchTick() {
+        String requestId = mOutcomeWatchRequestId;
+        if (!isPendingRequest(requestId)) {
+            return; // lifecycle ended or pending cleared
+        }
+        mOutcomeWatchTicks++;
+        reconcilePendingRequest(); // unchanged, ledger-only
+        if (!isPendingRequest(requestId) || !requestId.equals(mOutcomeWatchRequestId)) {
+            return; // a correlated outcome cleared pending; clearPendingRequest cancelled us
+        }
+        if (mOutcomeWatchTicks >= OUTCOME_WATCH_MAX_TICKS) {
+            if (mCoordinator != null && mCoordinator.getRequestOutcome(requestId) == null
+                    && !requestId.equals(mUnconfirmedReportedRequestId)) {
+                // No record after the whole window: honest UI-only status. No
+                // rejection is fabricated, no attempt/lease/state is cleared and
+                // btnRun stays disabled because pending was never cleared.
+                mUnconfirmedReportedRequestId = requestId;
+                appendUiMessage(UNCONFIRMED_OUTCOME_MESSAGE);
+                updateRunButton();
+            }
+            return;
+        }
+        mOutcomeWatchScheduler.schedule(this::runOutcomeWatchTick, OUTCOME_WATCH_INTERVAL_MS);
+    }
+
+    /** Arms/re-arms only for a still-pending click in a visible, live Activity. */
+    private void armOutcomeWatchIfPending() {
+        String requestId = mPendingRequestId;
+        if (!isPendingRequest(requestId) || mOutcomeWatchScheduler == null) {
+            return;
+        }
+        if (!requestId.equals(mOutcomeWatchRequestId)) {
+            mOutcomeWatchTicks = 0;
+            mOutcomeWatchRequestId = requestId;
+        }
+        if (mOutcomeWatchTicks >= OUTCOME_WATCH_MAX_TICKS) {
+            return;
+        }
+        // At most one outstanding tick per Activity; no unbounded queuing.
+        mOutcomeWatchScheduler.cancel();
+        mOutcomeWatchScheduler.schedule(this::runOutcomeWatchTick, OUTCOME_WATCH_INTERVAL_MS);
+    }
+
+    private boolean isPendingRequest(String requestId) {
+        return !mDestroyed && mOutcomeWatchVisible && mManualStartPending
+                && requestId != null && requestId.equals(mPendingRequestId);
+    }
+
+    private void cancelOutcomeWatch() {
+        mOutcomeWatchRequestId = null;
+        if (mOutcomeWatchScheduler != null) {
+            mOutcomeWatchScheduler.cancel();
+        }
+    }
+
     @Override
     protected void onStop() {
+        mOutcomeWatchVisible = false;
+        cancelOutcomeWatch();
         mConfiguration.removeListener(mConfigurationListener);
         mCoordinator.removeListener(mCoordinatorListener);
         super.onStop();
@@ -206,6 +300,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         mDestroyed = true;
+        mOutcomeWatchVisible = false;
+        cancelOutcomeWatch();
         // Idempotent detachment only; an accepted operation survives Activity destruction.
         mConfiguration.removeListener(mConfigurationListener);
         mCoordinator.removeListener(mCoordinatorListener);
@@ -261,6 +357,10 @@ public class MainActivity extends Activity {
                     RunCoordinator.RequestOutcome.REJECTED,
                     "Unable to start operation service: " + e.getMessage());
         }
+        // Arm immediately, independently of any listener/reporter delivery, so a
+        // continuously visible Activity can reconcile its own recorded outcome
+        // (including a synchronous start failure whose report was dropped).
+        armOutcomeWatchIfPending();
     }
 
     private boolean isConfigurationWritable() {
@@ -362,6 +462,7 @@ public class MainActivity extends Activity {
 
     /** Idempotent: returns true only for the call that actually clears the pending click. */
     private boolean clearPendingRequest() {
+        cancelOutcomeWatch();
         boolean wasPending = mManualStartPending || mPendingRequestId != null
                 || mSuppressedSnapshot != null;
         mManualStartPending = false;
@@ -383,7 +484,10 @@ public class MainActivity extends Activity {
             return;
         }
         if (mSuppressedSnapshot != null) {
-            outputView.setText("");
+            // Keep operation output suppressed for a pending click, but let the
+            // bounded UI-only unconfirmed status for THIS token be visible;
+            // coordinator state is never rendered here.
+            outputView.setText(isUnconfirmedStatusVisible() ? mUiMessages.toString() : "");
             return;
         }
         StringBuilder rendered = new StringBuilder();
@@ -400,6 +504,11 @@ public class MainActivity extends Activity {
                 outputScroll.fullScroll(View.FOCUS_DOWN);
             }
         });
+    }
+
+    private boolean isUnconfirmedStatusVisible() {
+        return mUnconfirmedReportedRequestId != null
+                && mUnconfirmedReportedRequestId.equals(mPendingRequestId);
     }
 
     private void appendUiMessage(String message) {
@@ -539,6 +648,21 @@ public class MainActivity extends Activity {
         sDiagnosticMain = DEFAULT_DIAGNOSTIC_MAIN;
     }
 
+    /** Only a read-only tick is scheduled; no operation execution seam. */
+    interface OutcomeWatchScheduler {
+        void schedule(Runnable tick, long delayMs);
+
+        void cancel();
+    }
+
+    static void installOutcomeWatchSchedulerForTesting(OutcomeWatchScheduler scheduler) {
+        sOutcomeWatchScheduler = Objects.requireNonNull(scheduler, "scheduler");
+    }
+
+    static void resetOutcomeWatchSchedulerForTesting() {
+        sOutcomeWatchScheduler = null;
+    }
+
     static TextView availabilityViewForTesting(MainActivity activity) {
         return activity.availabilityView;
     }
@@ -557,6 +681,22 @@ public class MainActivity extends Activity {
             }
         }
         return 0;
+    }
+
+    /** Production seam: one delayed read-only tick on the main looper, cancelled on stop. */
+    private static final class HandlerOutcomeWatchScheduler implements OutcomeWatchScheduler {
+        private final Handler handler = new Handler(Looper.getMainLooper());
+
+        @Override
+        public void schedule(Runnable tick, long delayMs) {
+            handler.removeCallbacksAndMessages(null);
+            handler.postDelayed(tick, delayMs);
+        }
+
+        @Override
+        public void cancel() {
+            handler.removeCallbacksAndMessages(null);
+        }
     }
 
     interface ServiceStarter {
