@@ -1,13 +1,71 @@
 # Changelog — DFRoot GZIF
 
-## Round-5 repair (2026-11-25) — authoritative for the current rebased head
+## Round-6 repair (2026-11-25) — authoritative for the current head (`d72838d`)
 
 This section is authoritative for the current head of
-`fix/native-exploit-robustness` (rebased onto merged PR #1). **All sections
-below are kept as history**; their test counts and dispositions describe
-earlier heads, not this one. Everything here is **host-only**: no hardware run
-validates this head, and a successful build is not a safety certificate. No tag
-was created and no release was published.
+`fix/native-exploit-robustness` (`d72838d`). **Every section below is
+historical**; its counts and dispositions describe earlier heads, not this
+one. All evidence here is **host-only**: no hardware run validates this head,
+a successful build is not a safety certificate, no tag was created and no
+release was published. This round changed CI gating, the signing smoke, the
+packaged-KO host fixture and the boot-state UI; no exploit payload or reviewed
+KO pin was relaxed.
+
+### Stable-ID disposition (round-6)
+
+| ID | Round-6 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing UNVALIDATED** | `dfrecover` remains bound to the current run nonce: a stale or foreign `ok` is rejected, so reserved-channel token syntax is **not** invocation proof and absence of evidence is **not** proof that system activity stopped. `dfbootfail` carries the reserved-nonce `BOOTSTRAP_FAILED` token (observable rc=1) only when no normal final token parses. Android publication/access and on-device timing remain unproven; no device certification is derived from host mocks. |
+| P1-07 | **Addressed in host-tested scope; UNVALIDATED on device** | The absolute deadline is checked before consulting a positive recovery result, again after it, and after cleanup before any terminal outcome; late/uncertain evidence yields `REBOOT_SKIPPED` and can only disable a reboot. These are **host-proven ordering checks only**: device quiescence and verified restoration remain UNVALIDATED. This is a release restriction, not a safety claim. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing this requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not consume or distribute unverified privileged content, do not claim fixed. |
+| P1-11 | **Resolved in round 6 (host-only evidence)** | A new **unconditional** `host-gates` job (`needs: build-lkms`, no `if`, checkout-SHA assertion) runs **all** host suites on **every** event including protected tag pushes: native, all five CMake suites, the real KO CI policy, the JVM 39/0/0/0 assertion and 7/7 markers. Both `build-dfroot` and `build-release` require `host-gates`; `publish` requires `build-release`. A tag release cannot proceed without host evidence of the tested commit. No device claim. |
+| P1-12 | **Resolved in round 6 (host-only evidence)** | Non-tag events no longer distribute an APK: the only upload is the `DFRoot-CI-evidence` licence/notice bundle (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The Debug APK is a compile/content gate only, never uploaded, signed with release material or published. No stale `DFRoot-UNVERIFIED-CI` downloadable APK remains. Distribution is withheld pending P1-08, a reviewed re-pin and device validation. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | Staged-link → verified-copy chain; AGP targets `dfroot_packaged` **and** `bootstrap`; APK-content and target-graph harnesses (named target, `ALL`, raw bypass, cached, poisoned); CI gathers evidence over **every** `app/.cxx` packaged manifest. The byte gate rejects UNKNOWN bytes but **accepts the two known obsolete pins**; release is withheld by **POLICY** (reviewed re-pin, OPEN P1-08, device validation), not by the hash gate alone. A passing gate is not device validation. |
+| P2-10 | **Addressed in round 6 (host-tested scope); real UI lifecycle UNVALIDATED** | Boot component state is tri-state with a **persistent** `UNKNOWN` status row plus an explicit "Disable automatic startup" action that attempts only DISABLE and never claims verified `OFF` without a `DISABLED` readback. `UNKNOWN` is never shown as verified `OFF` and never used to accept `OFF`; there is no auto-enable path. Real Activity/Fragment recreation and PackageManager behavior remain UNVALIDATED. |
+| P2-11 | **Resolved in the stated narrow scope, not re-litigated** | `objcopy` runs only on an isolated copy with original-artifact immutability proven on success and failure. Round 6 additionally removes any stale verified `.so` at the first step of the verified-copy command, so a failed re-check leaves no verified copy, and runs the mutating-objcopy fixture through a generated 755 launcher with an explicit `python3` interpreter so cases 14a/14b actually execute and pass. Graph case 5 proves wrong-pin failure and correct-pin recovery. Pins/sizes unchanged (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). |
+| P2-12 | **Resolved in the stated narrow scope (host-only)** | The signing smoke uses an isolated identity (`df.root.signingsmoke` / `4.8-gzif-signingsmoke` / `SigningSmoke-4.8-gzif-signingsmoke.apk`), explicitly rejects any `DFRoot_*.apk`, and still fails closed with no signing material. It produces no distributable artifact. |
+
+Findings that **remain resolved in their prior narrow scope** and are not
+re-litigated here: **P1-10** (exactly-once cleanup on every exit path),
+**P2-08** (durable `PENDING` → same-key commit, sticky fail-closed `WILDCARD`,
+launch tokens and whole-transaction lock) and **P2-09** (stale packaged evidence
+invalidated before required-argument validation). None of them constitutes
+device validation.
+
+### Post-fix CI status (current head)
+
+- **The pre-repair head was RED.** At `4a81aa5`, CI run **45558516540** failed
+  at `packaged_ko_test` case **14a** with "permission denied": the
+  mutating-objcopy fixture is stored with git mode 100644 and was invoked
+  directly. That head is **not** a green head. The fix generates a **755
+  launcher** that invokes the fixture with an explicit `python3`; cases
+  **14a/14b now actually execute** and pass their strict SHA-256 mismatch and
+  recovery assertions.
+- **Current head host results (local, host-only):** native **61** status cases
+  plus `final_publish` (canonical token / permission / atomicity / reader /
+  bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF,
+  **16 + 14 + 10** device-version; CMake **23 / 25 / 3 / 3 / 6** cases (KO
+  policy / packaged-KO / APK packaging / APK content / target graph); JVM
+  **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
+  ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13);
+  workflow policy **85 tests / 202 subtests**. **7/7** host suite markers and
+  **3/3** release markers (plus the nonempty gate index and single upload
+  choke point) are asserted. No required gate uses `continue-on-error`.
+- **Distribution:** non-tag events upload only `DFRoot-CI-evidence` with the
+  GPL-3.0/licence/notice bundle; no APK is downloadable from CI. The signing
+  smoke emits only the isolated `SigningSmoke-*.apk` inside a disposable copy
+  and is never uploaded.
+- **Boundary:** run6/run8 and all earlier CI runs — including 45523079469 and
+  45558516540 — are **historical**, not certification of this head. Auto Soft
+  Reboot and Start on Boot stay disabled and unvalidated. No tag was created,
+  no release was published, no device verification was performed, and this
+  head is not independently merge-ready.
+
+## Round-5 repair (2026-11-25) — historical (round-5 head)
+
+> **Historical section.** It was authoritative for the pre-round-6 head; the
+> round-6 section above is authoritative for the current head. Its counts,
+> CI shape and dispositions describe the round-5 implementation only.
 
 ### Stable-ID disposition (round-5, 9 findings carried forward)
 
@@ -42,7 +100,7 @@ release claim**; signed release remains tag-only and gated. run6/run8 and every
 older CI run (including 45523079469) validate only historical implementations
 or pre-rebase heads, never this head. No tag was created by us.
 
-### Authoritative final host test shape (current head)
+### Final host test shape (round-5 head; historical — see round-6 above)
 
 - **Native** (`make -C tests/native test`): **61** `status_protocol` cases;
   `final_publish` (canonical token / permission / atomicity / reader / bootfail
@@ -81,7 +139,10 @@ unvalidated. run6/run8 and all earlier CI runs — including 45523079469 —
 validate only historical implementations and pre-rebase heads. A successful
 build is not a safety certificate.
 
-## Unreleased — PR #1 hardening (CI build reliability), integrated into this rebased head
+## Historical — PR #1 hardening (CI build reliability), integrated into the rebased head
+
+> **Historical section.** It describes the PR #1 baseline as integrated before
+> round 6; the round-6 section at the top is authoritative for the current head.
 
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
@@ -155,9 +216,10 @@ distribution SHA-256; AGP **9.5.0** effective through
 ### Post-rebase integration
 
 PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
-head. The round-5 section above is authoritative for the current head; the
-host-suite counts, stable-ID disposition table and validation boundary in the
-round-4 section below are historical. run6/run8 and every prior CI run predate
+head. The round-6 section at the top is authoritative for the current head; the
+round-5 section above and the host-suite counts, stable-ID disposition table and
+validation boundary in the round-4 section below are historical. run6/run8 and
+every prior CI run predate
 the rebase: they are historical and do not validate this head. No tag was
 created by us. Where PR #1's unsigned Release CI
 APK met PR #3's fail-closed release variant, the rebased CI path builds Debug
@@ -167,8 +229,8 @@ the gated `v*` tag path.
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
 > **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
-> describe the round-4 implementation, not the current head. The round-5
-> section above is authoritative for the current head.
+> describe the round-4 implementation, not the current head. The round-6
+> section at the top is authoritative for the current head.
 
 **All evidence in this section is host-only.** No hardware run validates the
 current head of `fix/native-exploit-robustness`; a green build does not certify
@@ -247,8 +309,9 @@ build does not certify safe privileged execution.
 
 > Historical section. The round-5 section at the top of this file is
 > authoritative for current counts, cleanup timing and the recovery channel;
-> this section, the round-4 section above it and the phase sections below are
-> kept for provenance only.
+> the round-6 section at the top of this file is now authoritative for the
+> current head. This section, the round-4 section above it and the phase
+> sections below are kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**
 No hardware run has exercised the quarantine latch, the new rc gates or the

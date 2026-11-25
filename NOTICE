@@ -64,11 +64,13 @@ source offer and the aggregation statement below, they carry the full GPLv3
 obligations (GPL-3.0 §5/§6): a copy of the licence must accompany the
 distribution and the complete corresponding source must be offered. The
 verbatim official licence text is therefore conveyed in this repository as
-`GPL-3.0.txt` (https://www.gnu.org/licenses/gpl-3.0.txt) and included in both
-the signed release assets and the publicly downloadable unsigned CI artifact
-alongside this NOTICE. This repository's own GPL-2.0-only `LICENSE` accompanies
-both bundles, and the GPLv3 §6 complete-source offer applies to the unsigned CI
-APKs too. Nothing in this file should be
+`GPL-3.0.txt` (https://www.gnu.org/licenses/gpl-3.0.txt) and included in the
+signed release assets and in the non-tag `DFRoot-CI-evidence` upload alongside
+this NOTICE. Non-tag CI no longer distributes an APK. This repository's own
+GPL-2.0-only `LICENSE` accompanies both bundles, and the GPLv3 §6
+complete-source offer applies to the loaders in any built APK, including the
+isolated signing-smoke APK (which is never distributed). Nothing in this file
+should be
 read as saying the loaders have "no other obligations": the aggregation
 statement only explains why bundling the executables does not relicense the
 GPL-2.0-only DFRoot application source, or vice versa.
@@ -133,22 +135,29 @@ The run6/run8 hardware results recorded in `PORTING-GZIF.md` and `CHANGELOG.md`
 implementation only**: the old multi-marker status protocol, the then-current
 `dfroot.ko` pins and the old preference-write path. They predate the rebase
 onto the merged PR #1 head. No hardware run validates the current head of
-`fix/native-exploit-robustness` (round-5 repair, 2026-11-25); that head is
-**host-tested only and UNVALIDATED on device**, and a successful build does not
-certify safe privileged execution. run6/run8 and all earlier CI runs, including
-45523079469, validate only historical implementations or pre-rebase heads.
+`fix/native-exploit-robustness` (round-6 repair, `d72838d`, 2026-11-25); that
+head is **host-tested only and UNVALIDATED on device**, and a successful build
+does not certify safe privileged execution. run6/run8 and all earlier CI runs,
+including 45523079469 and the RED pre-repair run 45558516540, validate only
+historical implementations or pre-rebase heads, not this head.
 
-- **PR/branch/manual CI artifacts are UNVERIFIED.** Green CI runs execute the
-  native/CMake/JVM host suites as required gates and upload a
-  debug-keystore-signed Debug APK as a public downloadable Actions artifact
-  named `DFRoot-UNVERIFIED-CI`, together with this NOTICE, `GPL-3.0.txt`,
-  `LICENSE` and `THIRD_PARTY_NOTICES.md`. It carries no signed APK, no signing
-  secrets, no GitHub Release and no release claim. The all-events gate asserts
-  7/7 suite markers (`marker-native`, `marker-ko-policy`, `marker-packaged-ko`,
+- **Non-tag CI uploads evidence only — no APK.** An unconditional `host-gates`
+  job (`needs: build-lkms`, no `if`, checkout-SHA assertion) runs all host
+  suites as required gates on **every** event, including protected `v*` tag
+  pushes; both `build-dfroot` and `build-release` require it and `publish`
+  requires `build-release`. PR/branch/manual runs build a debug-keystore-signed
+  Debug APK **only as a compile/content gate** and upload **no APK**: the only
+  upload is `DFRoot-CI-evidence` with this NOTICE, `GPL-3.0.txt`, `LICENSE` and
+  `THIRD_PARTY_NOTICES.md`. There are no signing secrets, no signed APK, no
+  GitHub Release and no release claim. The all-events gate asserts 7/7 host
+  suite markers (`marker-native`, `marker-ko-policy`, `marker-packaged-ko`,
   `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`,
   `marker-junit`), and the strict JUnit XML assertion requires exactly
-  **36 tests**, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 7,
-  PreferenceIntegrity 12, PreferencePersister 13).
+  **39 tests**, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 10,
+  PreferenceIntegrity 12, PreferencePersister 13). The signing smoke uses an
+  isolated identity (`df.root.signingsmoke` / `4.8-gzif-signingsmoke` /
+  `SigningSmoke-4.8-gzif-signingsmoke.apk`), rejects `DFRoot_*.apk`, fails
+  closed without signing material, and emits no distributable artifact.
 - **Publishing gates run before any signed upload or publish.** On the
   protected `v*` tag path only, every distributable APK is packaged-byte-verified
   with a per-APK manifest and `so_sha256` binding; every provenance record gets
@@ -183,14 +192,18 @@ certify safe privileged execution. run6/run8 and all earlier CI runs, including
   the `final_publish` canonical/permission/atomicity/reader/bootfail/bound+unbound
   recovery checks, 13 proc-scan, 26 ELF and 16+14+10 device-version cases;
   CMake runs 23 KO-policy, 25 packaged-KO, 3 APK-packaging, 3 APK-content and 6
-  target-graph cases. Every suite writes a marker that CI checks (7/7 on every
-  non-tag CI event), the JUnit XML must report **36 tests** with
+  target-graph cases. Every suite writes a marker that CI checks (7/7 on
+  **every** event, including tags), the JUnit XML must report **39 tests** with
   0 failures/errors/skips, and a release-evidence step cross-checks git SHA,
   skip OFF in every CMakeCache, the complete set of verified KO and packaged
   manifests with matching hashes, and every staged APK hash. The publishing
   path adds 3/3 distributable-evidence gates before a single upload choke point.
-  The informational provenance upload uses `if-no-files-found: error`; no
-  required gate uses `continue-on-error`.
+  The workflow policy suite runs 85 tests / 202 subtests. The informational
+  provenance upload uses `if-no-files-found: error`; no required gate uses
+  `continue-on-error`. The pre-repair head `4a81aa5` was RED at CI run
+  45558516540 (mutating-objcopy fixture invoked directly with git mode 100644);
+  the current head runs it via a generated 755 launcher with explicit `python3`,
+  so cases 14a/14b actually execute and pass.
 
 - **PR #1 build/signing baseline (integrated).** Toolchain: Gradle wrapper
   **9.9.2** (distribution SHA-256 pinned), AGP **9.5.0** declared once in
@@ -199,8 +212,9 @@ certify safe privileged execution. run6/run8 and all earlier CI runs, including
   the digest-pinned DDK image resolved from CI by `scripts/ddk-image.sh`, with
   `SIGN_PASS`/`SIGN_ALIAS` accepted only from the environment (command-line
   assignments are rejected). Signed releases use a **new key identity**:
-  uninstall an existing DFRoot GZIF installation before installing one; the
-  UNVERIFIED CI Debug artifact cannot update a signed install either.
+  uninstall an existing DFRoot GZIF installation before installing one. No APK
+  is distributed from non-tag CI, and the isolated signing-smoke APK is never a
+  distributable artifact.
 
 > **Post-rebase integration.** PR #1 is now merged into the base; PR #3 was
 > rebased onto it. run6/run8 and all prior CI runs are historical and do not
@@ -224,9 +238,14 @@ certify safe privileged execution. run6/run8 and all earlier CI runs, including
   fail-closed `WILDCARD` on unattributable faults; launch tokens and a
   whole-transaction lock ensure no success is reported for a failed integrity
   transaction, and the boot component is disabled synchronously at the failure
-  boundary. Boot component state is tri-state: `UNKNOWN` is never shown as
+  boundary. Boot component state is tri-state and shows a **persistent
+  `UNKNOWN` status row** plus an explicit safe disable action (DISABLE only,
+  with a `DISABLED` readback before any claim); `UNKNOWN` is never shown as
   verified `OFF` and never used to accept `OFF`, and nothing auto-enables.
-  `ExploitRunner` returns rc 9 for `/dev/df` and rc 8 for uncertain preferences;
+  Real UI lifecycle and PackageManager behavior are UNVALIDATED. The deadline
+  checks above are host-proven ordering only: device quiescence and verified
+  restoration are UNVALIDATED, and this is a release restriction, not a safety
+  claim. `ExploitRunner` returns rc 9 for `/dev/df` and rc 8 for uncertain preferences;
   `StatusRc` maps rc 0–9 plus the additive 64 recovery bit truthfully. Real
   PackageManager/fsync, asynchronous quiescence and device timing behavior are
   UNVALIDATED; none of this is a substitute for on-device validation.
@@ -236,8 +255,10 @@ certify safe privileged execution. run6/run8 and all earlier CI runs, including
   `/data/local/tmp/.ksud-stage`; race-at-creation is fixed, but a `shell`-uid
   process could still swap the staged file before the loader renames it. This
   cannot be closed without rebuilding the loaders and is a release gate.
-  Documenting the gate (or any Java-side gating) is not a fix. Device timing
-  and quiescence around the privileged payload stay UNVALIDATED.
+  Documenting the gate (or any Java-side gating) is not a fix; do not consume or
+  distribute unverified privileged content. Device timing and quiescence around
+  the privileged payload stay UNVALIDATED. See `CHANGELOG.md` round-6 for the
+  current disposition.
 
 References
 ----------

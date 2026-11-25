@@ -11,9 +11,11 @@ DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a
 
 ## DFRoot GZIF — Samsung Galaxy S23 Ultra (SM-S9180 / S9180ZHU8GZIF)
 
-This fork adds hardware-validated support for the S23 Ultra (`dm3q`) build
+This fork ports the DFRoot chain to the S23 Ultra (`dm3q`) build
 **`S9180ZHU8GZIF`** (Android 17 / One UI 9.0 / SPL 2026-10-05 /
-kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
+kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`). It was
+hardware-validated on 2026-11-17 against the **historical** implementation only;
+the current head is host-tested and UNVALIDATED on device (boundary below).
 
 - **Validated 2026-11-17** (volatile, late-load root only):
   - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
@@ -31,23 +33,27 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > `fix/native-exploit-robustness`. That head is **host-tested only and
 > UNVALIDATED on device**; a successful build does not certify safe privileged
 > execution.
-> PR/branch/manual CI runs execute the host suites as required gates and upload
-> a debug-keystore-signed APK as an explicitly **UNVERIFIED** Actions artifact
-> with `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`: no
-> signing secrets, no signed APK, no GitHub Release and no release claim. Only
-> a `v*` tag push takes the protected `build-release` path, where the signed
-> APK is `apksigner`-verified and checksummed, then every distributable APK is
-> packaged-byte-verified with its own manifest and `so_sha256` binding, every
-> provenance record gets a required identity check, and release evidence is
-> asserted at a single pre-upload choke point before `publish` can run.
+> An **unconditional** `host-gates` job runs **all** host suites as required
+> gates on **every** event, including protected `v*` tag pushes, with a
+> checkout-SHA assertion; both `build-dfroot` and `build-release` require it,
+> and `publish` requires `build-release`. Non-tag events upload **no APK**: the
+> only upload is the `DFRoot-CI-evidence` bundle (`GPL-3.0.txt`, `LICENSE`,
+> `NOTICE`, `THIRD_PARTY_NOTICES.md`). The Debug APK is a compile/content gate
+> only. Only a `v*` tag push takes the protected `build-release` path, where the
+> signed APK is `apksigner`-verified and checksummed, then every distributable
+> APK is packaged-byte-verified with its own manifest and `so_sha256` binding,
+> every provenance record gets a required identity check, and release evidence
+> is asserted at a single pre-upload choke point before `publish` can run.
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
 > Host suites: **61** status + 13 proc-scan + 26 ELF + 16/14/10 device-version
 > cases, CMake **23/25/3/3/6** cases (KO policy / packaged-KO / APK packaging /
-> APK content / target graph), JVM **36 tests** (4/7/12/13 in LaunchGate /
+> APK content / target graph), JVM **39 tests** (4/10/12/13 in LaunchGate /
 > ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
-> **36/0/0/0** XML assertion, and **7/7** suite markers plus **3/3** publishing
-> gates on the tag path.
+> **39/0/0/0** XML assertion, **7/7** host suite markers on every event and
+> **3/3** release markers (plus the nonempty gate index and single upload choke
+> point) on the tag path. Workflow policy: **85 tests / 202 subtests**.
+> No required gate uses `continue-on-error`.
 > **KO pins:** the byte gate rejects unknown bytes but still accepts the two
 > known obsolete pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). Release is
 > withheld by **policy** — a reviewed re-pin, the OPEN P1-08 staging gate and
@@ -60,16 +66,21 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > (truthful rc 0–9 plus the additive 64 recovery bit), exactly-once cleanup on
 > every exit, and separate app-owned `dfbootfail` / `dfrecover` channels:
 > `dfrecover` is bound to the current run nonce, so a stale or foreign `ok` is
-> rejected and token syntax is not invocation proof. Preference transactions
-> use a durable write-ahead marker, a sticky fail-closed `WILDCARD`, launch
-> tokens and a whole-transaction lock; no success is reported for a failed
-> integrity transaction. Boot component state is tri-state: `UNKNOWN` is never
-> shown as verified `OFF` and never used to accept `OFF`, and nothing
-> auto-enables. All host-proven only. Auto Soft Reboot and Start on Boot remain
-> disabled by default and unvalidated. **P1-08 remains OPEN:**
-> `/data/local/tmp/.ksud-stage` can be swapped by a `shell`-uid process and
-> needs a loader rebuild; documenting it is not a fix. See `CHANGELOG.md`
-> round-5 (2026-11-25) and `PORTING-GZIF.md` §17–18 for the
+> rejected: token syntax is not invocation proof, and absence of evidence is
+> not proof that system activity stopped. Deadline checks are host-proven
+> ordering only; device quiescence and verified restoration are UNVALIDATED.
+> Preference transactions use a durable write-ahead marker, a sticky
+> fail-closed `WILDCARD`, launch tokens and a whole-transaction lock; no
+> success is reported for a failed integrity transaction. Boot component state
+> is tri-state and now shows a **persistent `UNKNOWN` status row** plus an
+> explicit safe disable action; `UNKNOWN` is never shown as verified `OFF` and
+> never used to accept `OFF`, and nothing auto-enables. Real UI lifecycle and
+> PackageManager behavior are UNVALIDATED. All host-proven only. Auto Soft
+> Reboot and Start on Boot remain disabled by default and unvalidated.
+> **P1-08 remains OPEN:** `/data/local/tmp/.ksud-stage` can be swapped by a
+> `shell`-uid process and needs a loader rebuild; documentation is not a fix
+> and unverified privileged content must not be consumed or distributed. See
+> `CHANGELOG.md` round-6 (2026-11-25) and `PORTING-GZIF.md` §19 for the
 > test/lifecycle/failure-path detail.
 
 > [!NOTE]
@@ -219,17 +230,24 @@ gate alone; passing it is not device validation (see `CHANGELOG.md`).
   harmless placeholder keeps configuration, `assembleDebug` and unit tests
   working, and no unsigned or dummy-signed release APK is emitted. **Do not
   commit** `signing.properties`.
-- **CI event matrix** (`.github/workflows/build.yml`): pull requests, pushes to
-  `master`/`main`, and manual `workflow_dispatch` runs execute all host policy
-  and suite gates with **no secrets**, build a debug-keystore-signed Debug APK,
-  and upload it as a public downloadable **`DFRoot-UNVERIFIED-CI`** Actions
-  artifact carrying `GPL-3.0.txt`, `LICENSE`, `NOTICE` and
-  `THIRD_PARTY_NOTICES.md`. It is explicitly UNVERIFIED: no signed APK, no
-  signing secrets, no GitHub Release and no release claim. Only a push of a
-  `v*` tag runs `build-release` in the protected `release` environment, where
-  the four `KEYSTORE*` secrets exist: the signed APK is `apksigner`-verified,
-  checksummed, packaged-byte- and provenance-evidence-gated before upload, then
-  `publish` emits the GitHub Release with the same licence/notice bundle.
+- **CI event matrix** (`.github/workflows/build.yml`): an unconditional
+  `host-gates` job (`needs: build-lkms`, no `if`, checkout-SHA assertion) runs
+  all native/CMake/JVM suites, the real KO CI policy and the 7/7 marker gate on
+  **every** event including protected `v*` tag pushes. Pull requests, pushes to
+  `master`/`main` and manual `workflow_dispatch` runs then build a
+  debug-keystore-signed Debug APK strictly as a compile/content gate with **no
+  secrets**, and upload **no APK** — only the `DFRoot-CI-evidence` bundle with
+  `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`. No signed
+  APK, no signing secrets, no GitHub Release and no release claim. Only a push
+  of a `v*` tag runs `build-release` in the protected `release` environment
+  (also requiring `host-gates`), where the four `KEYSTORE*` secrets exist: the
+  signed APK is `apksigner`-verified, checksummed, packaged-byte- and
+  provenance-evidence-gated before upload, then `publish` (requiring
+  `build-release`) emits the GitHub Release with the same licence/notice
+  bundle. The signing smoke uses an isolated identity
+  (`df.root.signingsmoke` / `4.8-gzif-signingsmoke` /
+  `SigningSmoke-4.8-gzif-signingsmoke.apk`), rejects `DFRoot_*.apk` and emits no
+  distributable artifact.
 - The `KEYSTORE` value — the protected CI secret, or the environment value read
   by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
   (produce it with `base64 -w0 keystore.jks`); it is decoded and the JKS
@@ -239,7 +257,8 @@ gate alone; passing it is not device validation (see `CHANGELOG.md`).
 > **The release signing key is new.** Android refuses to overwrite-update an
 > installed application with an APK signed by a different key: uninstall any
 > existing DFRoot GZIF installation before installing a signed release build.
-> The UNVERIFIED CI Debug artifacts cannot update a signed install either.
+> No APK is distributed from non-tag CI; the signing-smoke APK uses an isolated
+> identity and is never a distributable artifact.
 
 ## Credits
 
