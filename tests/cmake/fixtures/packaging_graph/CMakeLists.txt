@@ -56,6 +56,8 @@ add_custom_target(packaged_ko_force
 )
 add_custom_command(
     OUTPUT "${PACKAGE_SO}"
+    # Mirror production: drop any previously verified package-path copy first.
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${PACKAGE_SO}"
     COMMAND "${CMAKE_COMMAND}"
             "-DPACKAGED_SO=${STAGED_SO}"
             "-DKO_OBJCOPY=${KO_OBJCOPY}"

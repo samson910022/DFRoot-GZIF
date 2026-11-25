@@ -83,7 +83,11 @@ foreach(skip_var IN ITEMS DFROOT_SKIP DFROOT_SKIP_KO_HASH_CHECK)
 endforeach()
 
 # Locate objcopy. CMAKE_OBJCOPY from the toolchain is an absolute path; a bare
-# command name is also accepted and resolved from PATH.
+# command name is also accepted and resolved from PATH. execute_process invokes
+# this path directly, so it must be an executable program or a script with a
+# shebang and executable mode: a bare .py fixture is mode 100644 in a clean
+# checkout and would fail with "permission denied" (host tests generate an
+# executable shell launcher for such fixtures). This never relaxes the gate.
 set(objcopy "${KO_OBJCOPY}")
 if(NOT IS_ABSOLUTE "${objcopy}")
     find_program(dfroot_packaged_objcopy NAMES "${objcopy}")

@@ -20,7 +20,11 @@
 #   13 argument-validation failures at ONE reused output path invalidate prior
 #      verified evidence; a missing KO_MANIFEST fails with no path at all
 #   14 a harmless mutating-objcopy wrapper fails closed without touching the
-#      original SO, and a clean run at the same path recovers
+#      original SO, and a clean run at the same path recovers. Its two host
+#      preconditions run BEFORE 14a and prove the fixture is invocable in a
+#      clean checkout: the generated launcher must reach the wrapper's usage
+#      line with no "Permission denied", and a positive probe must change the
+#      dumped payload hash of an isolated COPY while the original SO is intact
 #
 # EVERY case additionally checks that the original input SO is byte-for-byte
 # unchanged (hash, size and bytes) and that the isolated work directory is
@@ -386,12 +390,81 @@ if(NOT manifest_text MATCHES "status: verified" OR
 endif()
 
 # 14. P2-11: a deliberately mutating objcopy cannot produce a verified record.
+# The fixture is a Python script tracked with git mode 100644, so a clean
+# checkout cannot execute it directly (execute_process would report
+# "permission denied" instead of a hash mismatch). Generate an executable
+# shell launcher in WORK and pass THAT as -DKO_OBJCOPY; it runs the fixture via
+# PYTHON3. Host preconditions below prove the launcher works before case 14a.
 # The wrapper flips one byte in the section of the COPY it is handed, so the
 # pin check fails closed while the original SO remains byte-for-byte intact.
+set(MUTATING_LAUNCHER "${WORK}/mutating-objcopy-launcher.sh")
+file(WRITE "${MUTATING_LAUNCHER}"
+     "#!/bin/sh\nexec \"${PYTHON3}\" \"${MUTATING_OBJCOPY}\" \"$@\"\n")
+file(CHMOD "${MUTATING_LAUNCHER}"
+     PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                 GROUP_READ GROUP_EXECUTE
+                 WORLD_READ WORLD_EXECUTE)
+
+# Host precondition (a): the fixture must exist as a file in a clean checkout.
+if(NOT EXISTS "${MUTATING_OBJCOPY}" OR IS_DIRECTORY "${MUTATING_OBJCOPY}")
+    message(FATAL_ERROR
+        "FAIL: 14 host precondition: mutating objcopy fixture is not a file: "
+        "${MUTATING_OBJCOPY}")
+endif()
+
+# Host precondition (b): invoke the launcher with no arguments. The Python
+# wrapper must reach its usage message; a non-executable fixture or a broken
+# launcher would instead produce "Permission denied" from the shell.
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "KO_TEST_REAL_OBJCOPY=${OBJCOPY}"
+            "${MUTATING_LAUNCHER}"
+    RESULT_VARIABLE probe_rc OUTPUT_VARIABLE probe_out ERROR_VARIABLE probe_err)
+if(NOT probe_err MATCHES "usage: mutating_objcopy_wrapper.py" OR
+   probe_err MATCHES "Permission denied" OR
+   probe_out MATCHES "Permission denied")
+    message(FATAL_ERROR
+        "FAIL: 14 host precondition: launcher did not reach the wrapper usage "
+        "message (rc=${probe_rc})\nstdout:\n${probe_out}\nstderr:\n${probe_err}")
+endif()
+
+# Host precondition (c): positive mutation probe. Call the launcher exactly as
+# the verifier does (--dump-section from an isolated copy) and prove the dumped
+# payload hash changes while the original SO stays byte-for-byte identical.
+set(PROBE_DIR "${WORK}/mutating-probe")
+file(MAKE_DIRECTORY "${PROBE_DIR}")
+set(PROBE_SO "${PROBE_DIR}/input-copy.so")
+set(PROBE_DUMP "${PROBE_DIR}/dfroot_ko.dump")
+configure_file("${GOOD_SO}" "${PROBE_SO}" COPYONLY)
+file(SHA256 "${GOOD_SO}" probe_good_before)
+file(SHA256 "${PROBE_SO}" probe_copy_before)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "KO_TEST_REAL_OBJCOPY=${OBJCOPY}"
+            "${MUTATING_LAUNCHER}" "--dump-section" ".dfroot_ko=${PROBE_DUMP}"
+            "${PROBE_SO}"
+    RESULT_VARIABLE probe_rc OUTPUT_VARIABLE probe_out ERROR_VARIABLE probe_err)
+if(NOT probe_rc EQUAL 0 OR NOT EXISTS "${PROBE_DUMP}")
+    message(FATAL_ERROR
+        "FAIL: 14 host precondition: mutation probe did not dump the section "
+        "(rc=${probe_rc})\nstdout:\n${probe_out}\nstderr:\n${probe_err}")
+endif()
+file(SHA256 "${PROBE_DUMP}" probe_dumped_hash)
+file(SHA256 "${PROBE_SO}" probe_copy_after)
+file(SHA256 "${GOOD_SO}" probe_good_after)
+if(probe_dumped_hash STREQUAL H_GOOD OR
+   probe_copy_before STREQUAL probe_copy_after OR
+   NOT probe_good_before STREQUAL probe_good_after)
+    message(FATAL_ERROR
+        "FAIL: 14 host precondition: mutation probe did not flip only the "
+        "isolated copy (dumped=${probe_dumped_hash}, good=${H_GOOD}, "
+        "copy ${probe_copy_before}->${probe_copy_after}, "
+        "original ${probe_good_before}->${probe_good_after})")
+endif()
+file(REMOVE_RECURSE "${PROBE_DIR}")
+
 set(MUTATING_MANIFEST "${WORK}/mutating-objcopy.manifest")
 expect_failure("14a mutating objcopy fails closed"
     "${RE_MISMATCH}" "${GOOD_SO}" "${MUTATING_MANIFEST}" "${PINS_ONE}"
-    "-DKO_OBJCOPY=${MUTATING_OBJCOPY}")
+    "-DKO_OBJCOPY=${MUTATING_LAUNCHER}")
 if(EXISTS "${MUTATING_MANIFEST}")
     message(FATAL_ERROR "FAIL: case 14a left a verified manifest after mutation")
 endif()

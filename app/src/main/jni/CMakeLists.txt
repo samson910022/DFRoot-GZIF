@@ -266,7 +266,10 @@ target_link_options(dfroot PRIVATE -Wl,-z,max-page-size=16384)
 #   3. the ALL target `dfroot_packaged` depends on the VERIFIED artifact, and
 #      app/build.gradle.kts names that target in externalNativeBuild so AGP's
 #      own build invocation traverses the same chain.
-# No skip option: failure fails the build and leaves no verified copy/manifest.
+# No skip option: a failure fails the build and invalidates the manifest and
+# verification work; the first command below also removes any previously
+# verified copy at the package path before the re-check, so a stale artifact
+# cannot survive a failed re-verification.
 # CI repeats this gate on the bytes extracted from EVERY APK it uploads.
 set(PACKAGED_KO_FORCE_FILE "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.verify.force")
 add_custom_target(dfroot_packaged_ko_force
@@ -276,6 +279,8 @@ add_custom_target(dfroot_packaged_ko_force
 )
 add_custom_command(
     OUTPUT "${PACKAGED_KO_VERIFIED_SO}"
+    # Drop any previously verified package-path copy before re-verifying.
+    COMMAND "${CMAKE_COMMAND}" -E rm -f "${PACKAGED_KO_VERIFIED_SO}"
     COMMAND "${CMAKE_COMMAND}"
             "-DPACKAGED_SO=${PACKAGED_KO_RAW_SO}"
             "-DKO_OBJCOPY=${CMAKE_OBJCOPY}"

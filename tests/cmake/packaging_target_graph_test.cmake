@@ -12,7 +12,10 @@
 #     staged .so; no package-path artifact/manifest/bootstrap appears
 #   4 cached build: a second named build stays verified (force re-check)
 #   5 cached + poisoned: poisoning the cached package .so AND its manifest is
-#     repaired by a named rebuild, with no stale evidence left behind
+#     repaired by a named rebuild; then reconfiguring that same cached build
+#     with a DIFFERENT valid pin must fail closed with a SHA-256 mismatch and
+#     leave no package .so or manifest, and restoring the good pin must rebuild
+#     a verified artifact. No stale evidence survives any step.
 #   6 production invariant: Gradle names BOTH targets and the raw link stays
 #     in a staging dir, so dropping targets() cannot make AGP package the raw
 #     unverified/libdfroot.so instead of the verified copy
@@ -69,8 +72,18 @@ make_fixture("${GOOD_SO}" "${GOOD_PAYLOAD}")
 make_fixture("${CORRUPT_SO}" "${CORRUPT_PAYLOAD}" --corrupt)
 file(SHA256 "${GOOD_PAYLOAD}" H_GOOD)
 file(SHA256 "${GOOD_SO}" H_GOOD_SO)
+# A second well-formed pin that does NOT match the fixture payload, used by
+# case 5 to prove a reconfigured cached build fails closed.
+set(OTHER_PAYLOAD "${WORK}/other-pin.bin")
+file(WRITE "${OTHER_PAYLOAD}" "a different reviewed pin (packaging graph test only)")
+file(SHA256 "${OTHER_PAYLOAD}" H_OTHER)
 
+# An optional 4th argument overrides the pin (case 5); otherwise H_GOOD is used.
 function(configure_graph build_dir out_var err_var)
+    set(pins "${H_GOOD}")
+    if(ARGC GREATER 3)
+        list(GET ARGN 0 pins)
+    endif()
     file(MAKE_DIRECTORY "${build_dir}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -S "${FIXTURE_PROJECT}" -B "${build_dir}"
@@ -78,7 +91,7 @@ function(configure_graph build_dir out_var err_var)
                 "-DPACKAGE_DIR=${build_dir}/package"
                 "-DVERIFY_SCRIPT=${VERIFY_SCRIPT}"
                 "-DKO_OBJCOPY=${OBJCOPY}"
-                "-DKO_PINS=${H_GOOD}"
+                "-DKO_PINS=${pins}"
                 "-DKO_SIZES=256"
         RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
     set(${out_var} "${out}" PARENT_SCOPE)
@@ -230,7 +243,10 @@ endif()
 assert_verified("${B1}" "04")
 
 # 5. Cached + poisoned: replace the package .so with corrupt bytes and write a
-#    stale "verified" manifest. The named rebuild must restore both.
+#    stale "verified" manifest. The named rebuild must restore both. Then
+#    reconfigure that SAME cached build with a different (well-formed) pin and
+#    require a fail-closed SHA-256 mismatch with no package .so or manifest,
+#    then restore the good pin and rebuild to verified evidence again.
 configure_file("${CORRUPT_SO}" "${B1}/package/libdfroot.so" COPYONLY)
 file(WRITE "${B1}/dfroot-packaged-ko.manifest"
     "status: verified\npoisoned-stale-evidence\n")
@@ -245,6 +261,38 @@ file(READ "${B1}/dfroot-packaged-ko.manifest" manifest_text)
 if(manifest_text MATCHES "poisoned-stale-evidence")
     message(FATAL_ERROR "FAIL: 05 stale manifest survived the rebuild")
 endif()
+
+# 5b. Reconfigure with a DIFFERENT valid pin. The staged raw SO still carries
+# H_GOOD, so the byte gate must fail with SHA-256 MISMATCH, drop any previously
+# verified copy at the package path and leave no manifest behind.
+configure_graph("${B1}" conf_out conf_err "${H_OTHER}")
+build_graph("${B1}" "dfroot_packaged" rc out err)
+set(combined "${out}\n${err}")
+string(REGEX REPLACE "[\r\n]+" " " combined "${combined}")
+string(REGEX REPLACE "[ \t]+" " " combined "${combined}")
+if(rc EQUAL 0 OR NOT combined MATCHES "SHA-256 MISMATCH")
+    message(FATAL_ERROR
+        "FAIL: 05 different pin did not fail closed with SHA-256 MISMATCH "
+        "(rc=${rc})\n${out}\n${err}")
+endif()
+if(EXISTS "${B1}/package/libdfroot.so")
+    message(FATAL_ERROR "FAIL: 05 different pin left a package .so behind")
+endif()
+if(EXISTS "${B1}/dfroot-packaged-ko.manifest")
+    file(READ "${B1}/dfroot-packaged-ko.manifest" stale_text)
+    message(FATAL_ERROR
+        "FAIL: 05 different pin left a manifest behind:\n${stale_text}")
+endif()
+
+# 5c. Restore the original good pin and rebuild at the same path: the named
+# target must regenerate a fresh verified artifact and manifest.
+configure_graph("${B1}" conf_out conf_err "${H_GOOD}")
+build_graph("${B1}" "dfroot_packaged" rc out err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR
+        "FAIL: 05 good-pin rebuild did not succeed (rc=${rc})\n${out}\n${err}")
+endif()
+assert_verified("${B1}" "05 good-pin recovery")
 
 # 6. Production source invariant (no CMake build needed).
 assert_production_target_invariant()
