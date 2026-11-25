@@ -1,5 +1,21 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.4: foreground side effects serialized with the lifetime decision (foreground half of R2-20) — PR #2
+
+Short contract note (R5.9 consolidates): `ExploitService` adds a monotonic
+`foregroundEpoch`, incremented only under `startsLock` whenever a start
+attaches/re-attaches the notification. A flush snapshots the epoch with its
+decision under that lock, then re-acquires the lock, verifies the epoch and the
+removal claim, and calls `stopForeground(STOP_FOREGROUND_REMOVE)` inside the
+lock under a single `flushInProgress` guard; a contending flush waits without
+`startsLock` and re-decides. A newer foreground attachment in the decision ->
+side-effect gap therefore keeps its notification, while the stale flush still
+retires its own immutable per-ID `stopSelf` snapshot exactly once. A start that
+fails before re-attaching foreground still gets its own stopSelf, and bounded
+R5.3 eviction retirement is untouched. Host-only pause seam and deterministic
+tests only; no operation is replayed, cancelled or transferred, and no device,
+ADB, payload or APK work was performed.
+
 ## 2026-11-26 — R5.3: total request bookkeeping bounds (R2-21 / dispatch half of R2-17) — PR #2
 
 Short contract note (R5.9 consolidates): `ExploitService` outcome reports now

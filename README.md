@@ -312,6 +312,23 @@ unbounded scan set. An unreported outcome is still uncertainty for the Activity,
 never proof of admission. Admission, ownership, the durable barrier and all OFF
 gates are unchanged. No device, ADB, payload or APK work was performed.
 
+### R5.4 note (2026-11-26) — foreground attach and removal serialized
+
+Short contract note (R5.9 consolidates): `ExploitService` holds `startsLock`
+across the whole foreground attach sequence (`startForeground`, the attached
+flag, `foregroundRemoved = false` and the monotonic `foregroundEpoch` bump),
+and the flush's epoch re-check with its single `stopForeground(REMOVE)` runs
+under that same lock. Attach and removal are therefore mutually exclusive and
+the epoch bump is atomic with the attach: a stale flush that already decided
+cannot remove a notification attached by a newer start. Its immutable per-ID
+`stopSelf` snapshot is still retired exactly once and cannot stop a newer
+start. Simultaneous flushes serialize through one guard, with no duplicate
+removal or stop. Per-start lifetime, bounded eviction retirement,
+single-flight admission, owner token, OFF gates, the durable barrier and
+operation ownership are unchanged. Host-only gate seams; no device, ADB,
+payload or APK work was performed. This is host-only bookkeeping evidence, not
+device safety proof; no R2-14 or R2-16 closure is claimed here.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`
