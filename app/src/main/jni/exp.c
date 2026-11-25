@@ -237,6 +237,55 @@ static int read_vendor_content(off_t offset, uint8_t buf[16]) {
     return 0;
 }
 
+/* Read 16 bytes from the vendor file at offset using the helper's splice mode
+ * (the same mode every successful write uses), never its read mode: read mode
+ * has been observed to exit 0 with an empty pipe during cleanup. The helper
+ * splices the vendor block into our pipe, which we drain completely. Publish
+ * to buf only after a full block AND a successful helper exit; otherwise fail
+ * closed with the raw status, byte count and errno. No retry: a failed block
+ * must surface instead of being silently re-observed. */
+static int read_vendor_via_splice(off_t offset, uint8_t buf[16]) {
+    uint8_t tmp[16];
+    int rdpipe[2];
+
+    if (pipe(rdpipe) < 0) {
+        printf("read_vendor_splice at 0x%lx: pipe failed: %s\n",
+               (long)offset, strerror(errno));
+        return -1;
+    }
+
+    /* target_fd=1 (stdout) is dup2'd onto the pipe write end in the vforked
+     * child; mode=NULL selects splice mode. */
+    int status = spawn_crash_dump(offset, rdpipe[1], 1, NULL);
+    close(rdpipe[1]);
+    if (status < 0) {
+        close(rdpipe[0]);
+        return -1; /* spawn_crash_dump already logged why */
+    }
+
+    int n = 0;
+    errno = 0; /* a clean EOF must not report a stale errno */
+    while (n < 16) {
+        ssize_t r = TEMP_FAILURE_RETRY(read(rdpipe[0], tmp + n, (size_t)(16 - n)));
+        if (r <= 0) break;
+        n += (int)r;
+    }
+    int read_errno = errno;
+    close(rdpipe[0]);
+
+    if (n == 16 && WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        /* buf is private to the caller: publish only a complete block. */
+        memcpy(buf, tmp, 16);
+        return 0;
+    }
+
+    printf("read_vendor_splice at 0x%lx: got %d bytes, status=0x%x, errno=%d (%s): %s\n",
+           (long)offset, n, status, read_errno, strerror(read_errno),
+           (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? "short read"
+                                                           : "helper failed");
+    return -1;
+}
+
 /* Send one CBC write.
  * ESP layout: SPI(4) + Seq(4) + IV(16) + ciphertext==file_page(16) = 40 bytes.
  * use_helper=0: splice file_fd page directly (system file, untrusted_app can open)
@@ -346,7 +395,7 @@ static int patch_file_cbc(const char *path, const char *payload, size_t len,
         if (old_blocks) {
             memcpy(old_content, old_blocks + i * 16, 16);
         } else if (use_helper) {
-            if (read_vendor_content(off, old_content) < 0) {
+            if (read_vendor_via_splice(off, old_content) < 0) {
                 rc = -1; break;
             }
         } else {
@@ -788,7 +837,7 @@ static int read_back_restore(const struct restore_record *r, uint8_t *buf)
 
     if (r->use_helper) {
         for (off = 0; off < r->len; off += 16)
-            if (read_vendor_content((off_t)(r->off + off), buf + off) != 0)
+            if (read_vendor_via_splice((off_t)(r->off + off), buf + off) != 0)
                 return -1;
         return 0;
     }
