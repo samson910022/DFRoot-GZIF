@@ -25,6 +25,12 @@ documentation or Java-side gating:
   into `/data/adb/.ksud-stage`, 0700, then execs it). That producer change by
   itself is **not** proof the gate is closed: both halves must be re-reviewed
   together and the full chain must be validated on a device.
+- A clean-state device attempt exposed an unrelated preflight defect: the
+  fixed `helper_orig[1024]` save buffer was smaller than the 1,408 B embedded
+  splicehelper, so every build aborted before touching system state. The buffer
+  is now dynamically allocated with an inclusive 32..65536 B validator and a
+  host boundary test; this is host-proven only and the device run must be
+  repeated with the rebuilt APK.
 - Source-build evidence (host builds of the patched loaders): CI run
   **45674540939** (classic pair, `android13-5.15`) and CI run **45674545588**
   (Next generic, four KMIs). Run 45674540939 **failed overall**: only its

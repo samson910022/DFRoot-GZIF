@@ -1,4 +1,22 @@
 /* Modified 2026-11-17 (DFRoot GZIF): .incbin reduced to dfroot-android13-5.15.ko; KO_TARGET_CANDIDATES reduced to /vendor/lib64/AIAwbModel_v2.2.tflite. See NOTICE. */
+#include <stddef.h>
+#include <stdint.h>
+
+/* Pure bounds check for the saved crash_dump64 (splicehelper) originals.
+ * This lives above DF_HELPER_TEST_ONLY so a host test can compile the exact
+ * production validator without linking any privileged payload. The upper
+ * bound rejects absurd allocations; the lower bound keeps the CBC IV path
+ * (which reads at least one 16-byte block) valid. */
+#define DF_HELPER_BUF_MIN ((size_t)32)
+#define DF_HELPER_BUF_MAX ((size_t)64 * 1024)
+_Static_assert(DF_HELPER_BUF_MIN <= DF_HELPER_BUF_MAX,
+               "invalid saved-helper size bounds");
+
+static int df_helper_buf_ok(size_t len) {
+    return len >= DF_HELPER_BUF_MIN && len <= DF_HELPER_BUF_MAX;
+}
+
+#ifndef DF_HELPER_TEST_ONLY
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +109,7 @@ struct preflight {
     uint8_t *ko_orig;
     char *helper_buf;
     size_t helper_len;
-    uint8_t helper_orig[1024];
+    uint8_t *helper_orig;
     struct hook_plan plans[MAX_HOOK_PLANS];
     int plan_count;
     int selected;
@@ -518,7 +536,9 @@ static void free_preflight(struct preflight *pf) {
     for (i = 0; i < pf->restore_count; i++) free(pf->restores[i].orig);
     free(pf->ko_buf);
     free(pf->ko_orig);
+    free(pf->helper_orig);
     free(pf->helper_buf);
+    /* Zeroing also NULLs every pointer, so a second free_preflight() is safe. */
     memset(pf, 0, sizeof(*pf));
     pf->selected = -1;
 }
@@ -567,8 +587,19 @@ static int preflight(struct preflight *pf) {
     close(fd);
     raw_len = (size_t)(splice_helper_end - splice_helper_start);
     pf->helper_buf = pad16(splice_helper_start, raw_len, &pf->helper_len);
-    if (!pf->helper_buf || pf->helper_len > sizeof(pf->helper_orig) || pf->helper_len < 32) {
-        printf("preflight: helper payload too large/small to save\n");
+    if (!pf->helper_buf) {
+        printf("preflight: helper payload allocation failed\n");
+        goto fail;
+    }
+    if (!df_helper_buf_ok(pf->helper_len)) {
+        printf("preflight: helper payload size invalid (%zu bytes; allowed %zu..%zu)\n",
+               pf->helper_len, DF_HELPER_BUF_MIN, DF_HELPER_BUF_MAX);
+        goto fail;
+    }
+    pf->helper_orig = (uint8_t *)malloc(pf->helper_len);
+    if (!pf->helper_orig) {
+        printf("preflight: helper originals allocation failed (%zu bytes)\n",
+               pf->helper_len);
         goto fail;
     }
     fd = open(kCrashDump, O_RDONLY | O_CLOEXEC);
@@ -1328,3 +1359,4 @@ int main(int argc, char **argv) {
     clear_secret(g_aes_key, sizeof(g_aes_key));
     return rc;
 }
+#endif /* !DF_HELPER_TEST_ONLY */

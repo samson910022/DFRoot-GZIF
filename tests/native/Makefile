@@ -4,7 +4,7 @@ JNI := ../../app/src/main/jni
 
 .PHONY: all test clean fixtures
 
-all: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test
+all: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test helper_size_test
 
 status_protocol_test: status_protocol_test.c $(JNI)/status_protocol.c $(JNI)/status_protocol.h
 	$(CC) $(CFLAGS) -o $@ status_protocol_test.c $(JNI)/status_protocol.c
@@ -30,17 +30,23 @@ device_version_test: device_version_test.c $(JNI)/device_version.c $(JNI)/device
 loader_stage_test: loader_stage_test.c $(JNI)/bootstrap_stage.c $(JNI)/bootstrap_stage.h
 	$(CC) $(CFLAGS) -I$(JNI) -o $@ loader_stage_test.c $(JNI)/bootstrap_stage.c
 
+# Host-only size-validator test. Includes the real exp.c with the privileged
+# payload excluded (DF_HELPER_TEST_ONLY); only this test object is linked.
+helper_size_test: helper_size_test.c $(JNI)/exp.c
+	$(CC) $(CFLAGS) -I$(JNI) -o $@ helper_size_test.c
+
 # Regenerate the binary fixtures (checked in; run only on deliberate changes).
 fixtures:
 	python3 fixtures/gen_fixtures.py
 
-test: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test
+test: status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test helper_size_test
 	./status_protocol_test
 	./final_publish_test
 	./proc_scan_policy_test
 	./elf_parser_test
 	./device_version_test
 	./loader_stage_test
+	./helper_size_test
 
 clean:
-	rm -f status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test
+	rm -f status_protocol_test final_publish_test proc_scan_policy_test elf_parser_test device_version_test loader_stage_test helper_size_test
