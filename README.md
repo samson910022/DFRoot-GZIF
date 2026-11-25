@@ -109,7 +109,7 @@ is unchanged: rc7 precedence and indeterminate ownership still apply.
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. Each UI request carries a click-time ID: the coordinator publishes `ACCEPTED`, `REJECTED` or `CANCELLED` for that ID, and the UI clears its pending state only on a matching outcome (never on an unrelated snapshot). `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death. Service destruction publishes `CANCELLED` **only** for unclaimed service-local work and never replays it; accepted work stays coordinator-owned.
 - **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state. That queued-request recheck is defense in depth only: the **authoritative final gate** is checked inside `RunCoordinator.submit()` under the same lock as the durable attempt publish, immediately before that publish, with another recheck before the engine starts. OFF (or an unreadable setting) therefore suppresses an unattended operation even if the toggle races a blocked publish, initialization or delayed worker, and the checked barrier clear remains allowed for a proven pre-effect rejection. An OFF toggle **after** `engine.run()` has started is **not** revoked — the coordinator keeps ownership of privileged work instead of cancelling it. Foreground-service start eligibility from boot still requires a hardware/OS gate, not a code claim.
 - **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. Turning it ON still requires verified configuration, an idle coordinator, and consent; a rejected component change is surfaced in the UI with the state actually applied.
-- **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until the barrier is cleared or app data is reset.
+- **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until a trusted caller clears the barrier. **Resetting app data is NOT safe recovery**: it only discards the barrier and is not evidence that privileged effects stopped, so it must not be presented as a way out of the lockout. `engineFinished` only proves the Java engine call returned/threw, not that externally owned effects ceased; no in-app retry/clear control is exposed from it.
 - **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
 
 ## FAQ
@@ -270,6 +270,50 @@ if it is absent, release builds are unsigned and still configure. The file is
 gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 `SIGN_ALIAS` (no default credentials); CI uses the `KEYSTORE` secrets.
 
+## Fourth repair round — R4 consolidated summary (2026-11-26)
+
+Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`
+(committed local HEAD `186fc8d`). It closes the Re-review 3 findings **R2-12,
+R2-13, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22** on top of
+the R3 round recorded below. All R4 work was host-verified only; no device,
+hardware, ADB, payload, privileged-container, cold-boot, soft-reboot or
+APK-assembly validation was performed, and no dependency or bundled binary
+changed. The older sections below remain historical; counts and gate states in
+this section are current.
+
+| Phase / commit | Finding | What changed (host evidence only) |
+|---|---|---|
+| R4.1 `6348c71` | R2-13 | Failed-commit uncertainty is process-wide: a static latch keyed by the attempt-preference file makes every `SharedPreferencesOperationAttemptStore` wrapper fail closed even when newly constructed after a poisoned commit. Harmless cross-wrapper tests; 59 focused tests, 0 failures; two reviews APPROVED. |
+| R4.2 `b8526d8` | R2-12 | Conflicting terminal markers map to rc7 (never definitive rc1); origin-aware diagnostics never claim native rc=7 for an unknown exit or Java exception; unverified outcomes keep lease/freeze/attempt and never authorize a second operation. 137 host CTest + 114 focused Java tests, 0 failures; two reviews APPROVED. |
+| R4.3 `916a18e` | R2-14 (narrowed, not proved safe) | Definitive non-7 results require a matching `dfroot_confirm_` marker (same operation ID and code); an intended marker alone is indeterminate; any detected publication failure publishes rc7 **before** retraction. 140 host CTest, warnings-clean; three reviews APPROVED. The abnormal-death window stays an OPEN hardware/OS gate. |
+| R4.4 `7e41d27` | R2-16 | The authoritative unattended gate is inside `submit()` immediately before the durable publish, with a pre-engine recheck; OFF during initialization or a blocked commit yields a proven pre-effect `PRECHECK_FAILED` with no engine call, and OFF after engine start is not revoked. 98 focused tests, 0 failures; two reviews APPROVED. Optional residual: no isolating test for the second recheck window (recorded, not silently accepted). |
+| R4.5 `11ae87d` | R2-17 | Click-time request IDs produce correlated `ACCEPTED`/`REJECTED`/`CANCELLED`; cancellation of unclaimed service-local work is published and closed once and never replayed; accepted privileged work stays coordinator-owned. 142 focused tests + 3 deterministic repetitions, 0 failures; two reviews plus one Required fix loop RESOLVED. Optional residual: duplicate benign correlated rejection on unattended-OFF (recorded). |
+| R4.6 `15bb5cc` | R2-18 | Main-thread failure/cancellation outcome reports are enqueued on the admission worker instead of taking the coordinator's durable-lock monitor; notification/status reads stay volatile-snapshot-only. Narrow guarantee only — a worker may still wait on storage. 95 focused tests, 0 failures; one Required destruction-guard issue fixed and re-review RESOLVED. |
+| R4.7 `a51f74e` | R2-20 | Per-start lifetime resolves each start exactly once; foreground removal cannot suppress `stopSelf` for later-resolved starts. A per-service owner token is invalidated before destruction cancels local work and denied under the admission lock and before engine start; engine-started work is never cancelled. 158 focused tests in the touched classes, 0 failures; two Required interleavings fixed and re-review RESOLVED. |
+| R4.8 `186fc8d` | R2-21 | Duplicate starts are rejected before any WakeLock or admission work while a request is `PENDING`/`CLAIMED`, with a correlated `REJECTED`; the single-thread admission worker is shut down in `onDestroy()` after outcome reports are queued and recreated on the next `onCreate()`. 74 focused tests + 3 determinism repetitions, 0 failures; one Required flake fixed and re-review RESOLVED. Optional residuals: idle worker thread between starts and benign correlated duplicates (recorded). |
+| R4.9 (docs phase, uncommitted for the main agent) | R2-22 | Honest messaging/docs only: `SOFT_REBOOT_PENDING` no longer claims "root active"; `RunCoordinator` Javadoc states that `engineFinished` only proves the Java call ended and that app-data reset is not safe recovery; no functional/control-flow change (message text only), no retry/clear control. Focused `ResultMessagesTest`: 50 tests, 0 failures/errors/skips. |
+
+The result contract above is authoritative: marker conflict → **rc7** (never
+rc1); publication acknowledgement requires a matching `dfroot_confirm_`
+marker; early unconfirmed markers are indeterminate; rc7 is published before
+retraction; the residual abnormal-death window is an **OPEN hardware/OS gate,
+NOT proved safe**. The OFF gate is enforced in `submit()` with a pre-engine
+recheck, is not revoked after engine start, and foreground-service eligibility
+from boot still needs hardware validation. Unattended soft reboot stays OFF and
+manual soft reboot remains experimental/unvalidated on GZIF. Final user
+messages never claim verified root or a bare `SUCCESS` (the `/dev/df` and
+`/dev/dfm6` strings remain owner-approved progress diagnostics only).
+
+Open gates and residual optional items recorded, not silently accepted:
+Direct Boot FGS eligibility; real soft-reboot safety; `/dev` marker-root trust;
+sticky-bit `/data/local/tmp` owner (`shell`); AES key in argv out of scope;
+no owner-facing recovery UI (ordinary users stay intentionally locked out and
+app-data reset is not safe recovery); `BOOT_COUNT` is diagnostic only; the
+R4.4 second-recheck test gap, R4.5 duplicate correlated rejection, R4.8 idle
+worker thread and benign duplicates, and cross-instance preference uncertainty.
+A fresh full suite/CI run and the four final comprehensive reviews are the
+main agent's gates — CI green is not claimed locally.
+
 ## Third repair round — R3 consolidated summary (2026-11-25)
 
 This is the authoritative record of the **third repair round** on
@@ -290,19 +334,22 @@ gates in this section are current.
 | R2-12 | `6ebf9e3` | Unverified observations no longer masquerade as success: terminal classifier failures map to rc=7, one authoritative unverified-outcome predicate prevents timeout/interruption flags from hiding an unknown exit, and `RunCoordinator` retains ownership and the durable attempt on every unverified result or engine exception. |
 | R2-13 | `2a74dd0` | Uncertain persisted attempt records fail closed: incomplete/corrupt records are a barrier, not absence; a store is poisoned after a failed checked commit so its process-local cache cannot prove durable absence until a post-restart store re-reads durable state. |
 | R2-14 | `6012c21` | The post-link publication window is documented as provable, not stronger: pre-link failures leave no final marker; once rc=7 is published it outranks success/conflicts; only results acted on **after publication completes** are indeterminate. A deterministic concurrent-reader host test proves an early confirmed observation is possible and cannot be revoked. |
-| R2-14 (R4.3) | — | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification, with three new confirmation-protocol cases. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
+| R2-14 (R4.3) | `916a18e` | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification, with three new confirmation-protocol cases. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
 | R2-16 / R2-17 | `b87318f` | Queued unattended requests re-read the Start-at-Boot component setting at admission and fail closed on OFF/unreadable without touching an admitted operation; every rejected submission publishes a fresh rejection snapshot so the Activity leaves its pending state and shows the real barrier reason. |
-| R2-16 (R4.4) | — | Closed the remaining pending-admission window: the authoritative authorization gate sits inside `submit()` immediately before the durable publish (fail closed when unreadable), with a second recheck immediately before engine start. An OFF toggle during a blocked publish, configuration wait or queued worker now yields a proven pre-effect `PRECHECK_FAILED` with a checked barrier clear and no engine call; OFF after engine start is deliberately not revoked. Hardware/OS FGS eligibility remains a separate gate. |
+| R2-16 (R4.4) | `7e41d27` | Closed the remaining pending-admission window: the authoritative authorization gate sits inside `submit()` immediately before the durable publish (fail closed when unreadable), with a second recheck immediately before engine start. An OFF toggle during a blocked publish, configuration wait or queued worker now yields a proven pre-effect `PRECHECK_FAILED` with a checked barrier clear and no engine call; OFF after engine start is deliberately not revoked. Hardware/OS FGS eligibility remains a separate gate. |
 | R2-18 | `d32006e` | Checked attempt-store work runs on a bounded single-thread admission executor with claim-once/close-once ownership, and the read-only availability diagnostic runs on a separate worker with sequence/generation guards. No safety check is bypassed: Boot OFF, the durable barrier, single-flight and fail-closed diagnostics stay authoritative. |
-| R2-18 (R4.6) | — | Narrower, honest guarantee: `ExploitService`'s main-thread failure and cancellation paths now **enqueue** the correlated outcome report on the admission worker instead of calling the coordinator method that takes the monitor held across checked storage; notification/status reads remain volatile-snapshot-only. A background worker may still wait on storage under that durable barrier lock. This is **not** a claim that every path is nonblocking. |
-| R2-20 (R4.7) | — | Shutdown is per start, not per latest snapshot: a resolved start is stopped exactly once, and the foreground notification is removed only when every owned start is resolved and no owned operation is active, so an older terminal snapshot cannot cancel a newer pending request. A per-instance owner token is invalidated before destruction cancels local work; the coordinator denies a dead owner under the admission lock and again immediately before engine start (proven pre-effect `PRECHECK_FAILED`, barrier cleared, no engine). Once the engine has started, ownership stays with the coordinator and an unverified outcome keeps lease, freeze and barrier. |
-| R2-21 (R4.8) | — | `ExploitService` owns at most one `PENDING`/`CLAIMED` request: further starts (including null/foreground-failure starts) get a correlated `REJECTED` **before** any WakeLock or `ADMISSION` work, so bursts cannot accumulate leases or admission work (each duplicate still enqueues one cheap outcome-report task on the single-thread worker). The lazily created single-thread admission worker is shut down gracefully in `onDestroy()` after outcome reports are queued and recreated on the next `onCreate()`; graceful shutdown drains already-queued outcome reports, while an enqueue attempt after shutdown is logged and dropped under the main-thread-only precondition. |
-| R2-19 + R2-04 caveat | `1252b3d` | Recovery requires confirmed engine completion (`engineFinished` only after `engine.run()` returns/throws) before an in-process clear; persisted-attempt recovery is a trusted-caller, post-process-death acknowledgement with a checked clear; final-result messages no longer claim a bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code and no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and the no-root-probe policy are unchanged. |
+| R2-18 (R4.6) | `15bb5cc` | Narrower, honest guarantee: `ExploitService`'s main-thread failure and cancellation paths now **enqueue** the correlated outcome report on the admission worker instead of calling the coordinator method that takes the monitor held across checked storage; notification/status reads remain volatile-snapshot-only. A background worker may still wait on storage under that durable barrier lock. This is **not** a claim that every path is nonblocking. |
+| R2-20 (R4.7) | `a51f74e` | Shutdown is per start, not per latest snapshot: a resolved start is stopped exactly once, and the foreground notification is removed only when every owned start is resolved and no owned operation is active, so an older terminal snapshot cannot cancel a newer pending request. A per-instance owner token is invalidated before destruction cancels local work; the coordinator denies a dead owner under the admission lock and again immediately before engine start (proven pre-effect `PRECHECK_FAILED`, barrier cleared, no engine). Once the engine has started, ownership stays with the coordinator and an unverified outcome keeps lease, freeze and barrier. |
+| R2-21 (R4.8) | `186fc8d` | `ExploitService` owns at most one `PENDING`/`CLAIMED` request: further starts (including null/foreground-failure starts) get a correlated `REJECTED` **before** any WakeLock or `ADMISSION` work, so bursts cannot accumulate leases or admission work (each duplicate still enqueues one cheap outcome-report task on the single-thread worker). The lazily created single-thread admission worker is shut down gracefully in `onDestroy()` after outcome reports are queued and recreated on the next `onCreate()`; graceful shutdown drains already-queued outcome reports, while an enqueue attempt after shutdown is logged and dropped under the main-thread-only precondition. |
+| R2-19 + R2-04 caveat | `1252b3d` | Recovery requires confirmed engine completion (`engineFinished` only after `engine.run()` returns/throws) before an in-process clear; persisted-attempt recovery is a trusted-caller, post-process-death acknowledgement with a checked clear; final-result messages no longer claim a bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code and no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and the no-root-probe policy are unchanged. Narrowed in R4.9: `engineFinished` proves only the Java call ended — see §R4. |
 
-**Final local verification (non-privileged host only, this round):** `:app:testDebugUnitTest`
-**554 tests / 45 suites, 0 failures / 0 errors / 0 skipped**; **137 host CTest
-cases, 0 failures**; `:app:lintDebug` **0 errors / 15 warnings**; workflow policy
-contract **67/67**; signing contract **40/40**; make contract **36/36**;
+**Final local verification (non-privileged host only, R3 prior-round
+baseline — not a fresh R4 full-suite result):** `:app:testDebugUnitTest`
+**554 tests / 45 suites, 0 failures / 0 errors / 0 skipped** at that round;
+**137 host CTest cases, 0 failures** then (**140** after R4.3 added
+confirmation-protocol cases); `:app:lintDebug` **0 errors / 15 warnings**;
+workflow policy contract **67/67**; signing contract **40/40**; make contract
+**36/36**;
 `:app:tasks --all` resolves and the clean/tampered negative loader-pin fixture
 behaves as required. No dependency was added or removed, no bundled loader or
 other binary changed, and the documentation/notices/hygiene edits in this
@@ -321,7 +368,8 @@ round introduce no runtime behavior change.
   redesign); parsing was only hardened/range-checked.
 - An owner-facing recovery UI is out of scope; an ordinary user with an
   unconfirmed persisted attempt is intentionally locked out until a trusted
-  caller clears the barrier or app data is reset.
+  caller clears the barrier. Resetting app data only discards the barrier and
+  is NOT evidence that privileged effects stopped — it is not safe recovery.
 - A new `BOOT_COUNT` is diagnostic only and is **not** proof that prior
   privileged effects stopped or that a retry is safe.
 
@@ -371,7 +419,7 @@ ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
   indeterminate (writer exits rc=7, reader's steady-state marker is rc=7).
   **Superseded by the R4.3 two-phase acknowledgement below**: a reader no longer
   acts on the early intended marker; confirmation is required.
-- **Confirmation protocol (R4.3, uncommitted).** `run_status_write()` publishes
+- **Confirmation protocol (R4.3, `916a18e`, committed).** `run_status_write()` publishes
   the intended final marker and then a matching `dfroot_confirm_` marker before
   returning success; the classifier accepts a non-7 code only when the
   confirmation matches both operation ID and code. An intended marker without
@@ -428,7 +476,7 @@ Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), fixing
 **R2-19** (recovery truth) and the remaining **R2-04** caveat (ambiguous
 `SUCCESS` wording). No device/ADB, payload execution, privileged container,
 dependency, APK assembly, native code, boot gate, attempt-store format, UI
-threading or CI change was made. Uncommitted.
+threading or CI change was made; this historical phase was committed as `1252b3d`.
 
 - **Recovery requires proof that supervised work has finished.**
   `recoverIndeterminate(operationId)` still needs the exact in-process ID, the
@@ -441,6 +489,7 @@ threading or CI change was made. Uncommitted.
   engine actually returns. A proven pre-effect rejection (engine never started)
   remains recoverable; no path retries, kills or starts work. Cleanup stays
   exactly once and the checked clear still precedes any lease/freeze release.
+  *Narrowed in R4.9: `engineFinished` proves only the Java call ended — see §R4.*
 - **Persisted-attempt recovery is a post-process-death escape hatch, not an
   owner feature.** `recoverPersistedAttempt(operationId, ownerAcknowledged)`
   requires an affirmative acknowledgement, the exact ID, an unconfirmed record
@@ -448,8 +497,10 @@ threading or CI change was made. Uncommitted.
   clear. It cannot prove that external effects from a dead process stopped.
   There is **NO in-app recovery UI**: an ordinary user with an unconfirmed
   persisted attempt is intentionally locked out — manual and boot admission are
-  rejected — until a trusted caller clears the barrier or app data is reset. A
-  new `BOOT_COUNT` is diagnostic only and is **not** proof of safety.
+  rejected — until a trusted caller clears the barrier. Resetting app data only
+  discards the barrier and is **NOT** evidence that privileged effects stopped;
+  it is not safe recovery. A new `BOOT_COUNT` is diagnostic only and is **not**
+  proof of safety.
 - **Final-result user messages no longer claim bare `SUCCESS`.** Generic success
   now reads `DFRoot: run completed — verify root status yourself`; already-hooked
   reads `DFRoot: already attempted/hooked; root status unverified`. The typed
@@ -457,10 +508,10 @@ threading or CI change was made. Uncommitted.
   `/dev/df` and `/dev/dfm6` progress strings, and the absence of a root probe are
   all unchanged. Nothing in the message claims root status was verified.
 
-**Validation (host only):** `:app:testDebugUnitTest` **554 tests across 45
-suites, 0 failures / 0 errors / 0 skipped**; `:app:lintDebug` **0 errors / 15
-warnings**; host CTest recorded then at **135/135** (superseded by the
-consolidated R3 section above: final **137/137**), `git diff --check` clean. No
+**Validation (host only, historical prior-round baseline):** `:app:testDebugUnitTest`
+**554 tests across 45 suites, 0 failures / 0 errors / 0 skipped**; `:app:lintDebug`
+**0 errors / 15 warnings**; host CTest recorded then at **135/135** (superseded
+by the consolidated R3 section: **137/137**, and R4.3: **140/140**), `git diff --check` clean. No
 device, hardware, ADB, payload, privileged-container, cold-boot, soft-reboot or
 APK-assembly validation was performed. A fresh GitHub CI green run remains a
 POST-PUSH gate and is not claimed here.

@@ -1,5 +1,54 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — Fourth repair round (R4.1–R4.9) consolidated — PR #2 / branch `fix/app-correctness-safety`
+
+Authoritative record of the **fourth repair round** (committed local HEAD
+`186fc8d`) on top of the R3 round (`1252b3d`). It closes Re-review 3 findings
+**R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**.
+Every phase below was host-verified only by focused runs and independent
+reviews; **no device, hardware, ADB, payload, privileged-container, cold-boot,
+soft-reboot, APK-assembly, dependency or bundled-binary validation was
+performed**, and no full-suite/CI green result is claimed locally. Older notes
+below are historical phase records, not current gate claims.
+
+### Phase table — commit, finding, fix loop, verification
+
+| Phase / commit | Finding closed | Fix loops and focused verification evidence |
+|---|---|---|
+| R4.1 `6348c71` | R2-13 | Replaced the instance-local poison latch with a static process-wide latch keyed by the attempt-preference file, so every store wrapper (coordinator, boot claim, artifact authorization) fails closed after a poisoned commit. Harmless cross-wrapper tests; **59 focused tests, 0 failures**; two independent reviews (correctness/safety, test/contract) APPROVED, no Required/Critical. |
+| R4.2 `b8526d8` | R2-12 | `RUN_STATUS_VERDICT_CONFLICT` maps to rc7, never definitive rc1; origin-aware diagnostics never claim native rc=7 for an unknown exit or Java exception; unverified outcomes retain lease, freeze, attempt and single-flight. **137 host CTest + 114 focused Java tests, 0 failures**; two independent reviews (native, Java contract) APPROVED. |
+| R4.3 `916a18e` | R2-14 (narrowed, not proved safe) | Two-phase acknowledgement: reader accepts a definitive non-7 code only with a matching `dfroot_confirm_` marker (same operation ID and code); unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. Early-observation test reworked into fix verification + three confirmation cases. **140 host CTest, 0 failures**, `-Wall -Wextra -Werror -pedantic` clean, no production test hooks; three independent reviews APPROVED. Residual abnormal-death window remains an OPEN hardware/OS gate. |
+| R4.4 `7e41d27` | R2-16 | Authoritative unattended gate moved inside `submit()` under the durable-publish lock, with a pre-engine recheck; OFF during init/blocked commit yields a proven pre-effect `PRECHECK_FAILED` (no engine, checked clear); OFF after engine start is not revoked. **98 focused tests, 0 failures**; two reviews APPROVED. Optional residual: no isolating test for the second recheck window — recorded, not silently accepted. |
+| R4.5 `11ae87d` | R2-17 | Click-time request IDs carry through service to coordinator; correlated `ACCEPTED`/`REJECTED`/`CANCELLED`; unclaimed service-local cancellation published and closed exactly once, never replayed; accepted work stays coordinator-owned. **142 focused tests + 3 deterministic `BootReceiverBoundaryTest` repetitions, 0 failures**; two reviews plus **one Required fix loop** (stale/flaky OFF-at-admission assertion) RESOLVED. Optional residual: benign duplicate correlated rejection on unattended-OFF — recorded. |
+| R4.6 `15bb5cc` | R2-18 | Main-thread failure/cancellation reports enqueued on the admission worker instead of taking the durable-lock monitor; status/notification reads stay volatile-snapshot-only. Narrow guarantee: a worker may still wait on storage. **95 focused tests, 0 failures**; correctness review found **one Required issue** (over-broad destruction guard dropped early `REJECTED`), fixed and re-review RESOLVED; test-quality review APPROVED. |
+| R4.7 `a51f74e` | R2-20 | Per-start lifetime resolves each start once; foreground removal no longer suppresses `stopSelf` for later-resolved starts; per-service owner token invalidated before destruction cancellation and denied under the admission lock and before engine start; engine-started work never cancelled. **158 focused tests in the touched classes, 0 failures** (156 initially, 158 after the Required fix loop); correctness review found **two Required interleavings** (stranded accepted start, `foregroundRemoved` gating `stopSelf`), both fixed and re-review RESOLVED; test-quality and architecture reviews APPROVED. |
+| R4.8 `186fc8d` | R2-21 | Duplicate starts rejected before WakeLock/admission work while another request is `PENDING`/`CLAIMED`, with correlated `REJECTED`; single-thread admission worker shut down gracefully in `onDestroy()` after outcome reports are queued and recreated on `onCreate()`. **74 focused tests + 3 determinism repetitions, 0 failures**; test-quality review found **one Required flake** (ungated `PENDING` assertion), fixed via a per-cycle latch gate and re-review RESOLVED; correctness review APPROVED with optional residuals. |
+| R4.9 (this docs phase, **uncommitted** — left for the main agent) | R2-22 | Honest wording/docs only, no functional/control-flow change (message text only): `SOFT_REBOOT_PENDING` no longer says "root active" (now `DFRoot: soft-reboot was requested (root status unverified); verify root status yourself`, code 4 kept); `RunCoordinator` Javadoc says `engineFinished` proves only that the Java call returned/threw and that app-data reset is not evidence effects stopped; final messages ban "root active"/bare `SUCCESS`; README/CHANGELOG/PORTING/plan/todo consolidated. Focused `ResultMessagesTest`: **50 tests, 0 failures / 0 errors / 0 skipped** (10 parameterized cases × 5 methods). No retry/clear control added. |
+
+### R4 final gate state and residual optional items
+
+- **Result contract:** marker conflict → rc7 (never rc1); definitive non-7
+  results need a matching `dfroot_confirm_` marker; an early intended marker is
+  indeterminate; rc7 is published before retraction; the residual
+  abnormal-death window is an **OPEN hardware/OS gate, NOT proved safe**.
+- **OFF / ownership:** authoritative gate in `submit()` with pre-engine
+  recheck; no revocation after engine start; boot FGS eligibility is still a
+  hardware gate. Unattended soft reboot stays OFF; manual soft reboot remains
+  experimental/unvalidated on GZIF (historical full hard reboot on this model).
+- **Recovery:** no in-app UI; ordinary users intentionally locked out behind
+  the durable barrier; app-data reset only discards the barrier and is NOT
+  safe recovery; `engineFinished` is a narrow trusted-caller precondition, not
+  a retry/clear control; a new `BOOT_COUNT` is diagnostic only.
+- **Residual optional items recorded, not silently accepted:** R4.4 missing
+  isolating second-recheck test, R4.5 duplicate correlated rejection, R4.8
+  idle worker thread/benign duplicates and cross-instance preference
+  uncertainty, signed-release job not running packaged-pin verification
+  itself (inherited PR #1 policy), AES key in argv out of scope, `/dev`
+  marker-root trust, sticky-bit `/data/local/tmp` owner (`shell`), recovery UI
+  out of scope.
+- **Pending main-agent gates:** fresh full suite (native + Java) and CI green
+  after push, plus the four final comprehensive reviews. Not claimed locally.
+
 ## 2026-11-26 — R4.8: bounded service-local admission lifetime (R2-21)
 
 Short note (R4.9 consolidates docs): `ExploitService` now admits at most one
@@ -125,11 +174,12 @@ all earlier sections below are historical.
 | R2-14 | `6012c21` | Post-link publication window stated as provable: pre-link failure leaves no final marker; rc=7 wins once published; only results acted on after publication completes are indeterminate. Deterministic concurrent-reader host test proves an early, unrevocable confirmed observation is possible. **Superseded by the R4.3 confirmation protocol above.** |
 | R2-16 / R2-17 | `b87318f` | Boot-OFF is re-read at admission for queued unattended requests (OFF/unreadable fails closed, admitted work untouched); every rejected coordinator submission publishes a fresh snapshot so the Activity shows the real barrier reason and leaves its pending state (pre-submission Boot-OFF suppression is intentionally silent). |
 | R2-18 | `d32006e` | Checked attempt-store work moved to a bounded single-thread admission executor (claim-once/close-once); read-only availability diagnostic computed on a separate worker with sequence/generation guards. Boot OFF, durable barrier, single-flight and fail-closed diagnostics remain authoritative. |
-| R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion, not just timeout publication; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear and no UI/retry/boot-count proof; final-result messages drop bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no-root-probe policy unchanged. |
+| R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion, not just timeout publication; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear and no UI/retry/boot-count proof; final-result messages drop bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no-root-probe policy unchanged. Narrowed in R4.9: `engineFinished` proves only the Java call ended — see §R4. |
 
-**Final local verification (non-privileged host only):** **554 JVM tests / 45
-suites, 0 failures / 0 errors / 0 skipped**; **137 host CTest cases, 0
-failures**; lint **0 errors / 15 warnings**; workflow policy **67/67**; signing
+**Final local verification (non-privileged host only, R3 prior-round
+baseline — not a fresh R4 full-suite result):** **554 JVM tests / 45
+suites, 0 failures / 0 errors / 0 skipped** at that round; **137 host CTest
+cases, 0 failures** then (**140** after R4.3); lint **0 errors / 15 warnings**; workflow policy **67/67**; signing
 **40/40**; make **36/36**; `:app:tasks --all` resolves and the clean/tampered
 negative loader-pin fixture is green. Pins still match `app/build.gradle.kts`
 and `app/src/main/jniLibs`; `git diff --check` clean. No dependency was added or
@@ -233,13 +283,13 @@ APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
 
-## 2026-11-25 — Re-review 3.6 fix (R2-19 recovery truth; R2-04 wording; uncommitted)
+## 2026-11-25 — Re-review 3.6 fix (R2-19 recovery truth; R2-04 wording; later committed as `1252b3d`)
 
-Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), left
-uncommitted. Scope: **R2-19** (recovery truth) and the remaining **R2-04**
-caveat (ambiguous `SUCCESS` final-result wording). No payload, device/adb,
-privileged container, APK assembly, dependency, native code, boot gate,
-attempt-store format, UI threading or CI change; no commit/push.
+Historical phase note on `fix/app-correctness-safety` (HEAD `d32006e`), later
+committed as `1252b3d`. Scope: **R2-19** (recovery truth) and the remaining
+**R2-04** caveat (ambiguous `SUCCESS` final-result wording). No payload,
+device/adb, privileged container, APK assembly, dependency, native code, boot
+gate, attempt-store format, UI threading or CI change.
 
 - **R2-19 — recovery is narrow, evidence-based and trusted-caller-only.** There
   is still no blind retry, no UI/intent/broadcast path and no barrier clear based
@@ -260,8 +310,9 @@ attempt-store format, UI threading or CI change; no commit/push.
   external effects stopped and is a trusted-caller escape hatch, **not** an
   owner feature. There is **NO in-app recovery UI**: an ordinary user with an
   unconfirmed persisted attempt is intentionally locked out until a trusted
-  caller clears the barrier or app data is reset. A new boot count is diagnostic
-  only, not proof of safety. Mock tests cover with/without acknowledgement and
+  caller clears the barrier. Resetting app data only discards the barrier and is
+  NOT evidence that privileged effects stopped — not safe recovery. A new boot
+  count is diagnostic only, not proof of safety. Mock tests cover with/without acknowledgement and
   failed persistence, plus same-process refusal.
 - **R2-04 caveat — honest final-result wording.** Generic success is now
   `DFRoot: run completed — verify root status yourself`; already-hooked is
@@ -270,21 +321,23 @@ attempt-store format, UI threading or CI change; no commit/push.
   already-hooked SUCCESS code, the no-reentry guard, `/dev/df` and `/dev/dfm6`
   progress strings, and the no-root-probe policy are strictly unchanged.
 
-Fresh local verification: **554 JVM unit tests across 45 suites** (`:app:testDebugUnitTest`,
+Fresh local verification at that time (historical prior-round baseline):
+**554 JVM unit tests across 45 suites** (`:app:testDebugUnitTest`,
 0 failures/errors/skips), `:app:lintDebug` **0 errors / 15 warnings**, host CTest
 recorded then at **135/135** (superseded by the consolidated R3 section above:
-final **137/137**), and `git diff --check` clean. No hardware/device/ADB/
-payload/privileged-container/APK-assembly validation was performed; CI remains a
-POST-PUSH gate. All changes are left uncommitted.
+**137/137**, then R4.3: **140/140**), and `git diff --check` clean. No
+hardware/device/ADB/payload/privileged-container/APK-assembly validation was
+performed; CI remains a POST-PUSH gate. This phase was later committed as
+`1252b3d`.
 
-## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; uncommitted)
+## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; historical, superseded by R4.3 `916a18e`)
 
 **Historical within this branch:** this round only documented the post-link
 window; the R4.3 section at the top of this changelog supersedes it with a code
 fix (matching confirmation required before any definitive result).
 
-Third repair round on `fix/app-correctness-safety` (HEAD `2a74dd0`), left
-uncommitted. Scope: **R2-14 only** — the post-link publication observation
+Historical phase on `fix/app-correctness-safety` (then HEAD `2a74dd0`), later
+superseded in code by R4.3 (`916a18e`). Scope: **R2-14 only** — the post-link observation
 window. No payload, device/adb, privileged-container, APK assembly, dependency,
 attempt-store, Java, boot or UI changes; JVM tests are untouched. The temp
 write / fsync / close / `link()` publication protocol and atomic conflict
@@ -415,7 +468,10 @@ privileged-container, cold-boot, soft-reboot, or APK-assembly validation was
 performed.** A fresh GitHub CI green run, including the negative pin fixture,
 is a **POST-PUSH gate** that cannot be executed locally and is **not** claimed
 here. Per-file dated notices were added only where missing; no existing notice
-was removed. Documentation/notices/hygiene-only changes are left uncommitted.
+was removed. The documentation/notices/hygiene-only changes of this historical
+phase were later committed as `01f120c` (docs: record the re-review repair round
+and release gates) and `13162d4` (chore: finalize R2 re-review repair round)
+(see R3 consolidated note).
 
 ## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (locally committed, not yet pushed)
 

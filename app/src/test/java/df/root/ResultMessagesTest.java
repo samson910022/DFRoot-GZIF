@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): specify pure user-facing messages for every typed run outcome. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the honest already-attempted wording without changing result semantics. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin exact success wording with no bare SUCCESS claim; codes/types/detail unchanged. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R4.9): pin the qualified soft-reboot wording; ban "root active"/bare SUCCESS in every final message. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -22,6 +23,8 @@ public class ResultMessagesTest {
             "DFRoot: run completed — verify root status yourself";
     static final String ALREADY_HOOKED_MESSAGE =
             "DFRoot: already attempted/hooked; root status unverified";
+    static final String SOFT_REBOOT_PENDING_MESSAGE =
+            "DFRoot: soft-reboot was requested (root status unverified); verify root status yourself";
 
     private final RunResult.Type type;
     private final RunResult.Detail detail;
@@ -50,7 +53,7 @@ public class ResultMessagesTest {
         cases.add(new Object[] {RunResult.Type.PATCH_FAILED, RunResult.Detail.NATIVE_EXIT,
                 null, "DFRoot: Error - failed to patch files"});
         cases.add(new Object[] {RunResult.Type.SOFT_REBOOT_PENDING, RunResult.Detail.NATIVE_EXIT,
-                null, "DFRoot: root active — device may soft-reboot shortly"});
+                null, SOFT_REBOOT_PENDING_MESSAGE});
         cases.add(new Object[] {RunResult.Type.NATIVE_SETUP_FAILED, RunResult.Detail.NATIVE_EXIT,
                 null, "DFRoot: Error - native setup/timeout (see logcat & dmesg)"});
         cases.add(new Object[] {RunResult.Type.SOFT_REBOOT_FAILED, RunResult.Detail.NATIVE_EXIT,
@@ -67,7 +70,11 @@ public class ResultMessagesTest {
         int code = codeFor(type);
         RunResult result = new RunResult(code, type, detail, reason);
 
-        assertEquals(expected, ResultMessages.message(result));
+        String message = ResultMessages.message(result);
+        assertEquals(expected, message);
+        assertFalse("no final message may claim root active without verification",
+                message.contains("root active"));
+        assertFalse("no final message may claim bare SUCCESS", message.contains("SUCCESS"));
         // Rendering a message is observational: the typed contract is left untouched.
         assertEquals(code, result.getCode());
         assertEquals(type, result.getType());
@@ -119,6 +126,23 @@ public class ResultMessagesTest {
                 ResultMessages.message(result).contains("root verified"));
         assertFalse("must not claim bare SUCCESS",
                 ResultMessages.message(result).contains("SUCCESS"));
+    }
+
+    @Test
+    public void softRebootPendingMessageIsQualifiedAndKeepsCodeFour() {
+        RunResult result = new RunResult(ExploitRunner.RESULT_SOFT_REBOOT_PENDING,
+                RunResult.Type.SOFT_REBOOT_PENDING, RunResult.Detail.NATIVE_EXIT, null);
+        String message = ResultMessages.message(result);
+
+        assertEquals(SOFT_REBOOT_PENDING_MESSAGE, message);
+        assertFalse("must not claim root was verified", message.contains("root active"));
+        assertFalse("must not claim bare SUCCESS", message.contains("SUCCESS"));
+        assertTrue(message.contains("root status unverified"));
+        assertTrue(message.contains("verify root status yourself"));
+        assertEquals(4, result.getCode());
+        assertEquals(ExploitRunner.RESULT_SOFT_REBOOT_PENDING, result.getCode());
+        assertEquals(RunResult.Type.SOFT_REBOOT_PENDING, result.getType());
+        assertEquals(RunResult.Detail.NATIVE_EXIT, result.getDetail());
     }
 
     private static int codeFor(RunResult.Type type) {

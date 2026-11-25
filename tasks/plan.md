@@ -1,4 +1,5 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R4.9): record the R4.1–R4.9 phases, final gate state and residual optional items; final comprehensive reviews stay unchecked for the main agent. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -261,9 +262,10 @@ Remaining release gates (not satisfied locally, not claimed as done):
 ## Re-review 3.6 repair round — release gates (2026-11-25)
 
 Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), fixing
-**R2-19** (recovery truth) and the remaining **R2-04** caveat. Java-only,
-uncommitted: no native code, boot gate, attempt-store format, dependency, UI
-threading, CI, device/ADB, payload, privileged container, or APK assembly.
+**R2-19** (recovery truth) and the remaining **R2-04** caveat. Java-only, later
+committed as `1252b3d`: no native code, boot gate, attempt-store format,
+dependency, UI threading, CI, device/ADB, payload, privileged container, or APK
+assembly.
 
 - [x] R2-19 in-process recovery requires evidence: `engineStarted` before
   `engine.run()` and `engineFinished` only after that call returns/throws, in
@@ -275,9 +277,10 @@ threading, CI, device/ADB, payload, privileged container, or APK assembly.
 - [x] R2-19 persisted recovery is post-process-death only: acknowledgement +
   exact ID + checked clear + a record loaded at initialization (never one
   published by this process). No in-app recovery UI: an ordinary user is
-  intentionally locked out until a trusted caller clears the barrier or app data
-  is reset; a new boot count is not proof of safety. Mock tests: with/without
-  acknowledgement, failed persistence, same-process refusal.
+  intentionally locked out until a trusted caller clears the barrier. App-data
+  reset only discards the barrier and is NOT evidence that privileged effects
+  stopped — not safe recovery; a new boot count is not proof of safety. Mock
+  tests: with/without acknowledgement, failed persistence, same-process refusal.
 - [x] R2-04 caveat: bare `SUCCESS` removed from final user messages
   (`DFRoot: run completed — verify root status yourself` /
   `DFRoot: already attempted/hooked; root status unverified`). Typed codes/types,
@@ -289,6 +292,53 @@ threading, CI, device/ADB, payload, privileged container, or APK assembly.
   section below: final host CTest is 137/137** (post-link fixture added in
   `6012c21`); `git diff --check` clean. No hardware/device/ADB/payload/
   privileged-container/APK-assembly validation is claimed; CI is POST-PUSH.
+
+## Fourth repair round (R4.1–R4.9) — phases, gates and residuals (2026-11-26)
+
+Committed local HEAD `186fc8d` (R4.1–R4.8). R4 closes Re-review 3 findings
+**R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**
+on top of the R3 round recorded below. All phase evidence below is host-only;
+no device/ADB/payload/privileged-container/cold-boot/soft-reboot/APK-assembly
+validation, no full-suite/CI green claim, and no dependency or binary change.
+
+- [x] R4.1 (`6348c71`, R2-13): process-wide failed-commit uncertainty latch;
+  59 focused tests, 0 failures; two reviews APPROVED.
+- [x] R4.2 (`b8526d8`, R2-12): conflicting terminal markers → rc7, origin-aware
+  diagnostics, unverified outcomes keep ownership; 137 host CTest + 114 focused
+  Java tests, 0 failures; two reviews APPROVED.
+- [x] R4.3 (`916a18e`, R2-14 narrowed, not proved safe): matching
+  `dfroot_confirm_` required for definitive non-7; rc7 published before
+  retraction; 140 host CTest, warnings-clean; three reviews APPROVED. Abnormal
+  death window is an OPEN hardware/OS gate.
+- [x] R4.4 (`7e41d27`, R2-16): authoritative unattended gate in `submit()` plus
+  pre-engine recheck, no revocation after engine start; 98 focused tests;
+  two reviews APPROVED. Optional residual: no isolating second-recheck test.
+- [x] R4.5 (`11ae87d`, R2-17): request-correlated ACCEPTED/REJECTED/CANCELLED,
+  no replay of cancelled work; 142 focused tests + 3 repetitions; one Required
+  fix loop RESOLVED. Optional residual: benign duplicate correlated rejection.
+- [x] R4.6 (`15bb5cc`, R2-18): main-thread outcome reports enqueued off the
+  durable lock; 95 focused tests; one Required destruction-guard issue fixed
+  and re-review RESOLVED. Narrow guarantee: a worker may still block on storage.
+- [x] R4.7 (`a51f74e`, R2-20): per-start lifetime + owner token, dead owner
+  denied pre-engine, engine-started work never cancelled; 158 focused tests;
+  two Required interleavings fixed and re-review RESOLVED.
+- [x] R4.8 (`186fc8d`, R2-21): duplicate starts rejected before WakeLock/work;
+  admission worker gets a defined lifetime; 74 focused tests + 3 repetitions;
+  one Required flake fixed and re-review RESOLVED. Optional residuals: idle
+  worker thread and benign correlated duplicates.
+- [x] R4.9 (docs phase, **uncommitted**, left for the main agent; R2-22):
+  honest soft-reboot wording (`SOFT_REBOOT_PENDING` no longer claims "root
+  active"), `RunCoordinator` Javadoc limits for `engineFinished` and app-data
+  reset, pinned message tests (50 focused tests, 0 failures/errors/skips), and
+  consolidated README/CHANGELOG/PORTING/plan/todo. No behavior change, no
+  retry/clear control, no root probe, no kill/signal.
+- [ ] Checkpoint R4: pending main agent — fresh full Java + native suite and CI
+  green after push, then the four final comprehensive reviews below. Open
+  gates: Direct Boot FGS eligibility; real soft-reboot safety; `/dev`
+  marker-root trust; sticky-bit `/data/local/tmp` owner (`shell`); AES key in
+  argv out of scope; no recovery UI (users intentionally locked out — app-data
+  reset only discards the barrier, NOT evidence effects stopped); `BOOT_COUNT`
+  diagnostic only; R4.4/R4.5/R4.8 optional residuals recorded, not accepted.
 
 ## Third repair round (R3) — coverage and release gates (2026-11-25)
 
@@ -347,7 +397,8 @@ Remaining release gates (not satisfied locally, not claimed as done):
   acknowledgement required.
 - [ ] **Out of scope — recovery UI delivery:** no in-app recovery control; an
   ordinary user with an unconfirmed persisted attempt stays locked out until a
-  trusted caller clears the barrier or app data is reset.
+  trusted caller clears the barrier. App-data reset only discards the barrier
+  and is NOT evidence that privileged effects stopped — not safe recovery.
 - [ ] **Owner acknowledgement — `BOOT_COUNT`:** diagnostic only, not proof that
   prior privileged effects stopped or that a retry is safe.
 - [ ] APK assembly remains blocked by the gitignored, absent `ko/*.ko` and would
@@ -355,11 +406,18 @@ Remaining release gates (not satisfied locally, not claimed as done):
 
 ## Final Gate
 
-After Phase 6:
+After Phase 6 (R4 final state — all four reviews are for the main agent, after
+this docs phase; they are deliberately unchecked):
 
+- [ ] Final 6.1: correctness/lifecycle independent review — pending.
+- [ ] Final 6.2: security/staging/environment independent review — pending.
+- [ ] Final 6.3: test/build/CI independent review — pending.
+- [ ] Final 6.4: architecture/native integration independent review — pending.
 - Run four independent final reviewers across correctness/lifecycle, security, test/build, and architecture/native integration.
 - Any finding enters fix → review loop.
-- When all reviewers approve, run final verification and push the approved commit series.
+- When all reviewers approve, run fresh full verification (Java + native + CI)
+  and push the approved commit series. Focused test runs in R4 are not a
+  full-suite result.
 - Keep the PR draft unless the user explicitly asks to mark it ready; pushing does not imply hardware validation or merge approval.
 
 ## Risks and Mitigations

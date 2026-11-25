@@ -13,6 +13,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): gate unattended admission immediately before the durable publish and re-check authorization before engine start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): publish request-correlated acceptance, rejection and cancellation without changing operation ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): gate admission and pre-engine start on the foreground service owner token; never cancel work after the engine started. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R4.9): Javadoc only — state the limits of engineFinished and remove the app-data-reset recovery claim. No behavior change. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -945,18 +946,25 @@ public final class RunCoordinator {
      *
      * <p>INDETERMINATE alone is not evidence that supervised work stopped: a
      * supervisor timeout or interruption can publish it while engine.run() is
-     * still blocked. Recovery therefore also requires proof that the engine
-     * call has finished (or that it was never started, i.e. a proven
-     * pre-effect rejection). A still-running engine is refused until it
-     * returns, so cleanup cannot race a worker that may still be acting.</p>
+     * still blocked. Recovery therefore also requires the engine call to have
+     * finished (or to have never started, i.e. a proven pre-effect rejection),
+     * so cleanup cannot race a Java worker that may still be acting. The
+     * {@code engineFinished} flag proves only that the Java {@code engine.run()}
+     * call returned or threw; it is NOT evidence that separately owned
+     * privileged effects ceased. This flag is a precondition of this narrow
+     * trusted-caller clear only — it is not a retry trigger, not a general
+     * clear control, and no UI, timer or lifecycle callback is wired to it.</p>
      *
      * <p>Trusted-caller boundary: this method has no exported component, intent
      * action, broadcast, or binder path, and there is NO in-app recovery UI.
      * It is a direct in-process API for a trusted caller (tests exercise it
-     * here); the service/UI never wire it.</p>
+     * here); the service/UI never wire it. Only a trusted caller can decide,
+     * with evidence beyond this flag, whether externally owned effects have
+     * actually stopped.</p>
      *
      * @return {@code true} only for the caller that actually claims this
-     *         recovery, has proof no supervised work is still executing, and
+     *         recovery, satisfies the narrow engine-completion evidence
+     *         requirement above (not proof that external effects ceased), and
      *         durably cleared the attempt; {@code false} otherwise.
      */
     public boolean recoverIndeterminate(String operationId) {
@@ -1025,15 +1033,20 @@ public final class RunCoordinator {
      * trusted-caller escape hatch, NOT an owner feature.</p>
      *
      * <p>There is NO in-app recovery UI. An ordinary user whose attempt is
-     * unconfirmed is intentionally locked out — every manual and boot admission
-     * is rejected — until a trusted caller clears the barrier here or the user
-     * resets the app data. A new {@code BOOT_COUNT} is diagnostic only; it is
-     * NOT proof of safety and never authorizes clearing on its own.</p>
+     * unconfirmed is intentionally locked out: every manual and boot admission
+     * is rejected until a trusted caller clears the barrier here. Resetting app
+     * data is NOT a validated recovery route: it only discards the durable
+     * barrier and is NOT evidence that privileged effects from the prior
+     * process stopped — it must not be presented as a safe way out of the
+     * lockout. A new {@code BOOT_COUNT} is diagnostic only; it is NOT proof of
+     * safety and never authorizes clearing on its own.</p>
      *
      * <p>Trusted-caller boundary: there is no exported component, intent action,
      * broadcast, or binder path in this phase. This is a direct in-process API
-     * for a trusted caller; no UI or recovery intent is wired to it. The barrier
-     * must be one loaded at initialization, not one published by this process.</p>
+     * for a trusted caller; no UI or retry/clear control is wired to it. The
+     * barrier must be one loaded at initialization, not one published by this
+     * process, and clearing takes the exact ID, the single claim and the
+     * checked clear.</p>
      *
      * @return {@code true} only when the acknowledged, matching, unconfirmed
      *         attempt loaded after process death was durably cleared.
@@ -1444,7 +1457,7 @@ public final class RunCoordinator {
         boolean attemptCleared;
         /** Set immediately before engine.run(); never by timeout/interruption callbacks. */
         boolean engineStarted;
-        /** Set only when engine.run() has actually returned (or escaped by throwing). */
+        /** Set only when engine.run() has actually returned (or escaped by throwing): proves the Java call ended, not that externally owned effects stopped. */
         boolean engineFinished;
 
         Operation(String id, RunConfig.ExecutionMode mode, ResourceLease lease, Context context,
