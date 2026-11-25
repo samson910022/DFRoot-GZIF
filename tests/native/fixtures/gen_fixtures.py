@@ -38,6 +38,7 @@ HOOK_VADDR = 0x100320
 
 PT_LOAD, PF_X, PF_W, PF_R = 1, 1, 2, 4
 SHT_PROGBITS, SHT_STRTAB, SHT_RELA, SHT_DYNAMIC, SHT_DYNSYM = 1, 3, 4, 6, 11
+SHT_ARM_EXIDX, SHT_ARM_ATTRIBUTES = 0x70000001, 0x70000003
 SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR = 2, 1, 4
 STB_GLOBAL, STT_FUNC = 1, 2
 
@@ -245,6 +246,31 @@ def mutate(base, kind):
     return bytes(img)
 
 
+def with_arm_section_types(base):
+    """Add legitimate AArch64 OS-specific section types to the valid base.
+
+    Device evidence: libc++.so on a clean S23 has SHT_ARM_EXIDX sections,
+    which the strict allowlist used to reject. Only sh_type (and the
+    RELA-specific link/info/entsize fields that no longer apply) change;
+    every offset, size, address, flag and section name stays byte-identical
+    to valid-basic, so the expected layout is unchanged.
+    """
+    img = bytearray(base)
+    shoff = struct.unpack_from("<Q", img, 40)[0]
+
+    def shdr_at(i):
+        return shoff + i * SHDR_SIZE
+
+    # shdr[5] was .rela.dyn: turn it into an ARM attributes section.
+    struct.pack_into("<I", img, shdr_at(5) + 4, SHT_ARM_ATTRIBUTES)
+    struct.pack_into("<II", img, shdr_at(5) + 40, 0, 0)      # sh_link, sh_info
+    struct.pack_into("<Q", img, shdr_at(5) + 56, 0)          # sh_entsize
+
+    # shdr[6] was .data: turn it into an ARM unwind-index section.
+    struct.pack_into("<I", img, shdr_at(6) + 4, SHT_ARM_EXIDX)
+    return bytes(img)
+
+
 def main():
     os.makedirs(HERE, exist_ok=True)
     base, _shnum, _shstrndx, _shoff, _size = build_base()
@@ -252,6 +278,9 @@ def main():
         # Base layout: the exec segment end is claimed by .dynamic, so a cave
         # in the executable PT_LOAD is selected.
         "valid-basic.elf": bytes(base),
+        # Same layout as valid-basic, but with SHT_ARM_EXIDX and
+        # SHT_ARM_ATTRIBUTES sections like the target device's libc++.so.
+        "valid-arm-exidx.elf": with_arm_section_types(base),
         # The exec segment end is unclaimed and on the exec page: exercises
         # the exec-segment-derived tail branch.
         "valid-exec-tail.elf": bytes(build_base(tail_free=True)[0]),
