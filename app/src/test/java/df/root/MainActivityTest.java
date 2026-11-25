@@ -373,6 +373,100 @@ public class MainActivityTest {
     }
 
     @Test
+    public void persistedUnconfirmedAttemptRejectionClearsPendingAndShowsReasonAtServiceBoundary()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        OperationAttemptStore attemptStore = OperationAttemptStore.inMemory();
+        assertTrue(attemptStore.publish(new OperationAttempt("prior-op",
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, 44L, true, "prior admission")));
+        installAttemptCoordinator(attemptStore, () -> 44L, Runnable::run);
+        MainActivity activity = launch();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+
+        activity.findViewById(R.id.btnRun).performClick();
+        ServiceController<ExploitService> serviceController = deliverServiceRequest(91);
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.IDLE, rejection.getState());
+        assertTrue(rejection.getRequestFailure().contains("prior-op"));
+        assertTrue(rejection.getRequestFailure().contains("blocks admission"));
+        assertFalse(coordinatorWorker.hasNext());
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("prior-op"));
+        assertTrue(Shadows.shadowOf(serviceController.get()).isStoppedBySelf());
+    }
+
+    @Test
+    public void attemptStorePublishFailureRejectionClearsPendingAndShowsReasonAtServiceBoundary() {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        OperationAttemptStore failingStore = new OperationAttemptStore() {
+            @Override
+            public OperationAttempt load() {
+                return null;
+            }
+
+            @Override
+            public boolean publish(OperationAttempt attempt) throws Failure {
+                throw new Failure("attempt disk full");
+            }
+
+            @Override
+            public boolean clear(String operationId) {
+                return false;
+            }
+        };
+        installAttemptCoordinator(failingStore, () -> 45L, Runnable::run);
+        MainActivity activity = launch();
+
+        activity.findViewById(R.id.btnRun).performClick();
+        ServiceController<ExploitService> serviceController = deliverServiceRequest(92);
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.IDLE, rejection.getState());
+        assertTrue(rejection.getRequestFailure().contains("attempt store publish failed"));
+        assertTrue(rejection.getRequestFailure().contains("attempt disk full"));
+        assertFalse(coordinatorWorker.hasNext());
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("attempt disk full"));
+        assertTrue(Shadows.shadowOf(serviceController.get()).isStoppedBySelf());
+    }
+
+    @Test
+    public void incompleteInitializationRejectionClearsPendingAndShowsReasonAtServiceBoundary() {
+        installConfiguration(RunConfig.defaults()
+                .withManagerPackage(SuManager.NEXT.getPackageName()), true);
+        QueueExecutor initialization = new QueueExecutor();
+        installAttemptCoordinator(OperationAttemptStore.inMemory(), () -> 46L, initialization);
+        MainActivity activity = launch();
+
+        activity.findViewById(R.id.btnRun).performClick();
+        ServiceController<ExploitService> serviceController = deliverServiceRequest(93);
+        assertTrue("init load must still be queued", initialization.hasNext());
+        coordinatorObservers.runAll();
+
+        RunCoordinator.Snapshot rejection = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.IDLE, rejection.getState());
+        assertTrue(rejection.getRequestFailure().contains("attempt store initialization is not complete"));
+        assertFalse(coordinatorWorker.hasNext());
+        assertEquals(0, immediateEngine.calls.get());
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("attempt store initialization is not complete"));
+        assertTrue(Shadows.shadowOf(serviceController.get()).isStoppedBySelf());
+    }
+
+    @Test
     public void startingOperationDisablesRunAndManagerWithoutARequest() {
         installConfiguration(RunConfig.defaults()
                 .withManagerPackage(SuManager.NEXT.getPackageName()), true);
@@ -966,6 +1060,26 @@ public class MainActivityTest {
         coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
                 immediateEngine, 0L);
         RunCoordinator.setInstanceForTesting(coordinator);
+    }
+
+    private void installAttemptCoordinator(OperationAttemptStore attemptStore,
+                                           BootCountReader bootCountReader,
+                                           Executor initializationExecutor) {
+        coordinatorWorker = new QueueExecutor();
+        coordinatorObservers = new QueueExecutor();
+        immediateEngine = new ImmediateEngine();
+        coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
+                immediateEngine, 0L, attemptStore, bootCountReader, initializationExecutor);
+        RunCoordinator.setInstanceForTesting(coordinator);
+    }
+
+    private ServiceController<ExploitService> deliverServiceRequest(int startId) {
+        Intent request = nextServiceRequest();
+        ServiceController<ExploitService> serviceController = Robolectric.buildService(
+                ExploitService.class).create().withIntent(request);
+        serviceControllers.add(serviceController);
+        serviceController.startCommand(0, startId);
+        return serviceController;
     }
 
     private MainActivity launch() {

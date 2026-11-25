@@ -12,6 +12,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
+import android.app.Service;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -23,9 +24,11 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
+import org.robolectric.android.controller.ServiceController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowApplication;
 import org.robolectric.shadows.ShadowLooper;
@@ -346,6 +349,44 @@ public class BootReceiverBoundaryTest {
         assertFalse(context.getSharedPreferences(SharedPreferencesBootClaimStore.PREFS_NAME,
                 Context.MODE_PRIVATE).contains(
                         SharedPreferencesBootClaimStore.KEY_LAST_CLAIMED_BOOT_COUNT));
+    }
+
+    @Test
+    public void componentOffBetweenClaimAndQueuedServiceDeliverySuppressesAdmission() {
+        ConfigurationRepository repository = new ConfigurationRepository(
+                new StaticConfigStore(new RunConfig(SuManager.NEXT.getPackageName(),
+                        false, false, 0, 3)), Runnable::run, Runnable::run);
+        repository.start();
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        ConfigurationRepository.setInstanceForTesting(repository);
+        AtomicInteger workerTasks = new AtomicInteger();
+        RunCoordinator coordinator = new RunCoordinator(repository, command -> workerTasks.incrementAndGet(),
+                Runnable::run, (ctx, admission, mode, id, events, reporter) -> null, 0L);
+        RunCoordinator.setInstanceForTesting(coordinator);
+
+        BootClaimCoordinator claims = inlineClaims(BOOT_COUNT, new BootClaimFakes.MemoryStore());
+        BootReceiver.dispatch(context, new Intent(Intent.ACTION_BOOT_COMPLETED),
+                claims, new BootClaimFakes.Finisher(), BootReceiver::startUnattendedService);
+        Intent request = shadowApplication.getNextStartedService();
+        assertNotNull(request);
+        assertEquals(ExploitService.ACTION_UNATTENDED_BOOT, request.getAction());
+
+        // The owner turns Start at Boot OFF while the already-claimed FGS start
+        // is still queued for delivery to the service.
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+
+        ServiceController<ExploitService> controller = Robolectric.buildService(ExploitService.class)
+                .create().withIntent(request);
+        try {
+            assertEquals(Service.START_NOT_STICKY,
+                    controller.get().onStartCommand(request, 0, 91));
+            assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+            assertEquals(0, workerTasks.get());
+            assertNull(coordinator.getSnapshot().getRequestFailure());
+            assertNull(shadowApplication.getNextStartedService());
+        } finally {
+            controller.destroy();
+        }
     }
 
     @Test

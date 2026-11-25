@@ -115,6 +115,24 @@ public class RunCoordinatorTest {
     }
 
     @Test
+    public void emptyRejectionReasonsStillPublishFreshObservableSnapshots() {
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(verifiedRepository(), new QueueExecutor(), main);
+        RunCoordinator.Snapshot idle = coordinator.getSnapshot();
+
+        coordinator.noteRequestRejected(null);
+        RunCoordinator.Snapshot nullReason = coordinator.getSnapshot();
+        coordinator.noteRequestRejected("");
+        RunCoordinator.Snapshot emptyReason = coordinator.getSnapshot();
+
+        assertNotSame(idle, nullReason);
+        assertNotSame(nullReason, emptyReason);
+        assertNotNull(nullReason.getRequestFailure());
+        assertNotNull(emptyReason.getRequestFailure());
+        assertEquals(2, main.size());
+    }
+
+    @Test
     public void requestFailureIsIgnoredWhileOperationCleanupIsPending() throws Exception {
         ConfigurationRepository repository = verifiedRepository();
         RunCoordinator coordinator = coordinator(repository, worker, Runnable::run);

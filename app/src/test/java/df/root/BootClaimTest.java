@@ -4,6 +4,7 @@
 package df.root;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import android.content.Context;
 import android.content.Intent;
@@ -14,6 +15,10 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /** Pure JVM contract tests for the durable boot-claim protocol. */
 public class BootClaimTest {
@@ -459,6 +464,38 @@ public class BootClaimTest {
     }
 
     @Test
+    public void componentTurnedOffWhileClaimGateReadIsBlockedDoesNotClaimOrStart() throws Exception {
+        MutableGate gate = new MutableGate(BootClaimCoordinator.BootComponentGate.State.ENABLED);
+        gate.entered = new CountDownLatch(1);
+        gate.release = new CountDownLatch(1);
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        LatchingFinisher finisher = new LatchingFinisher();
+        ExecutorService claimThread = Executors.newSingleThreadExecutor();
+        try {
+            new BootClaimCoordinator(new BootClaimFakes.MutableReader(36L), store, gate,
+                    claimThread, BootClaimCoordinator.Logger.NO_OP, false)
+                    .submit(null, finisher, starter);
+
+            // The owner turns Start at Boot OFF while the claim worker is
+            // blocked inside its claim-time gate read. No sleep is involved.
+            assertTrue("gate read did not start", gate.entered.await(5L, TimeUnit.SECONDS));
+            gate.state = BootClaimCoordinator.BootComponentGate.State.DISABLED;
+            gate.release.countDown();
+            assertTrue("claim worker did not finish",
+                    finisher.finished.await(5L, TimeUnit.SECONDS));
+        } finally {
+            gate.release.countDown();
+            claimThread.shutdownNow();
+        }
+
+        assertEquals(1, gate.readCalls);
+        assertEquals(0, store.attempts.size());
+        assertEquals(0, starter.calls);
+        assertEquals(1, finisher.calls);
+    }
+
+    @Test
     public void rejectedActionsNeverReachTheClaim() {
         BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
         BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
@@ -479,6 +516,8 @@ public class BootClaimTest {
         State state;
         boolean throwsOnRead;
         int readCalls;
+        CountDownLatch entered;
+        CountDownLatch release;
 
         MutableGate(State state) {
             this.state = state;
@@ -490,7 +529,28 @@ public class BootClaimTest {
             if (throwsOnRead) {
                 throw new IllegalStateException("component setting unreadable");
             }
+            if (entered != null) {
+                entered.countDown();
+                try {
+                    release.await(5L, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("interrupted in gate read", e);
+                }
+            }
             return state;
+        }
+    }
+
+    /** Finisher that makes a worker's completion observable without sleeping. */
+    private static final class LatchingFinisher implements BootClaimCoordinator.Finisher {
+        final CountDownLatch finished = new CountDownLatch(1);
+        int calls;
+
+        @Override
+        public void finish() {
+            calls++;
+            finished.countDown();
         }
     }
 

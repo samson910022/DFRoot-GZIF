@@ -420,15 +420,16 @@ public final class RunCoordinator {
      * semantics. Active work and cleanup always take precedence over this signal.
      */
     void noteRequestRejected(String requestFailure) {
-        if (requestFailure == null || requestFailure.isEmpty()) {
-            return;
-        }
         Snapshot rejected;
         synchronized (lock) {
             if (cleanupPending || activeOperation != null || isActiveStateLocked()) {
                 return;
             }
-            this.requestFailure = requestFailure;
+            // Even a reason-less rejection is an observable outcome: a FRESH
+            // snapshot is required so identity-based UI pending state clears.
+            String detail = requestFailure == null || requestFailure.isEmpty()
+                    ? "request rejected" : requestFailure;
+            this.requestFailure = detail;
             rejected = buildSnapshotLocked();
             snapshot = rejected;
         }
