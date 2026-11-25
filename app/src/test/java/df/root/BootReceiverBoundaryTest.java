@@ -4,6 +4,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): model the Start at Boot component state in production-path tests. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): drive OFF-at-admission work on a controllable executor and assert the correlated REJECTED outcome. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): confirm the main-thread boundary still queues exactly one admission task before driving it. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF): confirm a duplicate boot start is rejected before a second WakeLock while its request is queued. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -42,7 +43,9 @@ import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -407,6 +410,52 @@ public class BootReceiverBoundaryTest {
             assertTrue(rejection.getRequestFailure().contains("DISABLED"));
             assertEquals(0, workerTasks.get());
             assertNull(shadowApplication.getNextStartedService());
+        } finally {
+            controller.destroy();
+        }
+    }
+
+    @Test
+    public void duplicateBootStartWhileAdmissionIsQueuedDoesNotAcquireAnotherLease() {
+        ConfigurationRepository repository = new ConfigurationRepository(
+                new StaticConfigStore(new RunConfig(SuManager.NEXT.getPackageName(),
+                        false, false, 0, 3)), Runnable::run, Runnable::run);
+        repository.start();
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        RunCoordinator coordinator = new RunCoordinator(repository, new QueueExecutor(),
+                Runnable::run, (ctx, admission, mode, id, events, reporter) -> null, 0L);
+        RunCoordinator.setInstanceForTesting(coordinator);
+
+        BootClaimCoordinator claims = inlineClaims(BOOT_COUNT, new BootClaimFakes.MemoryStore());
+        BootReceiver.dispatch(context, new Intent(Intent.ACTION_BOOT_COMPLETED),
+                claims, new BootClaimFakes.Finisher(), BootReceiver::startUnattendedService);
+        Intent request = shadowApplication.getNextStartedService();
+        assertNotNull(request);
+
+        ServiceController<ExploitService> controller = Robolectric.buildService(ExploitService.class)
+                .create();
+        CapturingExecutor admission = new CapturingExecutor();
+        controller.get().setAdmissionExecutorForTesting(admission);
+        List<FakeLease> leases = new ArrayList<>();
+        controller.get().setWakeLockSourceForTesting(ignored -> {
+            FakeLease lease = new FakeLease();
+            leases.add(lease);
+            return lease;
+        });
+        try {
+            assertEquals(Service.START_NOT_STICKY,
+                    controller.get().onStartCommand(request, 0, 93));
+            assertEquals(Service.START_NOT_STICKY,
+                    controller.get().onStartCommand(request, 0, 94));
+
+            // The boot request is queued, not admitted yet. Its duplicate is
+            // rejected on the caller: no second WakeLock, no second work item.
+            assertEquals(1, leases.size());
+            assertEquals(1, controller.get().pendingAdmissionCountForTesting());
+            assertEquals(2, admission.tasks.size()); // one work + one report
+            assertEquals(ExploitService.AdmissionState.PENDING,
+                    controller.get().getAdmissionStateForTesting());
+            assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
         } finally {
             controller.destroy();
         }

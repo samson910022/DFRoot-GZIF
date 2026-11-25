@@ -1,5 +1,19 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R4.8: bounded service-local admission lifetime (R2-21)
+
+Short note (R4.9 consolidates docs): `ExploitService` now admits at most one
+undecided service-local request. Any further start while an owned request is
+`PENDING`/`CLAIMED` is correlated-`REJECTED` on the caller with
+"another operation request is pending; duplicate rejected" **before** a timed
+WakeLock is acquired or work is enqueued; early null-intent and foreground-start
+failures use that same rejection while a request is pending. The lazily created
+single-thread admission worker is shut down gracefully in `onDestroy()` only
+after cancellation/outcome reports have been enqueued, and a fresh worker (and
+owner token) is used on the next `onCreate()`. Already-queued reports still run;
+no safety check, lease transfer, success/progress semantic, root probe,
+kill/signal or replay contract changes.
+
 ## 2026-11-25 — R4.7: per-start foreground lifetime and owner-token gate (R2-20)
 
 Short note (R4.9 consolidates docs): `ExploitService` now tracks every start as
