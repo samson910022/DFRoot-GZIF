@@ -400,7 +400,7 @@ jobs:
           {
             echo "## CI evidence artifact scope"
             echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
-            echo "Host suites (61 status, 23/25/3/3/6/5 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
+            echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload DFRoot-CI evidence
@@ -626,6 +626,138 @@ jobs:
           fi
           echo "apk-gate-ok" > "$RUNNER_TEMP/marker-apk-gate"
 
+      # Real (not fixture) loader-byte gate over the COMPLETE upload set. The
+      # pins are read from the single source of truth used by the build, then
+      # the REAL build-time verifier is run on entries extracted from each APK
+      # that will be uploaded. No new pin, no new marker: the index below is
+      # the evidence consumed by the release-evidence step and upload choke.
+      - name: Verify bundled loader bytes in every distributable APK
+        run: |
+          set -euo pipefail
+          # Each pin must occur exactly once and be well formed in CMakeLists.txt.
+          PINS="$RUNNER_TEMP/loader-pins.tsv"
+          CMAKE_LIST=app/src/main/jni/CMakeLists.txt
+          : > "$PINS"
+          for spec in \
+              'ksud_sha256|LOADER_KSUD_SHA256|^[0-9a-f]{64}$' \
+              'ksud_size|LOADER_KSUD_SIZE|^[0-9]+$' \
+              'ksudnext_sha256|LOADER_KSUDNEXT_SHA256|^[0-9a-f]{64}$' \
+              'ksudnext_size|LOADER_KSUDNEXT_SIZE|^[0-9]+$'; do
+            field=${spec%%|*}
+            rest=${spec#*|}
+            key=${rest%%|*}
+            regex=${rest#*|}
+            value=$(sed -n "s/^set(${key}[[:space:]]\{1,\}\"\{0,1\}\([^\")]*\)\"\{0,1\})[[:space:]]*\$/\1/p" "$CMAKE_LIST")
+            count=$(printf '%s\n' "$value" | grep -c . || true)
+            if [ "$count" -ne 1 ] || [ -z "$value" ]; then
+              echo "::error::Expected exactly one well-formed $key pin in $CMAKE_LIST (found $count)"
+              exit 1
+            fi
+            if ! printf '%s\n' "$value" | grep -Eq "$regex"; then
+              echo "::error::Malformed $key pin '$value' in $CMAKE_LIST"
+              exit 1
+            fi
+            printf '%s\t%s\n' "$field" "$value" >> "$PINS"
+          done
+          test -s "$PINS"
+
+          STAGE="$RUNNER_TEMP/dfroot-release-apks"
+          INDEX="$RUNNER_TEMP/apk-loader-index.tsv"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          : > "$INDEX"
+          shopt -s nullglob
+          APK_SOURCE=(release/DFRoot_*.apk)
+          if [ "${#APK_SOURCE[@]}" -eq 0 ]; then
+            echo "::error::No packaged release APK found; refusing to publish unverified artifacts"
+            exit 1
+          fi
+          cp -- "${APK_SOURCE[@]}" "$STAGE/"
+          STAGED=("$STAGE"/DFRoot_*.apk)
+          if [ "${#STAGED[@]}" -ne "${#APK_SOURCE[@]}" ]; then
+            echo "::error::Staged APK count does not match the packaged release APK set"
+            exit 1
+          fi
+
+          KSUD_SHA=$(awk -F '\t' '$1 == "ksud_sha256" { print $2; exit }' "$PINS")
+          KSUD_SIZE=$(awk -F '\t' '$1 == "ksud_size" { print $2; exit }' "$PINS")
+          NEXT_SHA=$(awk -F '\t' '$1 == "ksudnext_sha256" { print $2; exit }' "$PINS")
+          NEXT_SIZE=$(awk -F '\t' '$1 == "ksudnext_size" { print $2; exit }' "$PINS")
+          if [ -z "$KSUD_SHA" ] || [ -z "$KSUD_SIZE" ] || [ -z "$NEXT_SHA" ] || [ -z "$NEXT_SIZE" ]; then
+            echo "::error::Loader pins are incomplete"
+            exit 1
+          fi
+
+          field() {
+            awk -v key="$1" 'index($0, key ": ") == 1 {
+              print substr($0, length(key) + 3); exit }' "$2"
+          }
+
+          i=0
+          for apk in "${STAGED[@]}"; do
+            i=$((i + 1))
+            name=$(basename "$apk")
+            apk_sha=$(sha256sum "$apk" | awk '{print $1}')
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK $name differs from the packaged release APK"
+              exit 1
+            fi
+            # Each loader must occur exactly once at its exact ABI path: a
+            # duplicate or alias would make the checked bytes ambiguous.
+            for entry in lib/arm64-v8a/libksud.so lib/arm64-v8a/libksudnext.so; do
+              count=$(unzip -Z1 "$apk" | grep -Fxc "$entry" || true)
+              count=${count:-0}
+              if [ "$count" -ne 1 ]; then
+                echo "::error::APK $name must contain exactly one '$entry' entry (found $count)"
+                exit 1
+              fi
+            done
+            EXTRACT="$RUNNER_TEMP/apk-loader-extract-$i"
+            rm -rf "$EXTRACT"
+            mkdir -p "$EXTRACT"
+            unzip -q "$apk" 'lib/arm64-v8a/libksud.so' 'lib/arm64-v8a/libksudnext.so' -d "$EXTRACT"
+            KSUD="$EXTRACT/lib/arm64-v8a/libksud.so"
+            NEXT="$EXTRACT/lib/arm64-v8a/libksudnext.so"
+            test -f "$KSUD"
+            test -f "$NEXT"
+            ksud_sha=$(sha256sum "$KSUD" | awk '{print $1}')
+            next_sha=$(sha256sum "$NEXT" | awk '{print $1}')
+
+            LMAN="$RUNNER_TEMP/dfroot-loader-$i.manifest"
+            LSTAMP="$RUNNER_TEMP/dfroot-loader-$i.verified"
+            # The verifier invalidates its outputs at entry; repeat here so a
+            # reused runner-temp path can never carry stale verified evidence.
+            rm -f "$LMAN" "$LSTAMP"
+            cmake \
+                -DLOADER_KSUD_FILE="$KSUD" \
+                -DLOADER_KSUDNEXT_FILE="$NEXT" \
+                "-DLOADER_KSUD_SHA256=$KSUD_SHA" "-DLOADER_KSUD_SIZE=$KSUD_SIZE" \
+                "-DLOADER_KSUDNEXT_SHA256=$NEXT_SHA" "-DLOADER_KSUDNEXT_SIZE=$NEXT_SIZE" \
+                -DLOADER_VERIFY_STAMP="$LSTAMP" \
+                -DLOADER_VERIFY_MANIFEST="$LMAN" \
+                -P app/src/main/jni/verify_loader_hashes.cmake
+            grep -q '^status: verified$' "$LMAN"
+            if [ "$(field ksud_sha256 "$LMAN")" != "$KSUD_SHA" ] ||
+               [ "$(field ksud_size "$LMAN")" != "$KSUD_SIZE" ] ||
+               [ "$(field ksudnext_sha256 "$LMAN")" != "$NEXT_SHA" ] ||
+               [ "$(field ksudnext_size "$LMAN")" != "$NEXT_SIZE" ]; then
+              echo "::error::Loader manifest fields for $name do not match the reviewed pins"
+              exit 1
+            fi
+            if [ "$(field ksud_sha256 "$LMAN")" != "$ksud_sha" ] ||
+               [ "$(field ksudnext_sha256 "$LMAN")" != "$next_sha" ]; then
+              echo "::error::Loader manifest hashes for $name do not match the extracted entries"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$apk_sha" "$ksud_sha" "$next_sha" "$LMAN" >> "$INDEX"
+            echo "verified loader bytes: $name ($apk_sha)"
+          done
+          if [ ! -s "$INDEX" ]; then
+            echo "::error::APK loader index is empty; refusing to publish"
+            exit 1
+          fi
+
       # Required identity check on the generated build-provenance records.
       # This ties source/toolchain/helper identity to the checked-out commit and
       # to the hashes recorded in each audit record. It is not a claim that a
@@ -737,7 +869,9 @@ jobs:
           bad=0
           EVIDENCE="$RUNNER_TEMP/release-evidence.tsv"
           INDEX="$RUNNER_TEMP/apk-gate-index.tsv"
+          LINDEX="$RUNNER_TEMP/apk-loader-index.tsv"
           STAGE="$RUNNER_TEMP/dfroot-release-apks"
+          LOADER_PINS="$RUNNER_TEMP/loader-pins.tsv"
           : > "$EVIDENCE"
           field() {
             awk -v key="$1" 'index($0, key ": ") == 1 {
@@ -746,6 +880,19 @@ jobs:
           in_pins() {
             tr ';' '\n' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$1"
           }
+          loader_pin() {
+            awk -F '\t' -v key="$1" '$1 == key { print $2; exit }' "$LOADER_PINS"
+          }
+          PIN_KSUD_SHA=$(loader_pin ksud_sha256)
+          PIN_KSUD_SIZE=$(loader_pin ksud_size)
+          PIN_NEXT_SHA=$(loader_pin ksudnext_sha256)
+          PIN_NEXT_SIZE=$(loader_pin ksudnext_size)
+          for pin_value in "$PIN_KSUD_SHA" "$PIN_KSUD_SIZE" "$PIN_NEXT_SHA" "$PIN_NEXT_SIZE"; do
+            if [ -z "$pin_value" ]; then
+              echo "::error::Loader pin is missing from $LOADER_PINS"
+              bad=1
+            fi
+          done
 
           # 1. checked-out source is exactly the publishing commit.
           HEAD_SHA=$(git rev-parse HEAD)
@@ -903,6 +1050,111 @@ jobs:
             echo "::error::Evidence rows ($rows) != staged APK count ($staged_count)"
             bad=1
           fi
+
+          # 7. Bundled loader bytes: every build-time loader manifest must be
+          # verified and pinned (three-way binding with the reviewed pins), and
+          # every APK in the loader gate index must re-hash to the staged and
+          # packaged APK, match the KO gate index, and carry pinned hashes that
+          # agree with its own manifest and with a verified build-time manifest.
+          loader_manifests=0
+          build_loader_hashes=""
+          while IFS= read -r -d '' lman; do
+            loader_manifests=$((loader_manifests + 1))
+            if ! grep -q '^status: verified$' "$lman"; then
+              echo "::error::Loader gate manifest is not verified: $lman"
+              bad=1
+            fi
+            for pair in \
+                "ksud_sha256|$PIN_KSUD_SHA" \
+                "ksud_size|$PIN_KSUD_SIZE" \
+                "ksudnext_sha256|$PIN_NEXT_SHA" \
+                "ksudnext_size|$PIN_NEXT_SIZE"; do
+              key=${pair%%|*}
+              want=${pair#*|}
+              got=$(field "$key" "$lman")
+              if [ "$got" != "$want" ]; then
+                echo "::error::Loader manifest $key '$got' is not the reviewed pin '$want' ($lman)"
+                bad=1
+              fi
+            done
+            build_loader_hashes="$build_loader_hashes $(field ksud_sha256 "$lman")/$(field ksudnext_sha256 "$lman")"
+          done < <(find app/.cxx -type f -name 'loader-hashes.manifest' -print0 2>/dev/null)
+          if [ "$loader_manifests" -eq 0 ]; then
+            echo "::error::No loader-hashes.manifest found under app/.cxx"
+            bad=1
+          fi
+
+          if [ ! -s "$LINDEX" ]; then
+            echo "::error::APK loader index is empty; no verified loader artifact to document"
+            bad=1
+          fi
+          loader_rows=0
+          while IFS=$'\t' read -r name apk_sha ksud_sha next_sha lman; do
+            loader_rows=$((loader_rows + 1))
+            staged="$STAGE/$name"
+            if [ ! -f "$staged" ]; then
+              echo "::error::Staged APK missing for loader evidence: $staged"
+              bad=1
+              continue
+            fi
+            if [ "$(sha256sum "$staged" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK hash changed after the loader gate: $name"
+              bad=1
+            fi
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Packaged release APK hash changed after the loader gate: $name"
+              bad=1
+            fi
+            if ! awk -F '\t' -v n="$name" -v s="$apk_sha" \
+                   '$1 == n && $2 == s { found = 1 } END { exit(found ? 0 : 1) }' "$INDEX"; then
+              echo "::error::APK $name loader evidence does not match the KO gate index"
+              bad=1
+            fi
+            if [ ! -f "$lman" ] || ! grep -q '^status: verified$' "$lman"; then
+              echo "::error::Loader manifest for $name is missing or not verified"
+              bad=1
+              continue
+            fi
+            for pair in \
+                "ksud_sha256|$PIN_KSUD_SHA" \
+                "ksud_size|$PIN_KSUD_SIZE" \
+                "ksudnext_sha256|$PIN_NEXT_SHA" \
+                "ksudnext_size|$PIN_NEXT_SIZE"; do
+              key=${pair%%|*}
+              want=${pair#*|}
+              got=$(field "$key" "$lman")
+              if [ "$got" != "$want" ]; then
+                echo "::error::Loader manifest $key '$got' for $name is not the reviewed pin '$want'"
+                bad=1
+              fi
+            done
+            if [ "$ksud_sha" != "$PIN_KSUD_SHA" ] || [ "$next_sha" != "$PIN_NEXT_SHA" ]; then
+              echo "::error::Loader hashes for $name are not the reviewed pins"
+              bad=1
+            fi
+            if [ "$(field ksud_sha256 "$lman")" != "$ksud_sha" ] ||
+               [ "$(field ksudnext_sha256 "$lman")" != "$next_sha" ]; then
+              echo "::error::Loader manifest for $name does not match the indexed APK hashes"
+              bad=1
+            fi
+            case " $build_loader_hashes " in
+              *" $ksud_sha/$next_sha "*) ;;
+              *)
+                echo "::error::Loader hashes for $name match no verified build-time manifest"
+                bad=1
+                ;;
+            esac
+            printf 'apk: %s\tloader_ksud_sha256: %s\tloader_ksudnext_sha256: %s\tloader_manifest: %s\n' \
+                "$name" "$ksud_sha" "$next_sha" "$lman" >> "$EVIDENCE"
+          done < "$LINDEX"
+          if [ "$loader_rows" -eq 0 ]; then
+            echo "::error::No APK loader evidence rows produced"
+            bad=1
+          fi
+          if [ "$loader_rows" -ne "$staged_count" ]; then
+            echo "::error::Loader evidence rows ($loader_rows) != staged APK count ($staged_count)"
+            bad=1
+          fi
           cat "$EVIDENCE"
 
           if [ "$bad" -ne 0 ]; then
@@ -928,9 +1180,13 @@ jobs:
             echo "::error::APK gate index is empty or missing"
             missing=1
           fi
+          if [ ! -s "$RUNNER_TEMP/apk-loader-index.tsv" ]; then
+            echo "::error::APK loader index is empty or missing"
+            missing=1
+          fi
           if [ "$missing" -ne 0 ]; then exit 1; fi
           echo "distributable-evidence-ok" > "$RUNNER_TEMP/marker-distributable-evidence"
-          echo "All distributable evidence gates reached (3/3 markers + nonempty index)"
+          echo "All distributable evidence gates reached (3/3 markers + nonempty KO/loader indexes)"
 
       # Upload ONLY the gated release APKs plus the exact checksum/licence set.
       # This step is unreachable when any required gate above failed.

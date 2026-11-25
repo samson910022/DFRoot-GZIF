@@ -89,6 +89,7 @@ CI_CACHE_ASSERT_STEP = "Assert KO hash check enabled in every CMakeCache"
 CI_SCOPE_STEP = "Report CI evidence-only artifact scope"
 CI_UPLOAD_STEP = "Upload DFRoot-CI evidence"
 PACKAGED_KO_GATE_STEP = "Verify packaged KO bytes in every distributable APK"
+APK_LOADER_GATE_STEP = "Verify bundled loader bytes in every distributable APK"
 PROVENANCE_IDENTITY_STEP = "Verify build-provenance identity for every record"
 RELEASE_EVIDENCE_STEP = "Verify release evidence for every uploaded APK"
 UPLOAD_CHOKE_STEP = "Assert distributable evidence before upload"
@@ -114,6 +115,8 @@ RELEASE_GATE_MARKERS = (
     "marker-release-evidence",
 )
 RELEASE_GATE_INDEX = "apk-gate-index.tsv"
+APK_LOADER_GATE_INDEX = "apk-loader-index.tsv"
+LOADER_PINS_FILE = "loader-pins.tsv"
 CI_EVIDENCE_ARTIFACT_NAME = "DFRoot-CI-evidence"
 RELEASE_ARTIFACT_NAME = "DFRoot-release"
 PROVENANCE_ARTIFACT_NAME = "DFRoot-provenance"
@@ -386,6 +389,132 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         'fi\n'
         'echo "apk-gate-ok" > "$RUNNER_TEMP/marker-apk-gate"'
     ),
+    'Verify bundled loader bytes in every distributable APK': (
+        'set -euo pipefail\n'
+        '# Each pin must occur exactly once and be well formed in CMakeLists.txt.\n'
+        'PINS="$RUNNER_TEMP/loader-pins.tsv"\n'
+        'CMAKE_LIST=app/src/main/jni/CMakeLists.txt\n'
+        ': > "$PINS"\n'
+        'for spec in \\\n'
+        "    'ksud_sha256|LOADER_KSUD_SHA256|^[0-9a-f]{64}$' \\\n"
+        "    'ksud_size|LOADER_KSUD_SIZE|^[0-9]+$' \\\n"
+        "    'ksudnext_sha256|LOADER_KSUDNEXT_SHA256|^[0-9a-f]{64}$' \\\n"
+        "    'ksudnext_size|LOADER_KSUDNEXT_SIZE|^[0-9]+$'; do\n"
+        '  field=${spec%%|*}\n'
+        '  rest=${spec#*|}\n'
+        '  key=${rest%%|*}\n'
+        '  regex=${rest#*|}\n'
+        '  value=$(sed -n "s/^set(${key}[[:space:]]\\{1,\\}\\"\\{0,1\\}\\([^\\")]*\\)\\"\\{0,1\\})[[:space:]]*\\$/\\1/p" "$CMAKE_LIST")\n'
+        '  count=$(printf \'%s\\n\' "$value" | grep -c . || true)\n'
+        '  if [ "$count" -ne 1 ] || [ -z "$value" ]; then\n'
+        '    echo "::error::Expected exactly one well-formed $key pin in $CMAKE_LIST (found $count)"\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  if ! printf \'%s\\n\' "$value" | grep -Eq "$regex"; then\n'
+        '    echo "::error::Malformed $key pin \'$value\' in $CMAKE_LIST"\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  printf \'%s\\t%s\\n\' "$field" "$value" >> "$PINS"\n'
+        'done\n'
+        'test -s "$PINS"\n'
+        '\n'
+        'STAGE="$RUNNER_TEMP/dfroot-release-apks"\n'
+        'INDEX="$RUNNER_TEMP/apk-loader-index.tsv"\n'
+        'rm -rf "$STAGE"\n'
+        'mkdir -p "$STAGE"\n'
+        ': > "$INDEX"\n'
+        'shopt -s nullglob\n'
+        'APK_SOURCE=(release/DFRoot_*.apk)\n'
+        'if [ "${#APK_SOURCE[@]}" -eq 0 ]; then\n'
+        '  echo "::error::No packaged release APK found; refusing to publish unverified artifacts"\n'
+        '  exit 1\n'
+        'fi\n'
+        'cp -- "${APK_SOURCE[@]}" "$STAGE/"\n'
+        'STAGED=("$STAGE"/DFRoot_*.apk)\n'
+        'if [ "${#STAGED[@]}" -ne "${#APK_SOURCE[@]}" ]; then\n'
+        '  echo "::error::Staged APK count does not match the packaged release APK set"\n'
+        '  exit 1\n'
+        'fi\n'
+        '\n'
+        'KSUD_SHA=$(awk -F \'\\t\' \'$1 == "ksud_sha256" { print $2; exit }\' "$PINS")\n'
+        'KSUD_SIZE=$(awk -F \'\\t\' \'$1 == "ksud_size" { print $2; exit }\' "$PINS")\n'
+        'NEXT_SHA=$(awk -F \'\\t\' \'$1 == "ksudnext_sha256" { print $2; exit }\' "$PINS")\n'
+        'NEXT_SIZE=$(awk -F \'\\t\' \'$1 == "ksudnext_size" { print $2; exit }\' "$PINS")\n'
+        'if [ -z "$KSUD_SHA" ] || [ -z "$KSUD_SIZE" ] || [ -z "$NEXT_SHA" ] || [ -z "$NEXT_SIZE" ]; then\n'
+        '  echo "::error::Loader pins are incomplete"\n'
+        '  exit 1\n'
+        'fi\n'
+        '\n'
+        'field() {\n'
+        '  awk -v key="$1" \'index($0, key ": ") == 1 {\n'
+        '    print substr($0, length(key) + 3); exit }\' "$2"\n'
+        '}\n'
+        '\n'
+        'i=0\n'
+        'for apk in "${STAGED[@]}"; do\n'
+        '  i=$((i + 1))\n'
+        '  name=$(basename "$apk")\n'
+        '  apk_sha=$(sha256sum "$apk" | awk \'{print $1}\')\n'
+        '  if [ "$(sha256sum "release/$name" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Staged APK $name differs from the packaged release APK"\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  # Each loader must occur exactly once at its exact ABI path: a\n'
+        '  # duplicate or alias would make the checked bytes ambiguous.\n'
+        '  for entry in lib/arm64-v8a/libksud.so lib/arm64-v8a/libksudnext.so; do\n'
+        '    count=$(unzip -Z1 "$apk" | grep -Fxc "$entry" || true)\n'
+        '    count=${count:-0}\n'
+        '    if [ "$count" -ne 1 ]; then\n'
+        '      echo "::error::APK $name must contain exactly one \'$entry\' entry (found $count)"\n'
+        '      exit 1\n'
+        '    fi\n'
+        '  done\n'
+        '  EXTRACT="$RUNNER_TEMP/apk-loader-extract-$i"\n'
+        '  rm -rf "$EXTRACT"\n'
+        '  mkdir -p "$EXTRACT"\n'
+        '  unzip -q "$apk" \'lib/arm64-v8a/libksud.so\' \'lib/arm64-v8a/libksudnext.so\' -d "$EXTRACT"\n'
+        '  KSUD="$EXTRACT/lib/arm64-v8a/libksud.so"\n'
+        '  NEXT="$EXTRACT/lib/arm64-v8a/libksudnext.so"\n'
+        '  test -f "$KSUD"\n'
+        '  test -f "$NEXT"\n'
+        '  ksud_sha=$(sha256sum "$KSUD" | awk \'{print $1}\')\n'
+        '  next_sha=$(sha256sum "$NEXT" | awk \'{print $1}\')\n'
+        '\n'
+        '  LMAN="$RUNNER_TEMP/dfroot-loader-$i.manifest"\n'
+        '  LSTAMP="$RUNNER_TEMP/dfroot-loader-$i.verified"\n'
+        '  # The verifier invalidates its outputs at entry; repeat here so a\n'
+        '  # reused runner-temp path can never carry stale verified evidence.\n'
+        '  rm -f "$LMAN" "$LSTAMP"\n'
+        '  cmake \\\n'
+        '      -DLOADER_KSUD_FILE="$KSUD" \\\n'
+        '      -DLOADER_KSUDNEXT_FILE="$NEXT" \\\n'
+        '      "-DLOADER_KSUD_SHA256=$KSUD_SHA" "-DLOADER_KSUD_SIZE=$KSUD_SIZE" \\\n'
+        '      "-DLOADER_KSUDNEXT_SHA256=$NEXT_SHA" "-DLOADER_KSUDNEXT_SIZE=$NEXT_SIZE" \\\n'
+        '      -DLOADER_VERIFY_STAMP="$LSTAMP" \\\n'
+        '      -DLOADER_VERIFY_MANIFEST="$LMAN" \\\n'
+        '      -P app/src/main/jni/verify_loader_hashes.cmake\n'
+        '  grep -q \'^status: verified$\' "$LMAN"\n'
+        '  if [ "$(field ksud_sha256 "$LMAN")" != "$KSUD_SHA" ] ||\n'
+        '     [ "$(field ksud_size "$LMAN")" != "$KSUD_SIZE" ] ||\n'
+        '     [ "$(field ksudnext_sha256 "$LMAN")" != "$NEXT_SHA" ] ||\n'
+        '     [ "$(field ksudnext_size "$LMAN")" != "$NEXT_SIZE" ]; then\n'
+        '    echo "::error::Loader manifest fields for $name do not match the reviewed pins"\n'
+        '    exit 1\n'
+        '  fi\n'
+        '  if [ "$(field ksud_sha256 "$LMAN")" != "$ksud_sha" ] ||\n'
+        '     [ "$(field ksudnext_sha256 "$LMAN")" != "$next_sha" ]; then\n'
+        '    echo "::error::Loader manifest hashes for $name do not match the extracted entries"\n'
+        '    exit 1\n'
+        '  fi\n'
+        "  printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \\\n"
+        '      "$name" "$apk_sha" "$ksud_sha" "$next_sha" "$LMAN" >> "$INDEX"\n'
+        '  echo "verified loader bytes: $name ($apk_sha)"\n'
+        'done\n'
+        'if [ ! -s "$INDEX" ]; then\n'
+        '  echo "::error::APK loader index is empty; refusing to publish"\n'
+        '  exit 1\n'
+        'fi'
+    ),
     'Verify build-provenance identity for every record': (
         'set -euo pipefail\n'
         'bad=0\n'
@@ -486,7 +615,9 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         'bad=0\n'
         'EVIDENCE="$RUNNER_TEMP/release-evidence.tsv"\n'
         'INDEX="$RUNNER_TEMP/apk-gate-index.tsv"\n'
+        'LINDEX="$RUNNER_TEMP/apk-loader-index.tsv"\n'
         'STAGE="$RUNNER_TEMP/dfroot-release-apks"\n'
+        'LOADER_PINS="$RUNNER_TEMP/loader-pins.tsv"\n'
         ': > "$EVIDENCE"\n'
         'field() {\n'
         '  awk -v key="$1" \'index($0, key ": ") == 1 {\n'
@@ -495,6 +626,19 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         'in_pins() {\n'
         '  tr \';\' \'\\n\' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$1"\n'
         '}\n'
+        'loader_pin() {\n'
+        '  awk -F \'\\t\' -v key="$1" \'$1 == key { print $2; exit }\' "$LOADER_PINS"\n'
+        '}\n'
+        'PIN_KSUD_SHA=$(loader_pin ksud_sha256)\n'
+        'PIN_KSUD_SIZE=$(loader_pin ksud_size)\n'
+        'PIN_NEXT_SHA=$(loader_pin ksudnext_sha256)\n'
+        'PIN_NEXT_SIZE=$(loader_pin ksudnext_size)\n'
+        'for pin_value in "$PIN_KSUD_SHA" "$PIN_KSUD_SIZE" "$PIN_NEXT_SHA" "$PIN_NEXT_SIZE"; do\n'
+        '  if [ -z "$pin_value" ]; then\n'
+        '    echo "::error::Loader pin is missing from $LOADER_PINS"\n'
+        '    bad=1\n'
+        '  fi\n'
+        'done\n'
         '\n'
         '# 1. checked-out source is exactly the publishing commit.\n'
         'HEAD_SHA=$(git rev-parse HEAD)\n'
@@ -562,7 +706,7 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         'packaged_manifests=0\n'
         "while IFS= read -r -d '' pman; do\n"
         '  packaged_manifests=$((packaged_manifests + 1))\n'
-        "  if ! grep -q '^status: verified$' \"$pman\"; then\n"
+        '  if ! grep -q \'^status: verified$\' "$pman"; then\n'
         '    echo "::error::Packaged-KO manifest is not verified: $pman"\n'
         '    bad=1\n'
         '  fi\n'
@@ -583,7 +727,7 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         '    echo "::error::Verified libdfroot.so missing for manifest: $pman"\n'
         '    bad=1\n'
         '  else\n'
-        "    verified_so_sha=$(sha256sum \"$verified_so\" | awk '{print $1}')\n"
+        '    verified_so_sha=$(sha256sum "$verified_so" | awk \'{print $1}\')\n'
         '    man_so_sha=$(field so_sha256 "$pman")\n'
         '    if [ "$man_so_sha" != "$verified_so_sha" ]; then\n'
         '      echo "::error::Manifest so_sha256 \'$man_so_sha\' does not match verified libdfroot.so \'$verified_so_sha\' ($pman)"\n'
@@ -652,6 +796,111 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         '  echo "::error::Evidence rows ($rows) != staged APK count ($staged_count)"\n'
         '  bad=1\n'
         'fi\n'
+        '\n'
+        '# 7. Bundled loader bytes: every build-time loader manifest must be\n'
+        '# verified and pinned (three-way binding with the reviewed pins), and\n'
+        '# every APK in the loader gate index must re-hash to the staged and\n'
+        '# packaged APK, match the KO gate index, and carry pinned hashes that\n'
+        '# agree with its own manifest and with a verified build-time manifest.\n'
+        'loader_manifests=0\n'
+        'build_loader_hashes=""\n'
+        "while IFS= read -r -d '' lman; do\n"
+        '  loader_manifests=$((loader_manifests + 1))\n'
+        '  if ! grep -q \'^status: verified$\' "$lman"; then\n'
+        '    echo "::error::Loader gate manifest is not verified: $lman"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  for pair in \\\n'
+        '      "ksud_sha256|$PIN_KSUD_SHA" \\\n'
+        '      "ksud_size|$PIN_KSUD_SIZE" \\\n'
+        '      "ksudnext_sha256|$PIN_NEXT_SHA" \\\n'
+        '      "ksudnext_size|$PIN_NEXT_SIZE"; do\n'
+        '    key=${pair%%|*}\n'
+        '    want=${pair#*|}\n'
+        '    got=$(field "$key" "$lman")\n'
+        '    if [ "$got" != "$want" ]; then\n'
+        '      echo "::error::Loader manifest $key \'$got\' is not the reviewed pin \'$want\' ($lman)"\n'
+        '      bad=1\n'
+        '    fi\n'
+        '  done\n'
+        '  build_loader_hashes="$build_loader_hashes $(field ksud_sha256 "$lman")/$(field ksudnext_sha256 "$lman")"\n'
+        "done < <(find app/.cxx -type f -name 'loader-hashes.manifest' -print0 2>/dev/null)\n"
+        'if [ "$loader_manifests" -eq 0 ]; then\n'
+        '  echo "::error::No loader-hashes.manifest found under app/.cxx"\n'
+        '  bad=1\n'
+        'fi\n'
+        '\n'
+        'if [ ! -s "$LINDEX" ]; then\n'
+        '  echo "::error::APK loader index is empty; no verified loader artifact to document"\n'
+        '  bad=1\n'
+        'fi\n'
+        'loader_rows=0\n'
+        "while IFS=$'\\t' read -r name apk_sha ksud_sha next_sha lman; do\n"
+        '  loader_rows=$((loader_rows + 1))\n'
+        '  staged="$STAGE/$name"\n'
+        '  if [ ! -f "$staged" ]; then\n'
+        '    echo "::error::Staged APK missing for loader evidence: $staged"\n'
+        '    bad=1\n'
+        '    continue\n'
+        '  fi\n'
+        '  if [ "$(sha256sum "$staged" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Staged APK hash changed after the loader gate: $name"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if [ "$(sha256sum "release/$name" | awk \'{print $1}\')" != "$apk_sha" ]; then\n'
+        '    echo "::error::Packaged release APK hash changed after the loader gate: $name"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if ! awk -F \'\\t\' -v n="$name" -v s="$apk_sha" \\\n'
+        '         \'$1 == n && $2 == s { found = 1 } END { exit(found ? 0 : 1) }\' "$INDEX"; then\n'
+        '    echo "::error::APK $name loader evidence does not match the KO gate index"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if [ ! -f "$lman" ] || ! grep -q \'^status: verified$\' "$lman"; then\n'
+        '    echo "::error::Loader manifest for $name is missing or not verified"\n'
+        '    bad=1\n'
+        '    continue\n'
+        '  fi\n'
+        '  for pair in \\\n'
+        '      "ksud_sha256|$PIN_KSUD_SHA" \\\n'
+        '      "ksud_size|$PIN_KSUD_SIZE" \\\n'
+        '      "ksudnext_sha256|$PIN_NEXT_SHA" \\\n'
+        '      "ksudnext_size|$PIN_NEXT_SIZE"; do\n'
+        '    key=${pair%%|*}\n'
+        '    want=${pair#*|}\n'
+        '    got=$(field "$key" "$lman")\n'
+        '    if [ "$got" != "$want" ]; then\n'
+        '      echo "::error::Loader manifest $key \'$got\' for $name is not the reviewed pin \'$want\'"\n'
+        '      bad=1\n'
+        '    fi\n'
+        '  done\n'
+        '  if [ "$ksud_sha" != "$PIN_KSUD_SHA" ] || [ "$next_sha" != "$PIN_NEXT_SHA" ]; then\n'
+        '    echo "::error::Loader hashes for $name are not the reviewed pins"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  if [ "$(field ksud_sha256 "$lman")" != "$ksud_sha" ] ||\n'
+        '     [ "$(field ksudnext_sha256 "$lman")" != "$next_sha" ]; then\n'
+        '    echo "::error::Loader manifest for $name does not match the indexed APK hashes"\n'
+        '    bad=1\n'
+        '  fi\n'
+        '  case " $build_loader_hashes " in\n'
+        '    *" $ksud_sha/$next_sha "*) ;;\n'
+        '    *)\n'
+        '      echo "::error::Loader hashes for $name match no verified build-time manifest"\n'
+        '      bad=1\n'
+        '      ;;\n'
+        '  esac\n'
+        "  printf 'apk: %s\\tloader_ksud_sha256: %s\\tloader_ksudnext_sha256: %s\\tloader_manifest: %s\\n' \\\n"
+        '      "$name" "$ksud_sha" "$next_sha" "$lman" >> "$EVIDENCE"\n'
+        'done < "$LINDEX"\n'
+        'if [ "$loader_rows" -eq 0 ]; then\n'
+        '  echo "::error::No APK loader evidence rows produced"\n'
+        '  bad=1\n'
+        'fi\n'
+        'if [ "$loader_rows" -ne "$staged_count" ]; then\n'
+        '  echo "::error::Loader evidence rows ($loader_rows) != staged APK count ($staged_count)"\n'
+        '  bad=1\n'
+        'fi\n'
         'cat "$EVIDENCE"\n'
         '\n'
         'if [ "$bad" -ne 0 ]; then\n'
@@ -674,9 +923,13 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
         '  echo "::error::APK gate index is empty or missing"\n'
         '  missing=1\n'
         'fi\n'
+        'if [ ! -s "$RUNNER_TEMP/apk-loader-index.tsv" ]; then\n'
+        '  echo "::error::APK loader index is empty or missing"\n'
+        '  missing=1\n'
+        'fi\n'
         'if [ "$missing" -ne 0 ]; then exit 1; fi\n'
         'echo "distributable-evidence-ok" > "$RUNNER_TEMP/marker-distributable-evidence"\n'
-        'echo "All distributable evidence gates reached (3/3 markers + nonempty index)"'
+        'echo "All distributable evidence gates reached (3/3 markers + nonempty KO/loader indexes)"'
     ),
     'Generate APK provenance manifest (informational)': (
         'set -uo pipefail\n'
@@ -901,7 +1154,7 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '{\n'
         '  echo "## CI evidence artifact scope"\n'
         '  echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."\n'
-        '  echo "Host suites (61 status, 23/25/3/3/6/5 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
+        '  echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }
@@ -962,6 +1215,7 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Package signed release APK",
         EXTRACT_PINS_STEP,
         PACKAGED_KO_GATE_STEP,
+        APK_LOADER_GATE_STEP,
         PROVENANCE_IDENTITY_STEP,
         CI_CACHE_ASSERT_STEP,
         RELEASE_EVIDENCE_STEP,
@@ -1487,6 +1741,7 @@ def assert_required_steps_unskippable(text: str) -> None:
             "Package signed release APK",
             EXTRACT_PINS_STEP,
             PACKAGED_KO_GATE_STEP,
+            APK_LOADER_GATE_STEP,
             PROVENANCE_IDENTITY_STEP,
             CI_CACHE_ASSERT_STEP,
             RELEASE_EVIDENCE_STEP,
@@ -1862,6 +2117,7 @@ def assert_pr3_gates(text: str) -> None:
         "Package signed release APK",
         EXTRACT_PINS_STEP,
         PACKAGED_KO_GATE_STEP,
+        APK_LOADER_GATE_STEP,
         PROVENANCE_IDENTITY_STEP,
         CI_CACHE_ASSERT_STEP,
         RELEASE_EVIDENCE_STEP,
@@ -1873,7 +2129,7 @@ def assert_pr3_gates(text: str) -> None:
     indices = [next(i for i, step in enumerate(release_steps) if step_property(step, "name") == name) for name in ordered]
     if indices != sorted(indices):
         raise AssertionError("build-release gates/upload are not in the required order")
-    choke_index = indices[6]
+    choke_index = indices[7]
     for upload in action_steps(release, "actions/upload-artifact"):
         if release_steps.index(upload) <= choke_index:
             raise AssertionError("no artifact may be uploaded before the evidence choke point")
@@ -1897,6 +2153,23 @@ def assert_pr3_gates(text: str) -> None:
         if fragment not in packaged:
             raise AssertionError(f"packaged-KO gate is missing {fragment!r}")
 
+    # 6b. The real loader verifier must run on entries extracted from every
+    # staged APK, bound to the four reviewed pins from CMakeLists.txt.
+    loader_gate = run_script(named_step(release, APK_LOADER_GATE_STEP))
+    for fragment in (
+        "-P app/src/main/jni/verify_loader_hashes.cmake",
+        "grep -Fxc",
+        'unzip -q "$apk"',
+        "ksud_sha256",
+        "ksud_size",
+        "ksudnext_sha256",
+        "ksudnext_size",
+        '>> "$INDEX"',
+        '^status: verified$',
+    ):
+        if fragment not in loader_gate:
+            raise AssertionError(f"loader-byte gate is missing {fragment!r}")
+
     # 7. Provenance identity and per-APK release evidence.
     identity = run_script(named_step(release, PROVENANCE_IDENTITY_STEP))
     for fragment in ("git_head", "GITHUB_SHA", "android_variant", "ko_sha256", "marker-provenance-identity"):
@@ -1915,6 +2188,13 @@ def assert_pr3_gates(text: str) -> None:
         '*/app/build/intermediates/*/libdfroot.so)',
         "packaged_manifests",
         "in_pins \"$pkg_ko_hash\"",
+        LOADER_PINS_FILE,
+        APK_LOADER_GATE_INDEX,
+        "loader-hashes.manifest",
+        "loader_rows",
+        "loader_ksud_sha256:",
+        "loader_ksudnext_sha256:",
+        "loader_manifest:",
     ):
         if fragment not in evidence:
             raise AssertionError(f"release evidence gate is missing {fragment!r}")
@@ -1929,6 +2209,8 @@ def assert_pr3_gates(text: str) -> None:
             raise AssertionError(f"choke point does not require {marker}")
     if f'RUNNER_TEMP/{RELEASE_GATE_INDEX}' not in choke:
         raise AssertionError("choke point does not require a populated APK gate index")
+    if f'RUNNER_TEMP/{APK_LOADER_GATE_INDEX}' not in choke:
+        raise AssertionError("choke point does not require a populated APK loader index")
     if "exit 1" not in choke:
         raise AssertionError("choke point must fail closed when evidence is missing")
 
@@ -2093,6 +2375,72 @@ def make_fake_sdk(root: Path, exit_code: int) -> tuple[Path, Path]:
     )
     tool.chmod(0o755)
     return sdk, log
+
+
+# Harmless fixture bytes for the bundled-loader gate. No loader is executed and
+# no privileged/private content is used; the tampered blob has the SAME size as
+# the good one so only its SHA-256 can reject it.
+LOADER_KSUD_ENTRY = "lib/arm64-v8a/libksud.so"
+LOADER_NEXT_ENTRY = "lib/arm64-v8a/libksudnext.so"
+LOADER_KSUD_BYTES = b"HARMLESS-KSUD-FIXTURE-bytes-0000000000000000\n"
+LOADER_NEXT_BYTES = b"HARMLESS-NEXT-FIXTURE-bytes-1111111111111111\n"
+LOADER_TAMPERED_KSUD_BYTES = b"HARMLESS-KSUD-FIXTURE-bytes-9999999999999999\n"
+
+
+def write_loader_gate_fixture(
+    root: Path,
+    mode: str = "good",
+    apk_name: str = "DFRoot_loader.apk",
+    pin_overrides: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Build a synthetic checkout for the real loader gate script.
+
+    Includes a fixture CMakeLists.txt with the four pins, a copy of the real
+    verify_loader_hashes.cmake, and a deterministic (fixed-timestamp) stored ZIP
+    with harmless bytes at the two exact arm64 loader paths plus bootstrap.
+    """
+    assert len(LOADER_KSUD_BYTES) == len(LOADER_TAMPERED_KSUD_BYTES)
+    jni = root / "app/src/main/jni"
+    jni.mkdir(parents=True, exist_ok=True)
+    (jni / "verify_loader_hashes.cmake").write_bytes(
+        (ROOT / "app/src/main/jni/verify_loader_hashes.cmake").read_bytes()
+    )
+    pins = {
+        "ksud_sha256": hashlib.sha256(LOADER_KSUD_BYTES).hexdigest(),
+        "ksud_size": str(len(LOADER_KSUD_BYTES)),
+        "ksudnext_sha256": hashlib.sha256(LOADER_NEXT_BYTES).hexdigest(),
+        "ksudnext_size": str(len(LOADER_NEXT_BYTES)),
+    }
+    if pin_overrides:
+        pins.update(pin_overrides)
+    (jni / "CMakeLists.txt").write_text(
+        f'set(LOADER_KSUD_SHA256 "{pins["ksud_sha256"]}")\n'
+        f'set(LOADER_KSUD_SIZE {pins["ksud_size"]})\n'
+        f'set(LOADER_KSUDNEXT_SHA256 "{pins["ksudnext_sha256"]}")\n'
+        f'set(LOADER_KSUDNEXT_SIZE {pins["ksudnext_size"]})\n',
+        encoding="utf-8",
+    )
+    ksud_bytes = LOADER_TAMPERED_KSUD_BYTES if mode == "tampered" else LOADER_KSUD_BYTES
+    entries = [
+        (LOADER_KSUD_ENTRY, ksud_bytes),
+        (LOADER_NEXT_ENTRY, LOADER_NEXT_BYTES),
+        ("lib/arm64-v8a/libbootstrap.so", b"harmless bootstrap fixture\n"),
+    ]
+    if mode == "missing":
+        entries = [(n, d) for n, d in entries if n != LOADER_KSUD_ENTRY]
+    if mode == "wrong-abi":
+        entries = [
+            ("lib/x86/libksud.so" if n == LOADER_KSUD_ENTRY else n, d) for n, d in entries
+        ]
+    release = root / "release"
+    release.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(release / apk_name, "w") as zf:
+        for name, data in entries:
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_STORED
+            info.external_attr = (0o100644 << 16)
+            zf.writestr(info, data)
+    return pins
 
 
 class WorkflowPolicyTests(unittest.TestCase):
@@ -3247,6 +3595,7 @@ class BehavioralScriptTests(unittest.TestCase):
         cls.all_markers_script = run_script(named_step(jobs[HOST_GATES_JOB], ALL_MARKERS_STEP))
         cls.junit_script = run_script(named_step(jobs[HOST_GATES_JOB], JUNIT_STEP))
         cls.cache_assert_script = run_script(named_step(jobs["build-release"], CI_CACHE_ASSERT_STEP))
+        cls.apk_loader_gate_script = run_script(named_step(jobs["build-release"], APK_LOADER_GATE_STEP))
         cls.choke_script = run_script(named_step(jobs["build-release"], UPLOAD_CHOKE_STEP))
 
     def test_package_script_requires_exactly_one_release_apk(self) -> None:
@@ -3567,6 +3916,114 @@ class BehavioralScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("No CMakeCache.txt found", result.stdout + result.stderr)
 
+    def test_apk_loader_gate_accepts_good_archive_and_binds_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            pins = write_loader_gate_fixture(root)
+            result = run_in_dir(self.apk_loader_gate_script, root, {"RUNNER_TEMP": str(runner_temp)})
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            index = runner_temp / APK_LOADER_GATE_INDEX
+            rows = [line.split("\t") for line in index.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(rows), 1, rows)
+            name, apk_sha, ksud_sha, next_sha, manifest = rows[0]
+            self.assertEqual(name, "DFRoot_loader.apk")
+            self.assertEqual(
+                apk_sha, hashlib.sha256((root / "release" / name).read_bytes()).hexdigest()
+            )
+            self.assertEqual(ksud_sha, pins["ksud_sha256"])
+            self.assertEqual(next_sha, pins["ksudnext_sha256"])
+
+            fields = dict(
+                line.split(": ", 1)
+                for line in Path(manifest).read_text(encoding="utf-8").splitlines()
+                if ": " in line
+            )
+            self.assertEqual(fields["status"], "verified")
+            for field, key in (
+                ("ksud_sha256", "ksud_sha256"),
+                ("ksud_size", "ksud_size"),
+                ("ksudnext_sha256", "ksudnext_sha256"),
+                ("ksudnext_size", "ksudnext_size"),
+            ):
+                self.assertEqual(fields[field], pins[key])
+            self.assertTrue((runner_temp / "dfroot-loader-1.verified").is_file())
+
+            pin_rows = dict(
+                line.split("\t")
+                for line in (runner_temp / LOADER_PINS_FILE).read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(pin_rows, pins)
+
+    def test_apk_loader_gate_rejects_tampered_same_size_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            write_loader_gate_fixture(root, mode="tampered")
+            result = run_in_dir(self.apk_loader_gate_script, root, {"RUNNER_TEMP": str(runner_temp)})
+            combined = result.stdout + result.stderr
+            self.assertNotEqual(result.returncode, 0, combined)
+            self.assertIn("SHA-256 MISMATCH", combined)
+            self.assertEqual((runner_temp / APK_LOADER_GATE_INDEX).read_text(encoding="utf-8").strip(), "")
+            self.assertFalse((runner_temp / "dfroot-loader-1.manifest").exists())
+            self.assertFalse((runner_temp / "dfroot-loader-1.verified").exists())
+
+    def test_apk_loader_gate_rejects_missing_and_wrong_abi_entries(self) -> None:
+        for mode in ("missing", "wrong-abi"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                runner_temp = root / "runner-temp"
+                runner_temp.mkdir()
+                write_loader_gate_fixture(root, mode=mode)
+                result = run_in_dir(self.apk_loader_gate_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                combined = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, combined)
+                self.assertIn("exactly one", combined)
+                self.assertEqual((runner_temp / APK_LOADER_GATE_INDEX).read_text(encoding="utf-8").strip(), "")
+                self.assertFalse((runner_temp / "dfroot-loader-1.manifest").exists())
+
+    def test_apk_loader_gate_removes_stale_manifest_and_stamp_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            write_loader_gate_fixture(root, mode="tampered")
+            manifest = runner_temp / "dfroot-loader-1.manifest"
+            stamp = runner_temp / "dfroot-loader-1.verified"
+            manifest.write_text("status: verified\nstale loader evidence\n", encoding="utf-8")
+            stamp.write_text("verified stale evidence\n", encoding="utf-8")
+
+            result = run_in_dir(self.apk_loader_gate_script, root, {"RUNNER_TEMP": str(runner_temp)})
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(manifest.exists(), "stale verified manifest survived a failing run")
+            self.assertFalse(stamp.exists(), "stale verified stamp survived a failing run")
+            self.assertEqual((runner_temp / APK_LOADER_GATE_INDEX).read_text(encoding="utf-8").strip(), "")
+
+    def test_apk_loader_gate_fails_when_a_reviewed_pin_is_edited(self) -> None:
+        cases = (
+            ("malformed pin", {"ksud_sha256": "deadbeef"}, "Malformed LOADER_KSUD_SHA256 pin"),
+            ("wrong well-formed pin", {"ksud_sha256": "0" * 64}, "SHA-256 MISMATCH"),
+        )
+        for label, overrides, message in cases:
+            with self.subTest(fixture=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                runner_temp = root / "runner-temp"
+                runner_temp.mkdir()
+                write_loader_gate_fixture(root, pin_overrides=overrides)
+                result = run_in_dir(self.apk_loader_gate_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                combined = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, combined)
+                self.assertIn(message, combined)
+                # A malformed pin is rejected before the index is even created.
+                index = runner_temp / APK_LOADER_GATE_INDEX
+                self.assertTrue(
+                    not index.exists() or index.read_text(encoding="utf-8").strip() == ""
+                )
+                self.assertFalse((runner_temp / "dfroot-loader-1.manifest").exists())
+
     def test_upload_choke_point_blocks_release_without_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3576,9 +4033,12 @@ class BehavioralScriptTests(unittest.TestCase):
                 (runner_temp / marker).write_text("ok\n", encoding="utf-8")
             index = runner_temp / RELEASE_GATE_INDEX
             index.write_text("DFRoot_a.apk\tsha\tso\tmanifest\tso_sha\n", encoding="utf-8")
+            loader_index = runner_temp / APK_LOADER_GATE_INDEX
+            loader_index.write_text("DFRoot_a.apk\tsha\tksud\tnext\tmanifest\n", encoding="utf-8")
             result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("3/3 markers", result.stdout)
+            self.assertIn("KO/loader indexes", result.stdout)
 
             for missing in RELEASE_GATE_MARKERS:
                 with self.subTest(marker=missing):
@@ -3593,6 +4053,19 @@ class BehavioralScriptTests(unittest.TestCase):
                 result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("APK gate index is empty or missing", result.stdout + result.stderr)
+                index.write_text("DFRoot_a.apk\tsha\tso\tmanifest\tso_sha\n", encoding="utf-8")
+
+            with self.subTest(fixture="missing loader index"):
+                loader_index.unlink()
+                result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("APK loader index is empty or missing", result.stdout + result.stderr)
+
+            with self.subTest(fixture="empty loader index"):
+                loader_index.write_text("", encoding="utf-8")
+                result = run_in_dir(self.choke_script, root, {"RUNNER_TEMP": str(runner_temp)})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("APK loader index is empty or missing", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
