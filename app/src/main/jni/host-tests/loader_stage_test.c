@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static const char PAYLOAD[] =
@@ -182,6 +183,63 @@ static void expect_absent(const char *path)
 {
     if (path_exists(path)) {
         fprintf(stderr, "expected no entry at %s\n", path);
+        exit(1);
+    }
+}
+
+static void make_named_path(char *out, size_t capacity,
+                            const char *directory, const char *name)
+{
+    int written = snprintf(out, capacity, "%s/%s", directory, name);
+    if (written < 0 || (size_t)written >= capacity) {
+        die("fixture path is too long");
+    }
+}
+
+static struct stat stat_path(const char *path)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        perror("lstat fixture entry");
+        exit(1);
+    }
+    return st;
+}
+
+static int count_entries(const char *directory)
+{
+    DIR *dir = opendir(directory);
+    if (dir == NULL) {
+        perror("opendir fixture directory");
+        exit(1);
+    }
+    int count = 0;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
+            count++;
+        }
+    }
+    closedir(dir);
+    return count;
+}
+
+static void expect_entry_count(int expected)
+{
+    int actual = count_entries(stage_dir);
+    if (actual != expected) {
+        fprintf(stderr, "staging directory entries: expected %d, got %d\n",
+                expected, actual);
+        exit(1);
+    }
+}
+
+static void expect_same_entry(const char *path, const struct stat *before)
+{
+    struct stat after = stat_path(path);
+    if (after.st_dev != before->st_dev || after.st_ino != before->st_ino
+        || after.st_mode != before->st_mode || after.st_size != before->st_size) {
+        fprintf(stderr, "unrelated fixture entry was changed: %s\n", path);
         exit(1);
     }
 }
@@ -556,6 +614,203 @@ static void test_replacement_before_restore(void)
     expect_dir_mode(before);
 }
 
+/* Deterministic inode-churn/reuse attempt: create and remove many entries
+ * immediately before replacing the staged path. The staged inode is pinned by
+ * a descriptor, so its number cannot be recycled for the replacement; restore
+ * must still detect that the path names a different object. No sleeps and no
+ * reliance on which inode number the allocator happens to hand out. */
+static void test_inode_churn_reuse(void)
+{
+    setup_stage();
+    mode_t before = path_mode(stage_dir);
+    expect_install_ok();
+    char path[PATH_MAX];
+    char name[32];
+    for (int i = 0; i < 24; i++) {
+        snprintf(name, sizeof(name), "churn-%02d", i);
+        make_named_path(path, sizeof(path), stage_dir, name);
+        write_file(path, "churn", 0600);
+    }
+    for (int i = 0; i < 24; i++) {
+        snprintf(name, sizeof(name), "churn-%02d", i);
+        make_named_path(path, sizeof(path), stage_dir, name);
+        if (unlink(path) != 0) {
+            perror("unlink inode-churn fixture");
+            exit(1);
+        }
+    }
+    if (unlink(destination) != 0) {
+        perror("unlink staged entry");
+        exit(1);
+    }
+    write_file(destination, "attacker", 0644);
+    struct stat attacker_before = stat_path(destination);
+
+    expect_restore_fail("staged entry was replaced before cleanup");
+    expect_content(destination, "attacker");
+    expect_same_entry(destination, &attacker_before);
+    expect_dir_mode(before);
+    expect_entry_count(1);
+}
+
+/* The staged entry is renamed away and a different object takes its path.
+ * Identity cannot be established from the path, so restore fails conservatively:
+ * it creates nothing, removes neither entry, and still restores directory mode.
+ * A rename with no replacement is the legitimate loader case and stays covered
+ * by test_normal (which requires restore to succeed). */
+static void test_renamed_away_before_restore(void)
+{
+    setup_stage();
+    mode_t before = path_mode(stage_dir);
+    expect_install_ok();
+    char moved[PATH_MAX];
+    make_named_path(moved, sizeof(moved), stage_dir, "moved-staged");
+    if (rename(destination, moved) != 0) {
+        perror("rename staged entry");
+        exit(1);
+    }
+    write_file(destination, "attacker", 0644);
+    struct stat moved_before = stat_path(moved);
+    struct stat attacker_before = stat_path(destination);
+    expect_entry_count(2);
+
+    expect_restore_fail("staged entry was replaced before cleanup");
+    expect_content(moved, PAYLOAD);
+    expect_content(destination, "attacker");
+    expect_same_entry(moved, &moved_before);
+    expect_same_entry(destination, &attacker_before);
+    expect_entry_count(2);
+    expect_dir_mode(before);
+}
+
+/* Unrelated files and directories in the staging area are never touched by a
+ * successful install/restore cycle. */
+static void test_unrelated_entries_untouched(void)
+{
+    setup_stage();
+    mode_t before = path_mode(stage_dir);
+    char keep_file[PATH_MAX];
+    char keep_dir[PATH_MAX];
+    char keep_child[PATH_MAX];
+    make_named_path(keep_file, sizeof(keep_file), stage_dir, "keep-file");
+    make_named_path(keep_dir, sizeof(keep_dir), stage_dir, "keep-dir");
+    write_file(keep_file, "keep-me", 0640);
+    if (mkdir(keep_dir, 0700) != 0) {
+        perror("mkdir unrelated fixture directory");
+        exit(1);
+    }
+    make_named_path(keep_child, sizeof(keep_child), keep_dir, "child");
+    write_file(keep_child, "keep-child", 0600);
+    struct stat file_before = stat_path(keep_file);
+    struct stat dir_before = stat_path(keep_dir);
+    struct stat child_before = stat_path(keep_child);
+
+    expect_install_ok();
+    expect_restore_ok();
+    expect_absent(destination);
+    expect_content(keep_file, "keep-me");
+    expect_content(keep_child, "keep-child");
+    expect_same_entry(keep_file, &file_before);
+    expect_same_entry(keep_dir, &dir_before);
+    expect_same_entry(keep_child, &child_before);
+    expect_entry_count(2);
+    expect_dir_mode(before);
+}
+
+/* Harmless, deterministic exec helper: resolve the system's true binary to a
+ * regular file (the /bin/true name itself may be a symlink, and the staging
+ * source must be a non-symlink regular file). */
+static const char *exec_helper_path(void)
+{
+    static char resolved[PATH_MAX];
+    static const char *const candidates[] = { "/bin/true", "/usr/bin/true" };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        struct stat st;
+        if (lstat(candidates[i], &st) == 0 && S_ISREG(st.st_mode)
+            && (st.st_mode & 0111) != 0) {
+            snprintf(resolved, sizeof(resolved), "%s", candidates[i]);
+            return resolved;
+        }
+        /* Commonly /bin/true is a symlink; resolve one level by hand so the
+         * staging source stays a regular file under O_NOFOLLOW. */
+        char link_target[PATH_MAX];
+        ssize_t count = readlink(candidates[i], link_target, sizeof(link_target) - 1);
+        if (count <= 0) {
+            continue;
+        }
+        link_target[count] = '\0';
+        char target[PATH_MAX];
+        if (link_target[0] == '/') {
+            snprintf(target, sizeof(target), "%s", link_target);
+        } else {
+            const char *slash = strrchr(candidates[i], '/');
+            size_t directory_length = slash == NULL ? 0 : (size_t)(slash - candidates[i]) + 1;
+            int written = snprintf(target, sizeof(target), "%.*s%s",
+                                   (int)directory_length, candidates[i], link_target);
+            if (written < 0 || (size_t)written >= sizeof(target)) {
+                continue;
+            }
+        }
+        if (lstat(target, &st) == 0 && S_ISREG(st.st_mode)
+            && (st.st_mode & 0111) != 0) {
+            snprintf(resolved, sizeof(resolved), "%s", target);
+            return resolved;
+        }
+    }
+    die("no harmless exec helper (/bin/true) is available");
+    return NULL;
+}
+
+/* Reproduce the real production ordering: bootstrap execv()s the staged entry
+ * BEFORE calling restore(). A surviving O_WRONLY pin would make exec fail with
+ * ETXTBSY even with O_CLOEXEC, because the write-access check happens when the
+ * child opens the executable. Also assert the retained pin is read-only. */
+static void test_exec_before_restore(void)
+{
+    setup_stage();
+    mode_t before = path_mode(stage_dir);
+    const char *helper = exec_helper_path();
+    if (loader_stage_install(&stage, helper) != 0) {
+        fprintf(stderr, "unexpected install failure: %s\n",
+                loader_stage_last_error(&stage));
+        exit(1);
+    }
+    int pin_flags = fcntl(stage.held_fd, F_GETFL);
+    if (pin_flags < 0 || (pin_flags & O_ACCMODE) != O_RDONLY) {
+        fprintf(stderr, "retained staged pin is not read-only: flags=%o\n",
+                (unsigned)(pin_flags < 0 ? 0 : pin_flags & O_ACCMODE));
+        exit(1);
+    }
+
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork staged exec helper");
+        exit(1);
+    }
+    if (child == 0) {
+        char *const child_argv[] = { (char *)destination, NULL };
+        execv(destination, child_argv);
+        perror("exec staged file");
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        perror("waitpid staged exec helper");
+        exit(1);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "staged exec failed before restore: status=%d\n", status);
+        exit(1);
+    }
+
+    expect_restore_ok();
+    expect_absent(destination);
+    expect_dir_mode(before);
+}
+
 static void test_private_before_exec(void)
 {
     setup_stage();
@@ -768,6 +1023,14 @@ static void run_case(const char *name)
         test_replacement_after_lstat();
     } else if (!strcmp(name, "replacement_before_restore")) {
         test_replacement_before_restore();
+    } else if (!strcmp(name, "inode_churn_reuse")) {
+        test_inode_churn_reuse();
+    } else if (!strcmp(name, "renamed_away_before_restore")) {
+        test_renamed_away_before_restore();
+    } else if (!strcmp(name, "unrelated_entries_untouched")) {
+        test_unrelated_entries_untouched();
+    } else if (!strcmp(name, "exec_before_restore")) {
+        test_exec_before_restore();
     } else if (!strcmp(name, "private_before_exec")) {
         test_private_before_exec();
     } else if (!strcmp(name, "configure_defaults")) {

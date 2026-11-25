@@ -74,8 +74,78 @@ static int remember(char *first, size_t capacity, const char *message)
     return -1;
 }
 
-/* Single failure exit for install(): close any descriptors, undo the sticky
- * bit and remove only the exact inode this attempt created. The first
+/* Common CLOEXEC handling for descriptors this module opens or duplicates.
+ * F_DUPFD_CLOEXEC / O_CLOEXEC may be unavailable on an older libc, so the
+ * fallback sets FD_CLOEXEC explicitly. A failure closes the descriptor and
+ * preserves errno so callers can fail closed with a useful diagnostic. */
+static int ensure_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return -1;
+    }
+    return 0;
+}
+
+/* Duplicate the write descriptor used for the copy. */
+static int duplicate_descriptor(int fd)
+{
+#ifdef F_DUPFD_CLOEXEC
+    return fcntl(fd, F_DUPFD_CLOEXEC, 0);
+#else
+    int copy = fcntl(fd, F_DUPFD, 0);
+    if (copy < 0) {
+        return -1;
+    }
+    return ensure_cloexec(copy) == 0 ? copy : -1;
+#endif
+}
+
+/* Convert the O_WRONLY pin into a non-writing pin without reopening by
+ * pathname: /proc/self/fd/<n> names the already-open file description, so no
+ * path swap can redirect it. fstat() works on the result. If /proc is absent
+ * or the reopen lands on a different inode, fail closed: install() aborts
+ * while the original pin is still live and restore() closes it. */
+static int reopen_pin_readonly(int fd)
+{
+    char proc_path[64];
+    struct stat before;
+    struct stat after;
+    int written = snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    if (written < 0 || (size_t)written >= sizeof(proc_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if (fstat(fd, &before) != 0) {
+        return -1;
+    }
+    int readonly_fd = open(proc_path, O_RDONLY | O_CLOEXEC);
+    if (readonly_fd < 0) {
+        return -1;
+    }
+    if (ensure_cloexec(readonly_fd) != 0) {
+        return -1;
+    }
+    if (fstat(readonly_fd, &after) != 0) {
+        int saved = errno;
+        close(readonly_fd);
+        errno = saved;
+        return -1;
+    }
+    if (after.st_dev != before.st_dev || after.st_ino != before.st_ino) {
+        close(readonly_fd);
+        errno = EIO;
+        return -1;
+    }
+    return readonly_fd;
+}
+
+/* Single failure exit for install(): close the descriptors owned by this call,
+ * then hand cleanup to restore(), which closes the held pin, removes only the
+ * exact inode this attempt created, and restores the directory mode. The first
  * diagnostic wins; a cleanup failure is appended, never substituted. */
 static int stage_abort(struct loader_stage *stage, int src_fd, int dst_fd,
                        const char *message)
@@ -114,6 +184,22 @@ static int stage_abort_code(struct loader_stage *stage, int src_fd, int dst_fd,
     char message[LOADER_STAGE_DIAGNOSTIC_MAX - 32];
     snprintf(message, sizeof(message), "%s: %s", what, strerror(error_number));
     return stage_abort(stage, src_fd, dst_fd, message);
+}
+
+/* Remove a just-created entry only while a live descriptor still pins it and
+ * the path still names that same inode. Used in the two early exit paths that
+ * precede pin creation; later cleanup always goes through restore(). */
+static int remove_if_same_inode(const char *path, int fd)
+{
+    struct stat open_st;
+    struct stat path_st;
+    if (fstat(fd, &open_st) != 0 || lstat(path, &path_st) != 0) {
+        return -1;
+    }
+    if (open_st.st_dev != path_st.st_dev || open_st.st_ino != path_st.st_ino) {
+        return -1;
+    }
+    return unlink(path);
 }
 
 static int valid_component(const char *value)
@@ -161,6 +247,7 @@ int loader_stage_configure(struct loader_stage *stage, const char *directory,
         return -1;
     }
     memset(stage, 0, sizeof(*stage));
+    stage->held_fd = -1;
     if (directory == NULL) {
         directory = LOADER_STAGE_DIR_DEFAULT;
     }
@@ -193,29 +280,52 @@ int loader_stage_restore(struct loader_stage *stage)
     first[0] = '\0';
 
     if (stage->created) {
-        struct stat st;
-        if (lstat(stage->destination, &st) == 0) {
-            if (st.st_dev != stage->created_dev || st.st_ino != stage->created_ino) {
-                result = remember(first, sizeof(first),
-                                  "staged entry was replaced before cleanup");
-            } else if (unlink(stage->destination) != 0) {
+        struct stat held;
+        /* The descriptor is the authority: a saved dev/ino pair from a closed
+         * descriptor can be recycled by an unrelated replacement entry. */
+        if (stage->held_fd < 0 || fstat(stage->held_fd, &held) != 0) {
+            result = remember(first, sizeof(first),
+                              "staged entry identity is unavailable; entry was not removed");
+        } else {
+            struct stat st;
+            if (lstat(stage->destination, &st) == 0) {
+                if (st.st_dev != stage->created_dev || st.st_ino != stage->created_ino
+                    || st.st_dev != held.st_dev || st.st_ino != held.st_ino) {
+                    /* Path now names a different object. Never unlink it. */
+                    result = remember(first, sizeof(first),
+                                      "staged entry was replaced before cleanup");
+                } else if (unlink(stage->destination) != 0) {
+                    int saved = errno;
+                    char message[LOADER_STAGE_DIAGNOSTIC_MAX - 32];
+                    snprintf(message, sizeof(message), "staged entry unlink failed: %s",
+                             strerror(saved));
+                    result = remember(first, sizeof(first), message);
+                }
+            } else if (errno != ENOENT) {
                 int saved = errno;
                 char message[LOADER_STAGE_DIAGNOSTIC_MAX - 32];
-                snprintf(message, sizeof(message), "staged entry unlink failed: %s",
+                snprintf(message, sizeof(message), "staged entry lstat failed: %s",
                          strerror(saved));
                 result = remember(first, sizeof(first), message);
             }
-        } else if (errno != ENOENT) {
-            int saved = errno;
-            char message[LOADER_STAGE_DIAGNOSTIC_MAX - 32];
-            snprintf(message, sizeof(message), "staged entry lstat failed: %s",
-                     strerror(saved));
-            result = remember(first, sizeof(first), message);
+            /* ENOENT means the loader already renamed/consumed our entry:
+             * there is nothing at the path to identify or remove. */
         }
         if (result == 0) {
             stage->created = 0;
             stage->created_dev = 0;
             stage->created_ino = 0;
+        }
+    }
+
+    /* The pin must not survive a success, an abort, or a conservative failure.
+     * Clear it before close() so a repeated restore cannot double-close. */
+    if (stage->held_fd >= 0) {
+        int held_fd = stage->held_fd;
+        stage->held_fd = -1;
+        if (close(held_fd) != 0) {
+            result = remember(first, sizeof(first),
+                              "staged entry descriptor close failed");
         }
     }
 
@@ -265,6 +375,12 @@ int loader_stage_install(struct loader_stage *stage, const char *source_path)
     stage->error[0] = '\0';
     stage->created = 0;
     stage->sticky_applied = 0;
+    /* A caller may reuse a configured struct after an interrupted sequence;
+     * never leak a descriptor from an earlier attempt. */
+    if (stage->held_fd >= 0) {
+        close(stage->held_fd);
+        stage->held_fd = -1;
+    }
     if (stage->name[0] == '\0') {
         return stage_error(stage, "staging protocol is not configured");
     }
@@ -339,32 +455,44 @@ int loader_stage_install(struct loader_stage *stage, const char *source_path)
         return stage_abort(stage, -1, -1, "staging source is not a regular file");
     }
 
-    int dst_fd = open(stage->destination,
+    int pin_fd = open(stage->destination,
                       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
                       LOADER_STAGE_PRIVATE_MODE);
-    if (dst_fd < 0) {
+    if (pin_fd < 0) {
         close(src_fd);
         return stage_abort_errno(stage, -1, -1, "staging destination open failed");
     }
     struct stat dst_st;
-    if (fstat(dst_fd, &dst_st) != 0) {
+    if (fstat(pin_fd, &dst_st) != 0) {
         int saved = errno;
-        close(dst_fd);
+        /* Conservative early cleanup: O_EXCL created this entry, but dev/ino
+         * are unavailable. Verify the path still names the live descriptor
+         * before unlinking; on any doubt leave the entry alone (the directory
+         * mode is still restored by stage_abort). */
+        (void)remove_if_same_inode(stage->destination, pin_fd);
+        close(pin_fd);
         close(src_fd);
-        /* O_EXCL proves this entry is ours; dev/ino are unavailable because
-         * fstat failed, so remove it here rather than risk unlinking a swap. */
-        (void)unlink(stage->destination);
         return stage_abort_code(stage, -1, -1, "staging destination fstat failed", saved);
     }
     if (!S_ISREG(dst_st.st_mode)) {
-        close(dst_fd);
+        (void)remove_if_same_inode(stage->destination, pin_fd);
+        close(pin_fd);
         close(src_fd);
-        (void)unlink(stage->destination);
         return stage_abort(stage, -1, -1, "staging destination is not a regular file");
     }
     stage->created = 1;
     stage->created_dev = dst_st.st_dev;
     stage->created_ino = dst_st.st_ino;
+    /* The O_EXCL descriptor is the transient pin: it stays live through the
+     * copy so dev/ino cannot be recycled, and only a duplicate is used for
+     * writes. It is converted to a non-writing pin before install() returns. */
+    stage->held_fd = pin_fd;
+    int dst_fd = duplicate_descriptor(pin_fd);
+    if (dst_fd < 0) {
+        int saved = errno;
+        close(src_fd);
+        return stage_abort_code(stage, -1, -1, "staged entry work descriptor failed", saved);
+    }
 
     char buffer[16384];
     for (;;) {
@@ -460,6 +588,8 @@ int loader_stage_install(struct loader_stage *stage, const char *source_path)
         return stage_abort_code(stage, -1, -1, "staged copy fchmod failed", saved);
     }
 
+    /* Only the duplicate is closed here. The O_EXCL descriptor stays open in
+     * stage->held_fd until restore() verifies it and closes it. */
     int close_result = close(dst_fd);
 #ifdef LOADER_STAGE_TEST_HOOKS
     if (fault_active(LOADER_STAGE_FAULT_CLOSE) && close_result == 0) {
@@ -472,6 +602,29 @@ int loader_stage_install(struct loader_stage *stage, const char *source_path)
         return stage_abort_code(stage, -1, -1, "staged copy close failed", saved);
     }
 
+    /* Production bootstrap launches this exact path before calling restore().
+     * An O_WRONLY descriptor left open on the inode would make that exec fail
+     * with ETXTBSY. Reopen the pin read-only through /proc/self/fd (no path
+     * race), then drop the write descriptor. On any conversion failure the
+     * original pin stays live so abort cleanup can still verify identity;
+     * restore() closes it, so no write descriptor survives the failure. */
+    int readonly_pin = reopen_pin_readonly(stage->held_fd);
+    if (readonly_pin < 0) {
+        return stage_abort_errno(stage, -1, -1,
+                                 "staged entry read-only pin conversion failed");
+    }
+    int write_pin = stage->held_fd;
+    stage->held_fd = readonly_pin;
+    if (close(write_pin) != 0) {
+        int saved = errno;
+        return stage_abort_code(stage, -1, -1, "staged entry write pin close failed", saved);
+    }
+
+    struct stat held_st;
+    if (fstat(stage->held_fd, &held_st) != 0) {
+        int saved = errno;
+        return stage_abort_code(stage, -1, -1, "staged entry identity check failed", saved);
+    }
     struct stat final;
     if (lstat(stage->destination, &final) != 0) {
         int saved = errno;
@@ -481,7 +634,9 @@ int loader_stage_install(struct loader_stage *stage, const char *source_path)
         || (final.st_mode & 07777) != LOADER_STAGE_EXEC_MODE
         || final.st_size != src_before.st_size
         || final.st_dev != stage->created_dev
-        || final.st_ino != stage->created_ino) {
+        || final.st_ino != stage->created_ino
+        || final.st_dev != held_st.st_dev
+        || final.st_ino != held_st.st_ino) {
         return stage_abort(stage, -1, -1, "staged copy verification failed");
     }
     stage->error[0] = '\0';

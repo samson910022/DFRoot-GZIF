@@ -44,6 +44,15 @@ struct loader_stage {
     int created;            /* install() created this exact destination inode */
     dev_t created_dev;
     ino_t created_ino;
+    /* Descriptor pinning the created inode. A saved dev/ino pair alone is not
+     * an identity: once the descriptor is closed the filesystem may recycle
+     * that number for an unrelated entry. The O_EXCL descriptor pins it from
+     * creation through the copy, then install() converts the pin to a
+     * non-writing descriptor (via /proc/self/fd) before returning and closes
+     * the O_WRONLY descriptor. The resulting pin is held until restore() (or
+     * abort cleanup) and is the authority for the final lstat comparison.
+     * -1 means no descriptor is held. */
+    int held_fd;
     char error[LOADER_STAGE_DIAGNOSTIC_MAX];
 };
 
@@ -64,17 +73,23 @@ int loader_stage_configure(struct loader_stage *stage, const char *directory,
  * verified regular, written with an EINTR-safe full-write loop, fsynced, and
  * only then fchmod'd to LOADER_STAGE_EXEC_MODE, with checked closes.
  *
- * Returns 0 only after the complete verified copy. On every failure the
- * destination inode actually created by this call is removed (dev/ino checked
- * before unlink) and the directory mode is restored.
+ * Returns 0 only after the complete verified copy. A non-writing descriptor
+ * for the exact created inode is held open until restore() closes it, so a
+ * caller can execv() the staged entry before restore without ETXTBSY. On every
+ * failure the destination inode actually created by this call is removed only
+ * after its live descriptor identity matches the path, and the directory mode
+ * is restored. If identity cannot be established, nothing is unlinked.
  */
 int loader_stage_install(struct loader_stage *stage, const char *source_path);
 
 /*
- * Undo the staging directory protection and discard the staged entry if it is
- * still our exact inode. Must be called after the late-load command returns,
- * regardless of that command's result. Idempotent: safe to call again after a
- * failed install(). A replaced destination is never unlinked.
+ * Undo the staging directory protection and discard the staged entry only when
+ * fstat(held_fd) and lstat(destination) prove it is still our exact inode.
+ * Must be called after the late-load command returns, regardless of that
+ * command's result. The held descriptor is closed on every path. Idempotent:
+ * safe to call again after a failed install(). A replaced destination is never
+ * unlinked; when identity is unverifiable this reports a failure, preserves
+ * the unrelated entry, and still restores the directory mode.
  */
 int loader_stage_restore(struct loader_stage *stage);
 

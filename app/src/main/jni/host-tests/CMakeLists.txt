@@ -4,6 +4,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): add nonprivileged terminal marker write/classifier tests. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover shared progress markers, composed deadlines, exact fault branches, and malformed markers. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): add nonprivileged hardened loader-staging race tests with injectable directories. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): pin staged inodes by descriptor, add deterministic identity-churn and exec-before-restore cases. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -292,6 +293,10 @@ foreach(stage_case IN ITEMS
         restore_failure
         replacement_after_lstat
         replacement_before_restore
+        inode_churn_reuse
+        renamed_away_before_restore
+        unrelated_entries_untouched
+        exec_before_restore
         private_before_exec
         configure_defaults
         no_shell
