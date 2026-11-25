@@ -5,6 +5,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map reader expiry to rc7 and expose the shared-budget remainder. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): scan the reserved pre-admission diagnostic and decide through a pure helper. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): add a shared classifier-failure rc7 mapping and a harmless host injection seam. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -26,11 +27,16 @@ static unsigned long status_temp_counter;
 
 #ifdef RUN_STATUS_TEST_HOOKS
 static int injected_fault;
+static int injected_classifier_failure;
 static int writer_wait_fd = -1;
 static int writer_notify_fd = -1;
 static int retract_wait_fd = -1;
 static int retract_notify_fd = -1;
 void run_status_inject_fault(int fault) { injected_fault = fault; }
+void run_status_inject_classifier_failure(int enabled)
+{
+    injected_classifier_failure = enabled ? 1 : 0;
+}
 void run_status_set_writer_pause(int wait_fd, int notify_fd)
 {
     writer_wait_fd = wait_fd;
@@ -306,6 +312,15 @@ int run_status_classify(struct run_status_result *out)
     if (!status_configured) {
         return status_fail("marker protocol is not configured");
     }
+#ifdef RUN_STATUS_TEST_HOOKS
+    /* Host-only observation failure: no verdict, no code, no marker. The
+     * reader's failure branch maps this to rc7 without confirming anything. */
+    if (injected_classifier_failure) {
+        snprintf(out->diagnostic, sizeof(out->diagnostic),
+                 "injected terminal classifier failure; completion unverified");
+        return status_fail("terminal classifier observation failed");
+    }
+#endif
 
     DIR *directory = opendir(status_root);
     if (directory == NULL) {
@@ -951,4 +966,11 @@ int run_status_exit_code(const struct run_status_result *result)
         return RUN_STATUS_TERMINAL_ERROR;
     }
     return result->code;
+}
+
+int run_status_classifier_error_code(void)
+{
+    /* A classification failure is an observation failure, not a terminal
+     * verdict. Privileged work may still be running: rc7 only. */
+    return RUN_STATUS_TERMINAL_INDETERMINATE;
 }

@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove coordinator ownership spans child exit and final stdout EOF. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify operation-ID binding survives the full supervised process lifecycle. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover rc7 ownership retention only with connected fakes; live-child proof is native. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): a timeout observation plus rc7 keeps the barrier and never publishes TERMINAL. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -20,8 +21,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -158,6 +161,51 @@ public class RunCoordinatorProcessIntegrationTest {
         assertTrue(coordinator.recoverIndeterminate(
                 coordinator.getSnapshot().getOperationId()));
         assertEquals(1, secondLease.closeCount.get());
+    }
+
+    /**
+     * A timeout observation followed by an rc7 exit is unverified at the mapper
+     * and at the coordinator: no TERMINAL, no lease/config/barrier release.
+     */
+    @Test
+    public void timeoutFollowedByRc7KeepsBarrierLeaseAndFreeze() {
+        ConfigurationRepository repository = repository();
+        FakeProcess process = new FakeProcess();
+        process.scriptedTimedWaits.add(false);
+        process.exit(7);
+        AtomicReference<ConfigurationRepository.RunAdmission> admitted = new AtomicReference<>();
+        List<RunCoordinator.State> observed = new ArrayList<>();
+        RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
+            admitted.set(admission);
+            ChildProcessSupervisor.Result result = new ChildProcessSupervisor(
+                    ignored -> process, TEST_TIMEOUT_MS,
+                    ExploitRunner.childListener(reporter, events))
+                    .awaitExit(Collections.singletonList("fake-child"));
+            return ExploitRunner.mapProcessResult(result);
+        };
+        RunCoordinator coordinator = new RunCoordinator(repository, Runnable::run,
+                Runnable::run, engine, TEST_TIMEOUT_MS);
+        coordinator.addListener(snapshot -> observed.add(snapshot.getState()));
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        RunCoordinator.Snapshot held = coordinator.getSnapshot();
+
+        assertEquals(RunCoordinator.State.INDETERMINATE, held.getState());
+        assertEquals(ExploitRunner.RESULT_INDETERMINATE, held.getResult().getCode());
+        assertFalse(held.getResult().isSuccess());
+        assertTrue(held.getReason().contains("outcome unverified"));
+        assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
+        assertEquals(0, process.destroyCount.get());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(admitted.get().isActive());
+        assertTrue(repository.isFrozen());
+
+        assertTrue(coordinator.recoverIndeterminate(held.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(admitted.get().isActive());
+        assertFalse(repository.isFrozen());
     }
 
     @Test

@@ -790,23 +790,71 @@ public class RunCoordinatorTest {
     }
 
     @Test
-    public void engineExceptionClosesAdmissionAndLeaseExactlyOnce() throws Exception {
+    public void engineExceptionKeepsOwnershipUntilExplicitRecoveryThenClosesOnce() throws Exception {
         ConfigurationRepository repository = verifiedRepository();
-        RunCoordinator coordinator = coordinator(repository, worker, Runnable::run);
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
         FakeEngine.Plan plan = engine.immediatePlan(null);
         plan.failure = new IllegalStateException("engine failed");
         FakeLease lease = new FakeLease();
-        CountDownLatch terminal = terminalLatch(coordinator);
+        List<RunCoordinator.State> observed = new ArrayList<>();
+        coordinator.addListener(snapshot -> observed.add(snapshot.getState()));
 
         assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
-        await(terminal);
+        queuedWorker.runAll();
+        main.runAll();
 
-        assertEquals(RunResult.Type.INDETERMINATE, coordinator.getSnapshot().getResult().getType());
-        assertEquals(RunResult.Detail.EXCEPTION, coordinator.getSnapshot().getResult().getDetail());
-        assertTrue(coordinator.getSnapshot().getReason().contains("engine failed"));
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+        assertEquals(RunResult.Type.INDETERMINATE, unverified.getResult().getType());
+        assertEquals(RunResult.Detail.EXCEPTION, unverified.getResult().getDetail());
+        assertTrue(unverified.getResult().getReason().contains("engine failed"));
+        assertTrue(unverified.getReason().contains("outcome unverified"));
+        assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
         assertFalse(plan.call.admission.isActive());
         assertFalse(repository.isFrozen());
+        assertEquals(RunCoordinator.State.TERMINAL, coordinator.getSnapshot().getState());
+        assertEquals(RunResult.Detail.EXCEPTION, coordinator.getSnapshot().getResult().getDetail());
+    }
+
+    /** An unrecognized exit code is just as unverified as native rc7. */
+    @Test
+    public void unknownNativeExitKeepsLeaseFreezeAndBarrier() {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
+        FakeEngine.Plan plan = engine.immediatePlan(NativeResultMapper.map(255));
+        FakeLease lease = new FakeLease();
+        List<RunCoordinator.State> observed = new ArrayList<>();
+        coordinator.addListener(snapshot -> observed.add(snapshot.getState()));
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+        assertEquals(RunResult.Type.UNKNOWN, unverified.getResult().getType());
+        assertEquals(RunResult.Detail.NATIVE_EXIT, unverified.getResult().getDetail());
+        assertEquals(ExploitRunner.RESULT_UNKNOWN, unverified.getResult().getCode());
+        assertTrue(unverified.getReason().contains("outcome unverified"));
+        assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
         assertEquals(1, lease.closeCount.get());
+        assertFalse(plan.call.admission.isActive());
+        assertFalse(repository.isFrozen());
     }
 
     @Test

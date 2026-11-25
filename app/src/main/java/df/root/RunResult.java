@@ -1,4 +1,5 @@
 // Modified 2026-11-24 (DFRoot GZIF): add an immutable typed run result with explicit origin and process-uncertainty detail. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): add the single authoritative unverified-outcome predicate. See NOTICE.
 package df.root;
 
 /** Immutable result contract shared by native mapping, preflight, and callers. */
@@ -57,6 +58,29 @@ public final class RunResult {
 
     public boolean isSuccess() {
         return type == Type.SUCCESS;
+    }
+
+    /**
+     * The one authoritative predicate for outcomes whose completion was NOT
+     * confirmed. It covers exactly three cases:
+     * <ul>
+     *   <li>native rc=7: INDETERMINATE / NATIVE_EXIT / RESULT_INDETERMINATE,</li>
+     *   <li>an unrecognized native exit: UNKNOWN / NATIVE_EXIT / RESULT_UNKNOWN,</li>
+     *   <li>an engine exception observed before a confirmed result:
+     *       INDETERMINATE / EXCEPTION.</li>
+     * </ul>
+     * A proven pre-effect rejection (PRECHECK_FAILED / PREFLIGHT_REJECTION),
+     * a confirmed native code (rc0/1/2/3/4/6), and a supervision
+     * timeout/interruption that was followed by an observed exit are NOT
+     * unverified outcomes here: the latter two already carry a confirmed exit
+     * code and keep their dedicated timeout/interruption details.
+     */
+    public boolean isOutcomeUnverified() {
+        if (type == Type.UNKNOWN) {
+            return detail == Detail.NATIVE_EXIT;
+        }
+        return type == Type.INDETERMINATE
+                && (detail == Detail.NATIVE_EXIT || detail == Detail.EXCEPTION);
     }
 
     public static RunResult alreadyHooked() {

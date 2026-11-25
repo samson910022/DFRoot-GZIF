@@ -1,5 +1,6 @@
 // Modified 2026-11-25 (DFRoot GZIF): prove the durable attempt barrier survives process death and gates every admission. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover idempotent clears and bounded, non-dropping initialization. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): every unverified outcome holds the barrier; only confirmed codes clear it. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -26,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -472,6 +474,109 @@ public class RunCoordinatorAttemptTest {
             Files.deleteIfExists(artifact);
             Files.deleteIfExists(directory);
         }
+    }
+
+    /**
+     * Fake observation failures (rc7, unknown exits) and an unconfirmed engine
+     * exception must all keep the durable barrier, the lease, the config freeze
+     * and single-flight ownership, and must never publish a TERMINAL snapshot.
+     */
+    @Test
+    public void everyUnverifiedOutcomeRetainsBarrierLeaseAndFreeze() throws Exception {
+        List<RunResult> unverified = Arrays.asList(
+                NativeResultMapper.map(7),
+                NativeResultMapper.map(5),
+                NativeResultMapper.map(255),
+                NativeResultMapper.map(-1),
+                RunResult.exception(new IllegalStateException("reporter terminated unexpectedly")));
+        for (RunResult outcome : unverified) {
+            ConfigurationRepository localRepository = new ConfigurationRepository(
+                    new Store(), Runnable::run, Runnable::run);
+            localRepository.start();
+            ControllableStore localStore = new ControllableStore();
+            ScriptedEngine localEngine = new ScriptedEngine();
+            localEngine.results.add(outcome);
+            AtomicReference<ConfigurationRepository.RunAdmission> admitted =
+                    new AtomicReference<>();
+            localEngine.inspection = call -> admitted.set(call.admission);
+            RunCoordinator coordinator = new RunCoordinator(localRepository, Runnable::run,
+                    Runnable::run, localEngine, 0L, localStore, new MutableReader(BOOT_COUNT),
+                    Runnable::run);
+            coordinator.initialize();
+            List<RunCoordinator.State> observed = new ArrayList<>();
+            coordinator.addListener(snapshot -> observed.add(snapshot.getState()));
+            FakeLease lease = new FakeLease();
+
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    lease).isAccepted());
+            RunCoordinator.Snapshot held = coordinator.getSnapshot();
+
+            assertEquals("unverified outcome " + outcome.getType(),
+                    RunCoordinator.State.INDETERMINATE, held.getState());
+            assertTrue(held.getReason().contains("outcome unverified"));
+            assertTrue(outcome.isOutcomeUnverified());
+            assertFalse(observed.contains(RunCoordinator.State.TERMINAL));
+            OperationAttempt persisted = assertStoreAttempt(localStore, held.getOperationId());
+            assertTrue(persisted.isUnconfirmed());
+            assertEquals(0, lease.closeCount.get());
+            assertTrue(admitted.get().isActive());
+            assertTrue(localRepository.isFrozen());
+            assertFalse(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    new FakeLease()).isAccepted());
+
+            // The barrier is released only by an explicit, checked recovery.
+            assertTrue(coordinator.recoverIndeterminate(held.getOperationId()));
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(admitted.get().isActive());
+            assertFalse(localRepository.isFrozen());
+            assertNull(localStore.load());
+        }
+    }
+
+    /** Confirmed native codes always finish, close owned resources and clear the attempt. */
+    @Test
+    public void confirmedNativeCodesClearDurableAttemptAndFinish() throws Exception {
+        for (int code : new int[] {0, 1, 2, 3, 4, 6}) {
+            ConfigurationRepository localRepository = new ConfigurationRepository(
+                    new Store(), Runnable::run, Runnable::run);
+            localRepository.start();
+            ControllableStore localStore = new ControllableStore();
+            ScriptedEngine localEngine = new ScriptedEngine();
+            localEngine.results.add(NativeResultMapper.map(code));
+            AtomicReference<ConfigurationRepository.RunAdmission> admitted =
+                    new AtomicReference<>();
+            localEngine.inspection = call -> admitted.set(call.admission);
+            RunCoordinator coordinator = new RunCoordinator(localRepository, Runnable::run,
+                    Runnable::run, localEngine, 0L, localStore, new MutableReader(BOOT_COUNT),
+                    Runnable::run);
+            coordinator.initialize();
+            FakeLease lease = new FakeLease();
+
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    lease).isAccepted());
+            RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+
+            assertEquals("native rc=" + code, RunCoordinator.State.TERMINAL,
+                    terminal.getState());
+            assertEquals(NativeResultMapper.map(code).getType(), terminal.getResult().getType());
+            assertNull(localStore.load());
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(admitted.get().isActive());
+            assertFalse(localRepository.isFrozen());
+        }
+    }
+
+    private static OperationAttempt assertStoreAttempt(ControllableStore chosenStore,
+                                                       String operationId) {
+        OperationAttempt attempt;
+        try {
+            attempt = chosenStore.load();
+        } catch (OperationAttemptStore.Failure e) {
+            throw new AssertionError(e);
+        }
+        assertNotNull(attempt);
+        assertEquals(operationId, attempt.getOperationId());
+        return attempt;
     }
 
     private void publish(Path directory, String operationId) throws IOException {

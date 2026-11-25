@@ -4,6 +4,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link rc7-before-retraction window and verify a transient temp-unlink retry. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a harmless live fake child. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): inject a classifier observation failure and assert the reader exits rc7 with no confirmed result. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -1474,6 +1475,58 @@ static void test_pre_admission_decide_pure(void)
     run_status_decide(&admitted, 1, NULL);  /* NULL output must not crash */
 }
 
+/* An observation failure is not evidence of a safe terminal state. The host
+ * seam makes classification fail even though a confirmed rc0 marker exists;
+ * the shared failure mapping must still be rc7 with no confirmed result. */
+static void test_classifier_failure_indeterminate(void)
+{
+    configure(OUR_ID);
+    expect_write_ok(RUN_STATUS_TERMINAL_SUCCESS);
+
+    run_status_inject_classifier_failure(1);
+    struct run_status_result result;
+    memset(&result, 0xa5, sizeof(result));
+    if (run_status_classify(&result) == 0) {
+        die("injected classifier failure was reported as a successful observation");
+    }
+    if (result.verdict != RUN_STATUS_VERDICT_NONE || result.code != -1
+        || run_status_exit_code(&result) != -1) {
+        fprintf(stderr, "classifier failure produced a confirmed result: verdict=%d code=%d\n",
+                (int)result.verdict, result.code);
+        exit(1);
+    }
+    if (strstr(result.diagnostic, "completion unverified") == NULL) {
+        fprintf(stderr, "classifier failure diagnostic lacked 'completion unverified': '%s'\n",
+                result.diagnostic);
+        exit(1);
+    }
+    int exit_code = run_status_classifier_error_code();
+    if (exit_code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || exit_code == RUN_STATUS_TERMINAL_SUCCESS
+        || exit_code == RUN_STATUS_TERMINAL_ERROR) {
+        fprintf(stderr, "classifier failure mapped to definitive rc=%d\n", exit_code);
+        exit(1);
+    }
+    run_status_inject_classifier_failure(0);
+
+    /* With the fault removed the unchanged marker is still the only confirmed
+     * result: the injected failure never published or retracted anything. */
+    expect_terminal(RUN_STATUS_TERMINAL_SUCCESS);
+
+    if (source_dir == NULL) die("native source directory is required");
+    char *exp = read_native_source("exp.c");
+    char *e = normalize_whitespace(exp);
+    expect_contains(e, "rc = run_status_classifier_error_code();");
+    expect_contains(e,
+            "printf(\"terminal classifier error: %s; completion unverified\\n\", result.diagnostic);");
+    if (strstr(exp, "rc = RUN_STATUS_TERMINAL_ERROR") != NULL
+        || strstr(exp, "rc = RUN_STATUS_TERMINAL_SUCCESS") != NULL) {
+        die("classifier failure still exits a definitive code");
+    }
+    free(exp);
+    free(e);
+}
+
 static void run_case(const char *name)
 {
     if (!strcmp(name, "rc0")) {
@@ -1578,6 +1631,8 @@ static void run_case(const char *name)
         test_pre_admission_ignored_markers();
     } else if (!strcmp(name, "pre_admission_decide_pure")) {
         test_pre_admission_decide_pure();
+    } else if (!strcmp(name, "classifier_failure_indeterminate")) {
+        test_classifier_failure_indeterminate();
     } else if (!strcmp(name, "bounded_wait")) {
         test_bounded_wait();
     } else if (!strcmp(name, "deadline_composition")) {

@@ -5,6 +5,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): reader expiry is rc7 and the late-load command/poll share one budget. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): map a terminal classifier observation failure to rc7 through one shared helper. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
@@ -220,6 +221,13 @@ int run_status_wait_continues(int64_t elapsed_ms, int64_t limit_ms);
  * code, NONE -> -1 (keep polling). */
 int run_status_exit_code(const struct run_status_result *result);
 
+/* A failed terminal CLASSIFICATION (as opposed to a terminal marker verdict)
+ * observes no completed outcome. Privileged children may still be running, so
+ * the single shared mapping is the indeterminate code rc7 - it can never be a
+ * definitive rc0/rc1, and it never confirms any marker that happens to exist.
+ * The native reader uses this helper for its classifier-error exit. */
+int run_status_classifier_error_code(void);
+
 #ifdef RUN_STATUS_TEST_HOOKS
 /* Host-only fault injection; production binaries omit this entirely. */
 enum run_status_fault {
@@ -233,6 +241,10 @@ enum run_status_fault {
     RUN_STATUS_FAULT_UNLINK_TEMP = 1 << 4
 };
 void run_status_inject_fault(int fault);
+
+/* Host-only: make run_status_classify() fail as if the terminal observation
+ * could not be completed. No marker is produced or confirmed by this seam. */
+void run_status_inject_classifier_failure(int enabled);
 
 /* Deterministic reader/writer handshakes for host tests. The writer announces
  * on notify_fd that it is paused, then blocks reading one byte from wait_fd.

@@ -5,6 +5,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): iterate the shared progress table and bound the reader with the composed deadline. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map reader deadline expiry to rc7, never a definitive failure while children are alive. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): consume the reserved pre-admission failure as an explicit indeterminate reader outcome. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): a terminal classifier observation failure is indeterminate rc7, never a definitive rc1/rc0. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -585,8 +586,11 @@ static int exploit(void) {
 
         struct run_status_result result;
         if (run_status_classify(&result) != 0) {
-            printf("terminal classifier error: %s\n", result.diagnostic);
-            rc = RUN_STATUS_TERMINAL_ERROR;
+            /* No terminal marker could be OBSERVED. Privileged children may
+             * still be running, so the absence of a recognized result is not
+             * evidence of a safe terminal state: rc7, never rc1/rc0. */
+            printf("terminal classifier error: %s; completion unverified\n", result.diagnostic);
+            rc = run_status_classifier_error_code();
             goto done;
         }
         /* A reserved pre-admission rc=1 marker is a diagnostic, not a terminal

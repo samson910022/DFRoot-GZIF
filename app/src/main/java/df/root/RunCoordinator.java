@@ -6,6 +6,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): recovery is single-claim and trusted-caller-only. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): persist an unconfirmed admission barrier across process death. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): make durable attempt clearing idempotent and await init without dropping requests. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): every unverified outcome keeps the barrier; only proven outcomes clear it. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -400,6 +401,9 @@ public final class RunCoordinator {
         try {
             workerExecutor.execute(() -> start(operation));
         } catch (RuntimeException e) {
+            // Dispatch itself failed: the engine was never started, so this is
+            // a proven pre-effect rejection with no unverified work to retain.
+            // Engine results and engine exceptions are routed by complete().
             RunResult failure = RunResult.exception(e);
             finish(operation, failure, failure.getReason());
         }
@@ -506,21 +510,29 @@ public final class RunCoordinator {
             if (completed == null) {
                 throw new IllegalStateException("engine returned null");
             }
-            if (isUnverifiedNativeResult(completed)) {
-                // Native rc=7 means completion was never confirmed. A timeout or
-                // a direct child exit must never be reported as the whole
-                // operation being done: keep the lease, the frozen config and
-                // single-flight admission until an explicit recovery.
-                markOutcomeUnverified(operation, completed);
-            } else {
-                finish(operation, completed, completed.getReason());
-            }
+            complete(operation, completed, completed.getReason());
         } catch (Exception e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
+            // The engine escaped without a confirmed result: privileged work may
+            // still be running, so this is unverified too. Route it through the
+            // SAME decision as a returned result, never straight to finish().
             RunResult failure = RunResult.exception(e);
-            finish(operation, failure, failure.getReason());
+            complete(operation, failure, failure.getReason());
+        }
+    }
+
+    /**
+     * The single routing decision for engine results and engine exceptions.
+     * Every unverified outcome keeps ownership; only confirmed/proven results
+     * may reach {@link #finish()}.
+     */
+    private void complete(Operation operation, RunResult result, String reason) {
+        if (result != null && result.isOutcomeUnverified()) {
+            markOutcomeUnverified(operation, result);
+        } else {
+            finish(operation, result, reason);
         }
     }
 
@@ -545,18 +557,6 @@ public final class RunCoordinator {
             snapshot = changed;
         }
         notifyListeners(changed);
-    }
-
-    /**
-     * Native rc=7 is mapped to this exact typed result. It is the only engine
-     * result that means "completion was never confirmed" rather than an
-     * observed exit, a supervision timeout/interruption, or an exception.
-     */
-    private static boolean isUnverifiedNativeResult(RunResult result) {
-        return result != null
-                && result.getType() == RunResult.Type.INDETERMINATE
-                && result.getDetail() == RunResult.Detail.NATIVE_EXIT
-                && result.getCode() == ExploitRunner.RESULT_INDETERMINATE;
     }
 
     /**
@@ -731,10 +731,14 @@ public final class RunCoordinator {
 
     /**
      * Closes resources once, then publishes TERMINAL only after cleanup has
-     * finished. A confirmed result also needs a checked durable clear: a false
-     * or throwing clear keeps ownership as INDETERMINATE and never publishes a
-     * confirmed TERMINAL. {@link Operation#attemptCleared} makes a later clear
-     * after explicit recovery idempotent, so cleanup cannot be stranded.
+     * finished. The durable attempt is cleared ONLY for a proven pre-effect
+     * rejection or a confirmed completion: an unverified outcome (native rc7,
+     * unknown exit, engine exception) and an observation-only
+     * timeout/interruption keep the barrier. A candidate that needs a clear
+     * also needs it to succeed: a false or throwing clear keeps ownership as
+     * INDETERMINATE and never publishes a confirmed TERMINAL.
+     * {@link Operation#attemptCleared} makes a later clear after explicit
+     * recovery idempotent, so cleanup cannot be stranded.
      */
     private void finish(Operation operation, RunResult completed, String completedReason) {
         RunResult terminalResult = null;
@@ -761,6 +765,7 @@ public final class RunCoordinator {
                 candidateReason = candidate.getReason();
             }
             if (candidate.getType() != RunResult.Type.INDETERMINATE
+                    && !candidate.isOutcomeUnverified()
                     && !operation.attemptCleared) {
                 boolean cleared;
                 String failure = null;

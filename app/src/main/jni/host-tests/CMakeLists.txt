@@ -10,6 +10,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a live fake child. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover reader rc7 timeout, shared late-load budget, and fork-failure mapping. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover the reserved pre-admission diagnostic and the pure reader decision helper. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): register the harmless classifier-failure rc7 reader case. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -234,6 +235,7 @@ foreach(status_case IN ITEMS
         pre_admission_terminal_wins
         pre_admission_ignored_markers
         pre_admission_decide_pure
+        classifier_failure_indeterminate
         unconfigured)
     add_test(NAME run_status.${status_case}
              COMMAND run_status_test ${status_case} "${RUN_STATUS_TEST_ROOT}/${status_case}"

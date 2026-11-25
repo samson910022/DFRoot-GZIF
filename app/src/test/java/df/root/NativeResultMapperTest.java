@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify every native code maps to a complete typed result. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify native rc=7 maps only to indeterminate, never success. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): tie every mapped exit to the authoritative unverified predicate. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -64,6 +65,21 @@ public class NativeResultMapperTest {
         assertEquals(expectedDetail, result.getDetail());
         assertEquals(expectedReason, result.getReason());
         assertEquals(expectedType == RunResult.Type.SUCCESS, result.isSuccess());
+    }
+
+    /** Mutation guard: rc7 and only unrecognized exits are unverified outcomes. */
+    @Test
+    public void mappedExitAgreesWithTheAuthoritativeUnverifiedPredicate() {
+        for (Object[] testCase : codes()) {
+            int code = (Integer) testCase[0];
+            boolean expected = code == 7 || !isConfirmedNativeCode(code);
+            assertEquals("native rc=" + code + " disagrees with the unverified predicate",
+                    expected, NativeResultMapper.map(code).isOutcomeUnverified());
+        }
+    }
+
+    private static boolean isConfirmedNativeCode(int code) {
+        return code == 0 || code == 1 || code == 2 || code == 3 || code == 4 || code == 6;
     }
 
     /** rc=7 owns the indeterminate contract and cannot alias any other native rc. */
