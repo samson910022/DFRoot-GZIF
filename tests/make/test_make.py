@@ -10,6 +10,7 @@ failure or leak a credential into the assertions.
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 import shutil
@@ -50,6 +51,19 @@ FORBIDDEN_CONTAINER_FLAGS = (
     "--cap-add", "--privileged", "--pid", "--ipc=host", "--user=", "--userns=host",
 )
 CREDENTIAL_ECHO_TOKENS = ("$$SIGN_PASS", "$$SIGN_ALIAS")
+
+# Values that are mangled by re-expanding an environment-origin Make variable
+# (`$(SIGN_PASS)`) but survive `$(value SIGN_PASS)` byte-for-byte.  No embedded
+# newlines: the stub's capture format is line-oriented.
+RAW_CREDENTIAL_CASES = (
+    ("literal_dollars", "abc$xyz$$tail", "alias$xy"),
+    ("trailing_dollars", "password$$", "alias$$"),
+    ("backslashes", r"back\slash\\tail", r"alias\back"),
+    ("leading_trailing_whitespace", "  padded password  ", "  padded alias  "),
+    ("tabs", "\tTabbed\tpassword\t", "\tTabbed\talias\t"),
+    ("non_bmp_unicode", "p😀ss汉🔐字", "ali😀as漢"),
+    ("combined", "  c😀mb\\ined$$ \t 汉 ", "  a\\lias$😀\t字  "),
+)
 
 
 def clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -212,7 +226,7 @@ class CredentialContractTests(unittest.TestCase):
             self.assertNotIn(f"\nexport {variable}\n", makefile)
             export_line = (
                 "keystore.jks signing.properties verify-signing-permissions: "
-                f"export {variable} := $({variable})"
+                f"export {variable} := $(value {variable})"
             )
             self.assertIn(export_line, makefile)
 
@@ -465,6 +479,7 @@ class StubJavaSigningRecipeTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.project = Path(self.directory.name)
         self.capture = self.project / "captured.env"
+        self.byte_capture = Path(str(self.capture) + ".bytes")
         self.stub = self.project / "fake-java"
         self.stub.write_text(
             "#!/usr/bin/env bash\n"
@@ -473,10 +488,51 @@ class StubJavaSigningRecipeTests(unittest.TestCase):
             '  printf "SIGN_PASS=%s\\n" "${SIGN_PASS-<unset>}"\n'
             '  printf "SIGN_ALIAS=%s\\n" "${SIGN_ALIAS-<unset>}"\n'
             '  printf "ARGS=%s\\n" "$*"\n'
-            '} > "$CAPTURE_FILE"\n',
+            '} > "$CAPTURE_FILE"\n'
+            # Append-only, mode-tagged base64 capture: a single make invocation
+            # can call the stub more than once (verify-local then local), and
+            # the block above truncates $CAPTURE_FILE on each call.
+            'printf "MODE=%s\\n" "${2-}" >> "$CAPTURE_FILE.bytes"\n'
+            'printf \'SIGN_PASS_B64=%s\\n\' "$(printf \'%s\' "${SIGN_PASS-}" | base64 -w0)" >> "$CAPTURE_FILE.bytes"\n'
+            'printf \'SIGN_ALIAS_B64=%s\\n\' "$(printf \'%s\' "${SIGN_ALIAS-}" | base64 -w0)" >> "$CAPTURE_FILE.bytes"\n',
             encoding="utf-8",
         )
         self.stub.chmod(0o755)
+
+    def reset_byte_capture(self) -> None:
+        self.byte_capture.unlink(missing_ok=True)
+
+    def assert_raw_credentials(
+        self, password: str, alias: str, modes: tuple[str, ...]
+    ) -> None:
+        """Decode the stub's base64 capture and require exact UTF-8 bytes per mode."""
+        self.assertTrue(
+            self.byte_capture.exists(), "stub JAVA did not run (no byte capture file)"
+        )
+        lines = self.byte_capture.read_text(encoding="ascii").splitlines()
+        self.assertTrue(lines, "stub JAVA did not capture any values")
+        captured: dict[str, dict[str, bytes]] = {}
+        mode: str | None = None
+        for line in lines:
+            if line.startswith("MODE="):
+                mode = line[len("MODE="):]
+                captured.setdefault(mode, {})
+                continue
+            key, _, encoded = line.partition("=")
+            self.assertIsNotNone(mode, f"byte capture line without a MODE: {line!r}")
+            self.assertNotIn(key, captured[mode], f"duplicate capture for {key} in {mode}")
+            captured[mode][key] = base64.b64decode(encoded, validate=True)
+        self.assertEqual(tuple(captured), modes, f"unexpected stub modes: {captured!r}")
+        for expected_mode in modes:
+            with self.subTest(mode=expected_mode):
+                values = captured[expected_mode]
+                self.assertEqual(
+                    set(values),
+                    {"SIGN_PASS_B64", "SIGN_ALIAS_B64"},
+                    f"incomplete byte capture for {expected_mode}: {values!r}",
+                )
+                self.assertEqual(values["SIGN_PASS_B64"], password.encode("utf-8"))
+                self.assertEqual(values["SIGN_ALIAS_B64"], alias.encode("utf-8"))
 
     def test_credentials_reach_the_java_recipe(self) -> None:
         env = clean_env({
@@ -498,6 +554,39 @@ class StubJavaSigningRecipeTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("SIGN_PASS is not set", result.stderr)
         self.assertFalse(self.capture.exists())
+
+    def stub_env(self, password: str, alias: str) -> dict[str, str]:
+        return clean_env({
+            "JAVA": str(self.stub),
+            "CAPTURE_FILE": str(self.capture),
+            "SIGN_PASS": password,
+            "SIGN_ALIAS": alias,
+        })
+
+    def test_recipe_boundary_preserves_raw_credentials_for_new_keystore(self) -> None:
+        for name, password, alias in RAW_CREDENTIAL_CASES:
+            with self.subTest(case=name):
+                self.reset_byte_capture()
+                result = run_make(
+                    "KMIS=", "keystore.jks", cwd=self.project,
+                    env=self.stub_env(password, alias), dry_run=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_raw_credentials(password, alias, ("create-local",))
+
+    def test_recipe_boundary_preserves_raw_credentials_for_existing_keystore(self) -> None:
+        for name, password, alias in RAW_CREDENTIAL_CASES:
+            with self.subTest(case=name):
+                self.reset_byte_capture()
+                # Stub JAVA does not validate the keystore, so any regular file
+                # is enough to select the existing-keystore path.
+                (self.project / "keystore.jks").write_bytes(b"dummy keystore\n")
+                result = run_make(
+                    "KMIS=", "signing.properties", cwd=self.project,
+                    env=self.stub_env(password, alias), dry_run=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_raw_credentials(password, alias, ("verify-local", "local"))
 
 
 class LkmMakefileTests(unittest.TestCase):

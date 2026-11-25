@@ -47,6 +47,23 @@ SPECIAL_VALUES = {
     "non_bmp": "password-😀-🔐-𝄞",
 }
 
+# Make-specific boundary cases.  These deliberately mirror the byte-level cases
+# in tests/make/test_make.py (RAW_CREDENTIAL_CASES); values must also satisfy
+# keytool's >=6-character password rule in the create-local path.  If keytool
+# legitimately rejects a value (for example a password that is too short), the
+# strict byte-boundary assertions in test_make.py remain the authoritative
+# coverage and only the keytool-compatible subset belongs here.
+MAKE_SPECIAL_VALUES = (
+    ("literal_dollar", "bc$defgh", "alias$x"),
+    ("double_dollar", "pass$$word", "alias$$xy"),
+    ("backslashes", r"back\slash\\pwd", r"alias\back"),
+    ("whitespace", "  spaced pass  ", "  spaced alias  "),
+    ("tabs", "tab\there\tvalue", "tab\talias\tval"),
+    ("cjk", "漢字かなパス", "漢字エイリアス"),
+    ("non_bmp", "p😀ss🔐word", "ali😀as𝄞xyz"),
+    ("combined", "  c😀mb\\ined$$ \t 汉字 ", "  a\\lias$😀\t字  "),
+)
+
 
 def filesystem_type(path: Path) -> str:
     try:
@@ -1047,6 +1064,48 @@ class MakeSigningTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE((project / "keystore.jks").stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE((project / "signing.properties").stat().st_mode), 0o600)
             self.assert_properties(project, password, alias, "C")
+
+    def test_make_new_keystore_round_trips_shell_metacharacters_and_unicode(self) -> None:
+        for name, password, alias in MAKE_SPECIAL_VALUES:
+            with self.subTest(value=name):
+                for locale in LOCALES:
+                    with self.subTest(locale=locale):
+                        with tempfile.TemporaryDirectory(
+                            prefix="dfroot-make-special-create-", dir=SUPPORTING_ROOTS[0][0]
+                        ) as directory:
+                            project = Path(directory)
+                            self.prepare_project(project, password, alias, create_keystore=False)
+                            result = self.run_make(
+                                project,
+                                {"SIGN_PASS": password, "SIGN_ALIAS": alias},
+                                locale,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assert_properties(project, password, alias, locale)
+
+    def test_make_existing_keystore_unlocks_with_independently_established_credentials(self) -> None:
+        for name, password, alias in MAKE_SPECIAL_VALUES:
+            with self.subTest(value=name):
+                for locale in LOCALES:
+                    with self.subTest(locale=locale):
+                        with tempfile.TemporaryDirectory(
+                            prefix="dfroot-make-special-existing-", dir=SUPPORTING_ROOTS[0][0]
+                        ) as directory:
+                            project = Path(directory)
+                            self.prepare_project(project, password, alias, create_keystore=False)
+                            # Established without Make's create-local: this is the
+                            # credential value Make must deliver unchanged when it
+                            # unlocks an already-existing keystore.
+                            write_fixture_keystore(
+                                self.source_keystore, project / "keystore.jks", password, alias
+                            )
+                            result = self.run_make(
+                                project,
+                                {"SIGN_PASS": password, "SIGN_ALIAS": alias},
+                                locale,
+                            )
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            self.assert_properties(project, password, alias, locale)
 
 
 class GradleSigningConfigTests(unittest.TestCase):

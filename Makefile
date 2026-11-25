@@ -52,10 +52,13 @@ DDK_IMAGE ?= $(if $(strip $(KMIS)),$(shell bash scripts/ddk-image.sh $(KMIS)),)
 
 # Credentials are exported only into signing recipes (and inherited by their
 # prerequisites), never globally: clean, dry runs and LKM/DDK targets do not
-# need them.  Verification stays phony so it runs on every signing build, while
-# order-only prerequisites prevent needless rewriting of up-to-date material.
-keystore.jks signing.properties verify-signing-permissions: export SIGN_PASS := $(SIGN_PASS)
-keystore.jks signing.properties verify-signing-permissions: export SIGN_ALIAS := $(SIGN_ALIAS)
+# need them.  Environment-origin variables are imported as recursively expanded,
+# so `:= $(SIGN_PASS)` would re-expand the value and corrupt literal `$` bytes.
+# `$(value ...)` takes the raw text instead, preserving it byte-for-byte.
+# Verification stays phony so it runs on every signing build, while order-only
+# prerequisites prevent needless rewriting of up-to-date material.
+keystore.jks signing.properties verify-signing-permissions: export SIGN_PASS := $(value SIGN_PASS)
+keystore.jks signing.properties verify-signing-permissions: export SIGN_ALIAS := $(value SIGN_ALIAS)
 
 LKM_SRCS    := lkm/dfroot.c lkm/Makefile
 LKM_KO_DIR  := app/src/main/jni/ko
