@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify modal consent and durable settings-state reflection. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recheck settings observation against operation-ID-bound run admission. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): verify OFF stays reachable in ERROR/active runs and component failures surface. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -13,6 +14,7 @@ import static org.junit.Assert.assertTrue;
 import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.preference.Preference;
 import android.preference.SwitchPreference;
 
@@ -148,7 +150,7 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void failedWriteShowsErrorAndDisablesBootAndDangerousSwitches() {
+    public void failedWriteShowsErrorAndKeepsBootOffSwitchAvailable() {
         launch(RunConfig.defaults());
         store.results.add(false);
         store.results.add(true);
@@ -162,7 +164,8 @@ public class SettingsFragmentTest {
         assertFalse(disableModules.isChecked());
         assertFalse(disableModules.isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
-        assertFalse(boot.isEnabled());
+        // ERROR must not hide the OFF direction; only ON stays gated.
+        assertTrue(boot.isEnabled());
         assertTrue(preference("configuration_status").getSummary().toString()
                 .contains("Configuration error"));
         assertFalse(repository.getConfirmedSnapshot().isDisableModules());
@@ -281,7 +284,7 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void frozenConfigurationDisablesDangerousSwitchesUntilReleased() {
+    public void frozenConfigurationKeepsBootOffAvailableButDisablesDangerousSwitches() {
         launch(RunConfig.defaults());
         ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
                 RunConfig.ExecutionMode.MANUAL);
@@ -289,7 +292,7 @@ public class SettingsFragmentTest {
 
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
-        assertFalse(preference("boot_start").isEnabled());
+        assertTrue(preference("boot_start").isEnabled());
 
         admission.close();
         ShadowLooper.idleMainLooper();
@@ -298,7 +301,7 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void startingCoordinatorDisablesBootAndDangerousSwitchesUntilTerminal() {
+    public void startingCoordinatorKeepsBootOffAvailableAndDisablesDangerousSwitches() {
         launch(RunConfig.defaults());
         FakeLease lease = new FakeLease();
         assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
@@ -339,12 +342,13 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void runningCoordinatorDisablesBootAndDangerousSwitches() throws Exception {
+    public void runningCoordinatorKeepsBootOffAvailableAndDisablesDangerousSwitches() throws Exception {
         assertActiveCoordinatorDisablesDangerousControls(false);
     }
 
     @Test
-    public void indeterminateCoordinatorDisablesBootAndDangerousSwitches() throws Exception {
+    public void indeterminateCoordinatorKeepsBootOffAvailableAndDisablesDangerousSwitches()
+            throws Exception {
         assertActiveCoordinatorDisablesDangerousControls(true);
     }
 
@@ -365,6 +369,151 @@ public class SettingsFragmentTest {
         assertActiveChangeListenersRejected();
         assertEquals(0, store.writes.size());
         engine.finish();
+    }
+
+    @Test
+    public void disableFromErrorConfigurationTurnsOffBootWithoutCoordinatorChanges() {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        launch(RunConfig.defaults());
+        SwitchPreference boot = preference("boot_start");
+        assertTrue(boot.isChecked());
+
+        store.results.add(false);
+        store.results.add(true);
+        toggle(preference(ConfigurationKeys.PREF_DISABLE_MODULES));
+        configExecutor.runNext();
+        ShadowLooper.idleMainLooper();
+
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED, bootComponentState());
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+        int writesBefore = store.writes.size();
+
+        toggle(boot);
+
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
+        assertFalse(boot.isChecked());
+        assertTrue(boot.isEnabled());
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+        assertSame(before, coordinator.getSnapshot());
+        assertEquals(writesBefore, store.writes.size());
+    }
+
+    @Test
+    public void enablingFromErrorConfigurationIsStillRejected() {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+        launch(RunConfig.defaults());
+        store.results.add(false);
+        store.results.add(true);
+        toggle(preference(ConfigurationKeys.PREF_DISABLE_MODULES));
+        configExecutor.runNext();
+        ShadowLooper.idleMainLooper();
+        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
+
+        Object accepted = ReflectionHelpers.callInstanceMethod(preference("boot_start"),
+                "callChangeListener", ReflectionHelpers.ClassParameter.from(Object.class, true));
+
+        assertEquals(Boolean.FALSE, accepted);
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
+    }
+
+    @Test
+    public void disableDuringActiveSnapshotsTurnsOffBootAndStillRejectsEnabling() {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        launch(RunConfig.defaults());
+        SwitchPreference boot = preference("boot_start");
+
+        for (RunCoordinator.State state : new RunCoordinator.State[] {
+                RunCoordinator.State.STARTING, RunCoordinator.State.RUNNING,
+                RunCoordinator.State.INDETERMINATE}) {
+            RunCoordinator.Snapshot snapshot = new RunCoordinator.Snapshot(state,
+                    "op-" + state, RunConfig.ExecutionMode.MANUAL, 0L, null, null, null,
+                    new ArrayList<>());
+            ReflectionHelpers.setField(coordinator, "snapshot", snapshot);
+            ReflectionHelpers.callInstanceMethod(fragment, "renderConfirmedConfiguration");
+            setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+            boot.setChecked(true);
+
+            assertTrue(state + " must still allow OFF", boot.isEnabled());
+            Object enableAccepted = ReflectionHelpers.callInstanceMethod(boot,
+                    "callChangeListener",
+                    ReflectionHelpers.ClassParameter.from(Object.class, true));
+            assertEquals(state + " must reject ON", Boolean.FALSE, enableAccepted);
+            assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED, bootComponentState());
+
+            toggle(boot);
+
+            assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
+            assertFalse(boot.isChecked());
+            assertSame(snapshot, coordinator.getSnapshot());
+        }
+    }
+
+    @Test
+    public void disableDoesNotCancelOrCloseAnActiveOperation() throws Exception {
+        store = new FakeStore(RunConfig.defaults());
+        configExecutor = new QueueExecutor();
+        repository = new ConfigurationRepository(store, configExecutor, Runnable::run);
+        repository.start();
+        configExecutor.runNext();
+        ConfigurationRepository.setInstanceForTesting(repository);
+        FakeLease lease = new FakeLease();
+        BlockingEngine engine = installBlockingCoordinator(false, lease);
+        launchWithExistingConfiguration();
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        SwitchPreference boot = preference("boot_start");
+        boot.setChecked(true);
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.RUNNING, before.getState());
+
+        toggle(boot);
+
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
+        assertSame(before, coordinator.getSnapshot());
+        assertEquals(0, lease.closeCount.get());
+        engine.finish();
+    }
+
+    @Test
+    public void failedComponentSettingSurfacesErrorAndKeepsPreviouslyAppliedState() {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        launch(RunConfig.defaults());
+        SwitchPreference boot = preference("boot_start");
+        assertTrue(boot.isChecked());
+        FakeBootComponents controller = new FakeBootComponents(
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        controller.failure = new IllegalStateException("package manager rejected");
+        ReflectionHelpers.setField(fragment, "mBootComponents", controller);
+
+        toggle(boot);
+
+        assertTrue(boot.isChecked());
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED, bootComponentState());
+        String summary = boot.getSummary().toString();
+        assertTrue(summary, summary.contains("Could not change Start at Boot"));
+        assertTrue(summary, summary.contains("failed"));
+        assertTrue(summary, summary.contains("package manager rejected"));
+        assertTrue(preference("configuration_status").getSummary().toString()
+                .contains("package manager rejected"));
+        assertEquals(1, controller.setCalls);
+    }
+
+    @Test
+    public void componentThatIgnoresDisableIsNotReportedAsApplied() {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        launch(RunConfig.defaults());
+        SwitchPreference boot = preference("boot_start");
+        assertTrue(boot.isChecked());
+        FakeBootComponents controller = new FakeBootComponents(
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        controller.stuck = true;
+        ReflectionHelpers.setField(fragment, "mBootComponents", controller);
+
+        toggle(boot);
+
+        assertTrue(boot.isChecked());
+        assertTrue(boot.getSummary().toString().contains("Could not change Start at Boot"));
+        assertEquals(1, controller.setCalls);
     }
 
     @Test
@@ -596,6 +745,11 @@ public class SettingsFragmentTest {
     }
 
     private BlockingEngine installBlockingCoordinator(boolean indeterminate) throws Exception {
+        return installBlockingCoordinator(indeterminate, new FakeLease());
+    }
+
+    private BlockingEngine installBlockingCoordinator(boolean indeterminate, FakeLease lease)
+            throws Exception {
         BlockingEngine engine = new BlockingEngine(indeterminate);
         blockingEngines.add(engine);
         ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -604,14 +758,15 @@ public class SettingsFragmentTest {
                 ConfigurationRepository.newMainExecutor(), engine, 0L);
         RunCoordinator.setInstanceForTesting(coordinator);
         assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
-                RunConfig.ExecutionMode.MANUAL, new FakeLease()).isAccepted());
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
         assertTrue(engine.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         ShadowLooper.idleMainLooper();
         return engine;
     }
 
     private void assertDangerousControlsDisabled() {
-        assertFalse(preference("boot_start").isEnabled());
+        // Start at Boot stays reachable for OFF even while another run is active.
+        assertTrue(preference("boot_start").isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
     }
@@ -660,6 +815,48 @@ public class SettingsFragmentTest {
     private boolean isVisible(Preference preference) {
         return preference != null
                 && fragment.getPreferenceScreen().findPreference(preference.getKey()) != null;
+    }
+
+    private static void setBootComponent(int state) {
+        Context ctx = RuntimeEnvironment.getApplication();
+        ctx.getPackageManager().setComponentEnabledSetting(
+                new ComponentName(ctx, BootReceiver.class), state, PackageManager.DONT_KILL_APP);
+    }
+
+    private static int bootComponentState() {
+        Context ctx = RuntimeEnvironment.getApplication();
+        return ctx.getPackageManager().getComponentEnabledSetting(
+                new ComponentName(ctx, BootReceiver.class));
+    }
+
+    /** Injectable failing/stuck PackageManager seam for the boot toggle. */
+    private static final class FakeBootComponents
+            implements SettingsFragment.BootComponentController {
+        int state;
+        boolean stuck;
+        RuntimeException failure;
+        int setCalls;
+
+        FakeBootComponents(int state) {
+            this.state = state;
+        }
+
+        @Override
+        public int read(Context context, ComponentName component) {
+            return state;
+        }
+
+        @Override
+        public int set(Context context, ComponentName component, int newState) {
+            setCalls++;
+            if (failure != null) {
+                throw failure;
+            }
+            if (!stuck) {
+                state = newState;
+            }
+            return state;
+        }
     }
 
     private static final class FakeLease implements ResourceLease {

@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): verify boot action validation, explicit service requests, prompt return, and absence of receiver-owned work. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify goAsync claim gating, coalescing, prompt return, and narrow receiver ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): make finish observation deterministic and add real-store restart coverage. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): model the Start at Boot component state in production-path tests. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -15,6 +16,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.provider.Settings;
 
 import org.junit.After;
@@ -64,6 +66,9 @@ public class BootReceiverBoundaryTest {
                 Context.MODE_PRIVATE).edit().clear().commit();
         Settings.Global.putInt(context.getContentResolver(), Settings.Global.BOOT_COUNT,
                 (int) BOOT_COUNT);
+        // Start at Boot is a separate component setting. Model the owner having
+        // enabled it before exercising normal boot paths.
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
     }
 
     @After
@@ -71,6 +76,12 @@ public class BootReceiverBoundaryTest {
         RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
+    }
+
+    private void setBootComponent(int state) {
+        context.getPackageManager().setComponentEnabledSetting(
+                new ComponentName(context, BootReceiver.class), state,
+                PackageManager.DONT_KILL_APP);
     }
 
     @Test
@@ -133,6 +144,34 @@ public class BootReceiverBoundaryTest {
 
         // The latch proves the duplicate worker is done, so this is a stable assertion.
         assertNull(shadowApplication.getNextStartedService());
+    }
+
+    @Test
+    public void productionBootRequestAfterOffDoesNotStartTheService() throws Exception {
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+        CountDownLatch finished = new CountDownLatch(1);
+        BootReceiver.submitClaim(context, BootClaimCoordinator::production,
+                finished::countDown, BootReceiver::startUnattendedService);
+
+        assertTrue("claim worker did not finish", finished.await(5L, TimeUnit.SECONDS));
+        assertNull(shadowApplication.getNextStartedService());
+    }
+
+    @Test
+    public void freshInstallDefaultComponentStateDoesNotClaimOrStartService() throws Exception {
+        // Fresh install leaves the component at DEFAULT (the manifest declares it
+        // disabled). The production gate must fail closed on that real state.
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+        CountDownLatch finished = new CountDownLatch(1);
+        BootReceiver.submitClaim(context, BootClaimCoordinator::production,
+                finished::countDown, BootReceiver::startUnattendedService);
+
+        assertTrue("claim worker did not finish", finished.await(5L, TimeUnit.SECONDS));
+        assertNull(shadowApplication.getNextStartedService());
+        SharedPreferences bootPrefs = deContext.getSharedPreferences(
+                SharedPreferencesBootClaimStore.PREFS_NAME, Context.MODE_PRIVATE);
+        assertFalse(bootPrefs.contains(
+                SharedPreferencesBootClaimStore.KEY_LAST_CLAIMED_BOOT_COUNT));
     }
 
     @Test

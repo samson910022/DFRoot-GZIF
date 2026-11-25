@@ -1,8 +1,11 @@
 // Modified 2026-11-25 (DFRoot GZIF): add the short off-main durable boot claim before explicit service start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): suppress boot claims while an unconfirmed attempt survives process death. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): re-check the Start at Boot component at claim time so queued claims honor OFF. See NOTICE.
 package df.root;
 
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.util.Log;
 
 import java.util.Objects;
@@ -24,6 +27,33 @@ final class BootClaimCoordinator {
     /** Narrow seam for the receiver's goAsync() PendingResult. */
     interface Finisher {
         void finish();
+    }
+
+    /**
+     * Read-only, claim-time gate for the separate Start at Boot component setting.
+     * Production reads PackageManager; pure JVM tests inject ENABLED, DISABLED or
+     * UNREADABLE (including a throwing reader) without any Android runtime.
+     */
+    interface BootComponentGate {
+        enum State { ENABLED, DISABLED, UNREADABLE }
+
+        BootComponentGate PACKAGE_MANAGER = context -> {
+            // Pure-JVM seam callers pass a null context; there is no component to
+            // inspect and no start to suppress there. Production never does.
+            if (context == null) {
+                return State.ENABLED;
+            }
+            try {
+                int setting = context.getPackageManager().getComponentEnabledSetting(
+                        new ComponentName(context, BootReceiver.class));
+                return setting == PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                        ? State.ENABLED : State.DISABLED;
+            } catch (RuntimeException e) {
+                return State.UNREADABLE;
+            }
+        };
+
+        State read(Context context);
     }
 
     /** Diagnostics seam so pure contract tests never touch android.util.Log. */
@@ -54,6 +84,7 @@ final class BootClaimCoordinator {
     private final BootCountReader reader;
     private final BootClaimStore store;
     private final OperationAttemptStore attemptStore;
+    private final BootComponentGate componentGate;
     private final Executor executor;
     private final Logger logger;
     private final boolean shutdownAfterSubmit;
@@ -67,9 +98,24 @@ final class BootClaimCoordinator {
     BootClaimCoordinator(BootCountReader reader, BootClaimStore store,
                          OperationAttemptStore attemptStore, Executor executor,
                          Logger logger, boolean shutdownAfterSubmit) {
+        this(reader, store, attemptStore, BootComponentGate.PACKAGE_MANAGER, executor, logger,
+                shutdownAfterSubmit);
+    }
+
+    BootClaimCoordinator(BootCountReader reader, BootClaimStore store,
+                         BootComponentGate componentGate, Executor executor,
+                         Logger logger, boolean shutdownAfterSubmit) {
+        this(reader, store, OperationAttemptStore.inMemory(), componentGate, executor, logger,
+                shutdownAfterSubmit);
+    }
+
+    BootClaimCoordinator(BootCountReader reader, BootClaimStore store,
+                         OperationAttemptStore attemptStore, BootComponentGate componentGate,
+                         Executor executor, Logger logger, boolean shutdownAfterSubmit) {
         this.reader = Objects.requireNonNull(reader, "reader");
         this.store = Objects.requireNonNull(store, "store");
         this.attemptStore = Objects.requireNonNull(attemptStore, "attemptStore");
+        this.componentGate = Objects.requireNonNull(componentGate, "componentGate");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.shutdownAfterSubmit = shutdownAfterSubmit;
@@ -81,7 +127,7 @@ final class BootClaimCoordinator {
                 new BootCountReader.SettingsGlobal(context.getContentResolver()),
                 SharedPreferencesBootClaimStore.forDeviceProtectedStorage(context),
                 SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context),
-                newClaimExecutor(), Logger.ANDROID, true);
+                BootComponentGate.PACKAGE_MANAGER, newClaimExecutor(), Logger.ANDROID, true);
     }
 
     /** Daemon worker used only for the short durable claim; shut down after submit. */
@@ -95,7 +141,13 @@ final class BootClaimCoordinator {
 
     /** Pure in-process seam with an inline executor for deterministic contract tests. */
     static BootClaimCoordinator inline(BootCountReader reader, BootClaimStore store) {
-        return new BootClaimCoordinator(reader, store, Runnable::run, Logger.NO_OP, false);
+        return inline(reader, store, BootComponentGate.PACKAGE_MANAGER);
+    }
+
+    static BootClaimCoordinator inline(BootCountReader reader, BootClaimStore store,
+                                        BootComponentGate componentGate) {
+        return new BootClaimCoordinator(reader, store, OperationAttemptStore.inMemory(),
+                componentGate, Runnable::run, Logger.NO_OP, false);
     }
 
     void submit(Context context, Finisher finisher, BootReceiver.ServiceStarter starter) {
@@ -117,6 +169,23 @@ final class BootClaimCoordinator {
 
     private void runClaim(Context context, Finisher finisher, BootReceiver.ServiceStarter starter) {
         try {
+            // Re-read at claim time, not at submit time: an OFF set after a queued
+            // broadcast must still suppress this late claim and its service start.
+            BootComponentGate.State componentState;
+            try {
+                componentState = componentGate.read(context);
+            } catch (RuntimeException e) {
+                logger.error("boot: Start at Boot component state unreadable; no attempt", e);
+                return;
+            }
+            if (componentState == BootComponentGate.State.UNREADABLE) {
+                logger.error("boot: Start at Boot component state unreadable; no attempt", null);
+                return;
+            }
+            if (componentState != BootComponentGate.State.ENABLED) {
+                logger.info("boot: Start at Boot component disabled; no claim and no service start");
+                return;
+            }
             Long bootCount = reader.read();
             if (bootCount == null || bootCount <= 0L) {
                 logger.info("boot: BOOT_COUNT unavailable or non-positive; no attempt");

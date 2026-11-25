@@ -1,15 +1,19 @@
 // Modified 2026-11-25 (DFRoot GZIF): verify one durable claim per boot, coalescing, and fail-closed ordering. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): assert exactly-once finish on every claim path. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): cover claim-time component OFF, unreadable gate, and late queued claims. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
 
+import android.content.Context;
 import android.content.Intent;
 
 import org.junit.Test;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Queue;
 
 /** Pure JVM contract tests for the durable boot-claim protocol. */
 public class BootClaimTest {
@@ -364,6 +368,97 @@ public class BootClaimTest {
     }
 
     @Test
+    public void disabledOrUnreadableComponentNeverClaimsOrStartsButFinishes() {
+        for (BootClaimCoordinator.BootComponentGate.State state : new BootClaimCoordinator.BootComponentGate.State[] {
+                BootClaimCoordinator.BootComponentGate.State.DISABLED, BootClaimCoordinator.BootComponentGate.State.UNREADABLE}) {
+            BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+            BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+            BootClaimFakes.Finisher finisher = new BootClaimFakes.Finisher();
+
+            BootClaimCoordinator.inline(new BootClaimFakes.MutableReader(31L), store,
+                    new MutableGate(state)).submit(null, finisher, starter);
+
+            assertEquals(state + " must not claim", 0, store.attempts.size());
+            assertEquals(state + " must not start", 0, starter.calls);
+            assertEquals(state + " must still finish", 1, finisher.calls);
+        }
+
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        BootClaimFakes.Finisher finisher = new BootClaimFakes.Finisher();
+        MutableGate throwing = new MutableGate(BootClaimCoordinator.BootComponentGate.State.ENABLED);
+        throwing.throwsOnRead = true;
+
+        BootClaimCoordinator.inline(new BootClaimFakes.MutableReader(32L), store, throwing)
+                .submit(null, finisher, starter);
+
+        assertEquals(0, store.attempts.size());
+        assertEquals(0, starter.calls);
+        assertEquals(1, finisher.calls);
+    }
+
+    @Test
+    public void enabledComponentStillClaimsAndStartsExactlyOnce() {
+        BootClaimFakes.MutableReader reader = new BootClaimFakes.MutableReader(33L);
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        MutableGate gate = new MutableGate(BootClaimCoordinator.BootComponentGate.State.ENABLED);
+        BootClaimCoordinator claims = BootClaimCoordinator.inline(reader, store, gate);
+
+        BootReceiver.dispatchAction(null, LOCKED, claims, new BootClaimFakes.Finisher(), starter);
+        BootReceiver.dispatchAction(null, UNLOCKED, claims, new BootClaimFakes.Finisher(), starter);
+
+        assertEquals(1, starter.calls);
+        assertEquals(33L, store.lastClaimed());
+        assertEquals(2, gate.readCalls);
+    }
+
+    @Test
+    public void queuedBootRequestAfterOffDoesNotClaimOrStart() {
+        MutableGate gate = new MutableGate(BootClaimCoordinator.BootComponentGate.State.ENABLED);
+        CapturingExecutor executor = new CapturingExecutor();
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        BootClaimFakes.Finisher finisher = new BootClaimFakes.Finisher();
+        BootClaimCoordinator claims = new BootClaimCoordinator(
+                new BootClaimFakes.MutableReader(34L), store, gate, executor,
+                BootClaimCoordinator.Logger.NO_OP, false);
+
+        claims.submit(null, finisher, starter);
+
+        assertEquals(1, executor.tasks.size());
+        assertEquals("gate must be checked at claim time, not submit time", 0, gate.readCalls);
+
+        // The owner turns Start at Boot OFF while the broadcast is still queued.
+        gate.state = BootClaimCoordinator.BootComponentGate.State.DISABLED;
+        executor.runAll();
+
+        assertEquals(1, gate.readCalls);
+        assertEquals(0, store.attempts.size());
+        assertEquals(0L, store.lastClaimed());
+        assertEquals(0, starter.calls);
+        assertEquals(1, finisher.calls);
+    }
+
+    @Test
+    public void queuedBootRequestWithUnreadableComponentFailsClosed() {
+        MutableGate gate = new MutableGate(BootClaimCoordinator.BootComponentGate.State.ENABLED);
+        CapturingExecutor executor = new CapturingExecutor();
+        BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
+        BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
+        BootClaimFakes.Finisher finisher = new BootClaimFakes.Finisher();
+        new BootClaimCoordinator(new BootClaimFakes.MutableReader(35L), store, gate, executor,
+                BootClaimCoordinator.Logger.NO_OP, false).submit(null, finisher, starter);
+
+        gate.throwsOnRead = true;
+        executor.runAll();
+
+        assertEquals(0, store.attempts.size());
+        assertEquals(0, starter.calls);
+        assertEquals(1, finisher.calls);
+    }
+
+    @Test
     public void rejectedActionsNeverReachTheClaim() {
         BootClaimFakes.MemoryStore store = new BootClaimFakes.MemoryStore();
         BootClaimFakes.Starter starter = new BootClaimFakes.Starter();
@@ -377,5 +472,41 @@ public class BootClaimTest {
 
         assertEquals(0, store.attempts.size());
         assertEquals(0, starter.calls);
+    }
+
+    /** Deterministic claim-time component state; can also simulate an unreadable setting. */
+    private static final class MutableGate implements BootClaimCoordinator.BootComponentGate {
+        State state;
+        boolean throwsOnRead;
+        int readCalls;
+
+        MutableGate(State state) {
+            this.state = state;
+        }
+
+        @Override
+        public State read(Context context) {
+            readCalls++;
+            if (throwsOnRead) {
+                throw new IllegalStateException("component setting unreadable");
+            }
+            return state;
+        }
+    }
+
+    /** Holds the claim task so OFF can be set after submit but before the claim runs. */
+    private static final class CapturingExecutor implements java.util.concurrent.Executor {
+        final Queue<Runnable> tasks = new ArrayDeque<>();
+
+        @Override
+        public void execute(Runnable command) {
+            tasks.add(command);
+        }
+
+        void runAll() {
+            while (!tasks.isEmpty()) {
+                tasks.remove().run();
+            }
+        }
     }
 }
