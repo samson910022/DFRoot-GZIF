@@ -7,6 +7,8 @@
 # Modified 2026-11-25 (DFRoot GZIF): pin staged inodes by descriptor, add deterministic identity-churn and exec-before-restore cases. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): cover atomic publication, rc=7, and a gated concurrent reader. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): add the post-link rc7-before-retraction gated reader case. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a live fake child. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): cover reader rc7 timeout, shared late-load budget, and fork-failure mapping. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -215,6 +217,14 @@ foreach(status_case IN ITEMS
         publication_failure_protocol
         concurrent_failed_publish
         post_link_gated_reader
+        late_load_command_timeout
+        soft_reboot_command_timeout
+        observed_exit_mapping
+        late_load_poll_timeout
+        timeout_indeterminate_wiring
+        reader_timeout_indeterminate
+        shared_late_load_budget
+        launch_failure_mapping
         bounded_wait
         deadline_composition
         shared_budget_wiring

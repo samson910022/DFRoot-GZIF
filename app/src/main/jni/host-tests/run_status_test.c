@@ -2,6 +2,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): assert the shared progress table, composed deadlines, exact failure branches, and malformed-marker cases. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): assert atomic publication, no final path on failure, the rc=7 channel, and a gated concurrent reader. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link rc7-before-retraction window and verify a transient temp-unlink retry. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): cover all three bounded-wait timeout sites with a harmless live fake child. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -423,16 +424,19 @@ static void test_bounded_wait(void)
     }
 }
 
-/* Pure composition check: the reader must wait longer than the writer's
- * late-load poll plus its soft-reboot command wait combined. */
+/* Pure composition check. The late-load command and its poll share ONE
+ * late-load budget, so the true worst-case writer duration is that single
+ * budget plus the soft-reboot command wait. The reader must cover that sum. */
 static void test_deadline_composition(void)
 {
+    int64_t writer_worst_case = (int64_t)RUN_STATUS_LATE_LOAD_WAIT_MS
+                                + RUN_STATUS_SOFT_REBOOT_WAIT_MS;
     if (RUN_STATUS_LATE_LOAD_WAIT_MS <= 0 || RUN_STATUS_SOFT_REBOOT_WAIT_MS <= 0
-        || RUN_STATUS_TERMINAL_READ_WAIT_MS <= RUN_STATUS_LATE_LOAD_WAIT_MS
-                                               + RUN_STATUS_SOFT_REBOOT_WAIT_MS) {
-        fprintf(stderr, "deadline mismatch: reader=%d writer=%d+%d\n",
-                RUN_STATUS_TERMINAL_READ_WAIT_MS, RUN_STATUS_LATE_LOAD_WAIT_MS,
-                RUN_STATUS_SOFT_REBOOT_WAIT_MS);
+        || (int64_t)RUN_STATUS_TERMINAL_READ_WAIT_MS < writer_worst_case) {
+        fprintf(stderr, "deadline mismatch: reader=%d writer worst case=%lld "
+                        "(late-load shared %d + soft-reboot %d)\n",
+                RUN_STATUS_TERMINAL_READ_WAIT_MS, (long long)writer_worst_case,
+                RUN_STATUS_LATE_LOAD_WAIT_MS, RUN_STATUS_SOFT_REBOOT_WAIT_MS);
         exit(1);
     }
 }
@@ -510,13 +514,25 @@ static void test_shared_budget_wiring(void)
     char *exp = read_native_source("exp.c");
     char *b = normalize_whitespace(bootstrap);
     char *e = normalize_whitespace(exp);
-    expect_contains(b, "run_status_wait_continues(now - start, RUN_STATUS_LATE_LOAD_WAIT_MS)");
+    /* Late-load command and poll draw from ONE shared budget: the start is
+     * captured before the command and the poll receives only the remainder. */
+    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
+    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
+    if (strstr(bootstrap, "run_status_wait_continues(now - start, RUN_STATUS_LATE_LOAD_WAIT_MS)")
+        != NULL) {
+        die("late-load poll was given a fresh budget");
+    }
     expect_contains(b, "run_ctx_timed(\"u:r:ksu:s0\", (char *[]){ KSUD, \"soft-reboot\", NULL }, "
-                       "RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out)");
-    expect_contains(b, "waitpid(pid, &status, WNOHANG)");
-    expect_contains(b, "return terminal(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);");
+                       "RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out, &soft_launch_failed)");
+    /* The bounded wait itself now lives in the shared, host-tested helper; it
+     * polls with WNOHANG and never signals the child. A timeout is rc=7, not a
+     * soft-reboot failure. A failed fork() is the ordinary rc=6 failure. */
+    expect_contains(b, "run_status_wait_child_bounded(pid, limit_ms, &exit_code)");
+    expect_contains(b, "run_status_soft_reboot_launch_code( soft_launch_failed, soft_rc, "
+                       "soft_timed_out)");
     expect_contains(e, "run_status_wait_continues( now - start, "
                        "RUN_STATUS_TERMINAL_READ_WAIT_MS)");
+    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
     expect_contains(e, "run_status_progress_markers[");
     /* The writer must route every terminal publication through the shared
      * success/failure mapping; no code may return its intended value after a
@@ -897,6 +913,237 @@ static void test_post_link_gated_reader(void)
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
+/* A harmless fake child: it blocks reading a pipe and never executes a
+ * payload. A bounded wait cannot observe an exit, so the writer must not claim
+ * completion and must not signal the child. */
+static pid_t spawn_live_fake_child(int *release_fd)
+{
+    int gate[2];
+    if (pipe(gate) != 0) die("fake child pipe failed");
+    pid_t child = fork();
+    if (child < 0) die("fake child fork failed");
+    if (child == 0) {
+        close(gate[1]);
+        char byte;
+        ssize_t count;
+        do {
+            count = read(gate[0], &byte, 1);
+        } while (count < 0 && errno == EINTR);
+        _exit(0);
+    }
+    close(gate[0]);
+    *release_fd = gate[1];
+    return child;
+}
+
+static void expect_child_still_running(pid_t child)
+{
+    int status = 0;
+    if (waitpid(child, &status, WNOHANG) != 0) {
+        die("fake child was killed or reaped by a bounded wait");
+    }
+}
+
+static void release_fake_child(pid_t child, int release_fd)
+{
+    int status = 0;
+    if (write(release_fd, "g", 1) != 1) die("fake child release failed");
+    close(release_fd);
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("fake child did not exit cleanly after release");
+    }
+}
+
+/* Both command-timeout sites: a live child outlives the deadline, the wait
+ * returns "not observed", no exit code is invented, no signal is sent, and the
+ * terminal code is rc=7. Publishing rc=7 gives the reader an honest outcome. */
+static void test_live_child_timeout(int late_load)
+{
+    configure(OUR_ID);
+    int release_fd = -1;
+    pid_t child = spawn_live_fake_child(&release_fd);
+    int exit_code = 12345;
+    int observed = run_status_wait_child_bounded(child, 20, &exit_code);
+    if (observed != 0) die("bounded wait did not time out on a live child");
+    if (exit_code != 12345) die("bounded wait invented an exit code for a live child");
+    expect_child_still_running(child);
+    int terminal = late_load
+                   ? run_status_late_load_wait_code(exit_code, 1)
+                   : run_status_soft_reboot_wait_code(exit_code, 1);
+    if (terminal != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        fprintf(stderr, "command timeout mapped to rc=%d, expected rc=7\n", terminal);
+        exit(1);
+    }
+    expect_write_ok(RUN_STATUS_TERMINAL_INDETERMINATE);
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+    release_fake_child(child, release_fd);
+}
+
+/* rc=4/6 (and rc=0/1) require a genuinely observed exit; a timeout or a
+ * wait/signal failure is always indeterminate. */
+static void test_observed_exit_mapping(void)
+{
+    configure(OUR_ID);
+    pid_t child = fork();
+    if (child < 0) die("observed-exit child fork failed");
+    if (child == 0) _exit(0);
+    int exit_code = -1;
+    int observed = run_status_wait_child_bounded(child, 2000, &exit_code);
+    if (observed != 1 || exit_code != 0) die("bounded wait missed an observed exit");
+    if (run_status_late_load_wait_code(0, 0) != RUN_STATUS_TERMINAL_SUCCESS
+        || run_status_late_load_wait_code(9, 0) != RUN_STATUS_TERMINAL_ERROR
+        || run_status_late_load_wait_code(0, 1) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_late_load_wait_code(-1, 0) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("late-load exit mapping was not limited to observed exits");
+    }
+    if (run_status_soft_reboot_wait_code(0, 0) != RUN_STATUS_TERMINAL_SOFT_REBOOT_OK
+        || run_status_soft_reboot_wait_code(9, 0) != RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL
+        || run_status_soft_reboot_wait_code(0, 1) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_soft_reboot_wait_code(-1, 0) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("soft-reboot rc4/rc6 was not limited to observed exits");
+    }
+}
+
+/* The poll deadline keeps the unchanged shared constant; expiry maps to rc=7
+ * while a still-continuing wait stays non-terminal (-1). */
+static void test_poll_deadline_timeout(void)
+{
+    if (RUN_STATUS_LATE_LOAD_WAIT_MS != 60000
+        || RUN_STATUS_SOFT_REBOOT_WAIT_MS != 30000
+        || RUN_STATUS_TERMINAL_READ_WAIT_MS != 100000) {
+        die("shared deadlines changed");
+    }
+    int64_t limit = RUN_STATUS_LATE_LOAD_WAIT_MS;
+    if (!run_status_wait_continues(limit - 1, limit)
+        || run_status_wait_continues(limit, limit)
+        || run_status_wait_continues(-1, limit)) {
+        die("poll deadline boundary changed");
+    }
+    if (run_status_bounded_wait_timeout_code(0) != -1
+        || run_status_bounded_wait_timeout_code(1) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("poll expiry did not map to rc=7");
+    }
+    if (source_dir == NULL) die("native source directory is required");
+    char *bootstrap = read_native_source("bootstrap.c");
+    char *b = normalize_whitespace(bootstrap);
+    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
+    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
+    expect_contains(b, "return terminal(run_status_bounded_wait_timeout_code(expired));");
+    free(bootstrap);
+    free(b);
+}
+
+/* Cross-file guard for all three timeout sites: no unbounded late-load wait,
+ * no kill, and each timeout routed to rc=7 through the shared mapping. */
+static void test_timeout_indeterminate_wiring(void)
+{
+    if (source_dir == NULL) die("native source directory is required");
+    char *bootstrap = read_native_source("bootstrap.c");
+    char *b = normalize_whitespace(bootstrap);
+    if (strstr(bootstrap, "run_ctx(NULL") != NULL) {
+        die("unbounded late-load wait was reintroduced");
+    }
+    if (strstr(bootstrap, "kill(") != NULL) {
+        die("a kill was reintroduced into bootstrap");
+    }
+    expect_contains(b, "run_ctx_timed(NULL, (char *[]){ \"/data/local/tmp/.ksud-stage\", "
+                       "\"late-load\", \"--package-name\", config.manager, NULL }, "
+                       "RUN_STATUS_LATE_LOAD_WAIT_MS, &late_timed_out, &late_launch_failed)");
+    expect_contains(b, "run_status_late_load_launch_code( late_launch_failed, late_rc, "
+                       "late_timed_out)");
+    expect_contains(b, "run_status_wait_child_bounded(pid, limit_ms, &exit_code)");
+    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
+    expect_contains(b, "return terminal(run_status_bounded_wait_timeout_code(expired));");
+    expect_contains(b, "run_ctx_timed(\"u:r:ksu:s0\", (char *[]){ KSUD, \"soft-reboot\", NULL }, "
+                       "RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out, &soft_launch_failed)");
+    expect_contains(b, "return terminal(run_status_soft_reboot_launch_code( soft_launch_failed, "
+                       "soft_rc, soft_timed_out))");
+    free(bootstrap);
+    free(b);
+}
+
+/* The native reader's own deadline expiry must never be reported as SUCCESS
+ * or as a definitive failure: privileged children may still be alive. Only
+ * setup() failures (before any operation) keep rc=2. */
+static void test_reader_timeout_indeterminate(void)
+{
+    int code = run_status_reader_timeout_code(1);
+    if (code != RUN_STATUS_TERMINAL_INDETERMINATE
+        || code == RUN_STATUS_TERMINAL_SUCCESS
+        || code == RUN_STATUS_TERMINAL_ERROR
+        || code == RUN_STATUS_TERMINAL_SOFT_REBOOT_OK
+        || code == RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL) {
+        fprintf(stderr, "reader timeout mapped to definitive rc=%d\n", code);
+        exit(1);
+    }
+    if (run_status_reader_timeout_code(0) != -1) {
+        die("a continuing reader wait was mapped to a terminal code");
+    }
+    if (source_dir == NULL) die("native source directory is required");
+    char *exp = read_native_source("exp.c");
+    char *e = normalize_whitespace(exp);
+    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
+    expect_contains(e, "if (setup(argc, argv) != 0) return 2;");
+    if (strstr(e, "timeout: ERROR - check logcat & dmesg") != NULL) {
+        die("reader timeout still reports a definitive failure");
+    }
+    free(exp);
+    free(e);
+}
+
+/* Pure shared-budget arithmetic: the poll receives only the time the late-load
+ * command left in the same deadline, never a fresh full limit. */
+static void test_shared_late_load_budget(void)
+{
+    int64_t limit = RUN_STATUS_LATE_LOAD_WAIT_MS;
+    if (run_status_remaining_budget(0, limit) != limit
+        || run_status_remaining_budget(1000, limit) != limit - 1000
+        || run_status_remaining_budget(limit - 1, limit) != 1
+        || run_status_remaining_budget(limit, limit) != -1
+        || run_status_remaining_budget(limit + 1, limit) != -1
+        || run_status_remaining_budget(-1, limit) != -1
+        || run_status_remaining_budget(0, 0) != -1) {
+        die("shared-budget remainder was not clamped to the shared deadline");
+    }
+    if (source_dir == NULL) die("native source directory is required");
+    char *bootstrap = read_native_source("bootstrap.c");
+    char *b = normalize_whitespace(bootstrap);
+    expect_contains(b, "int64_t late_start = monotonic_ms();");
+    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
+    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
+    if (strstr(bootstrap, "run_status_wait_continues(now - start, RUN_STATUS_LATE_LOAD_WAIT_MS)")
+        != NULL) {
+        die("late-load poll reintroduced a fresh full budget");
+    }
+    free(bootstrap);
+    free(b);
+}
+
+/* A failed fork() starts no child: keep the ordinary rc=1 / rc=6 failure.
+ * Timeout and unobserved exits still map to rc=7. */
+static void test_launch_failure_mapping(void)
+{
+    if (run_status_late_load_launch_code(1, 0, 0) != RUN_STATUS_TERMINAL_ERROR
+        || run_status_late_load_launch_code(1, 0, 1) != RUN_STATUS_TERMINAL_ERROR
+        || run_status_late_load_launch_code(0, 0, 0) != RUN_STATUS_TERMINAL_SUCCESS
+        || run_status_late_load_launch_code(0, 9, 0) != RUN_STATUS_TERMINAL_ERROR
+        || run_status_late_load_launch_code(0, 0, 1) != RUN_STATUS_TERMINAL_INDETERMINATE
+        || run_status_soft_reboot_launch_code(1, 0, 0) != RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL
+        || run_status_soft_reboot_launch_code(1, 0, 1) != RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL
+        || run_status_soft_reboot_launch_code(0, 0, 0) != RUN_STATUS_TERMINAL_SOFT_REBOOT_OK
+        || run_status_soft_reboot_launch_code(0, 9, 0) != RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL
+        || run_status_soft_reboot_launch_code(0, 0, 1) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("fork launch failure was not mapped to the ordinary command failure");
+    }
+    if (source_dir == NULL) die("native source directory is required");
+    char *bootstrap = read_native_source("bootstrap.c");
+    char *b = normalize_whitespace(bootstrap);
+    expect_contains(b, "if (pid < 0) { if (launch_failed != NULL) *launch_failed = 1; return -1; }");
+    free(bootstrap);
+    free(b);
+}
+
 static void run_case(const char *name)
 {
     if (!strcmp(name, "rc0")) {
@@ -977,6 +1224,22 @@ static void run_case(const char *name)
         test_concurrent_failed_publish();
     } else if (!strcmp(name, "post_link_gated_reader")) {
         test_post_link_gated_reader();
+    } else if (!strcmp(name, "late_load_command_timeout")) {
+        test_live_child_timeout(1);
+    } else if (!strcmp(name, "soft_reboot_command_timeout")) {
+        test_live_child_timeout(0);
+    } else if (!strcmp(name, "observed_exit_mapping")) {
+        test_observed_exit_mapping();
+    } else if (!strcmp(name, "late_load_poll_timeout")) {
+        test_poll_deadline_timeout();
+    } else if (!strcmp(name, "timeout_indeterminate_wiring")) {
+        test_timeout_indeterminate_wiring();
+    } else if (!strcmp(name, "reader_timeout_indeterminate")) {
+        test_reader_timeout_indeterminate();
+    } else if (!strcmp(name, "shared_late_load_budget")) {
+        test_shared_late_load_budget();
+    } else if (!strcmp(name, "launch_failure_mapping")) {
+        test_launch_failure_mapping();
     } else if (!strcmp(name, "bounded_wait")) {
         test_bounded_wait();
     } else if (!strcmp(name, "deadline_composition")) {

@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove coordinator ownership spans child exit and final stdout EOF. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): verify operation-ID binding survives the full supervised process lifecycle. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): cover rc7 ownership retention only with connected fakes; live-child proof is native. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -103,6 +104,60 @@ public class RunCoordinatorProcessIntegrationTest {
         } finally {
             process.exit(0);
         }
+    }
+
+    /**
+     * Deterministic engine scenario: the native reporter deadline expires and
+     * publishes rc=7. Without an explicit recovery there is no finish(), no
+     * retry, and every new submit is rejected. Genuine live-child/no-kill
+     * proof lives in the native host test (live fake child timeout).
+     */
+    @Test
+    public void nativeRc7RetainsLeaseFreezeAndAdmissionUntilExplicitRecovery() {
+        ConfigurationRepository repository = repository();
+        AtomicReference<ConfigurationRepository.RunAdmission> admitted = new AtomicReference<>();
+        AtomicInteger engineCalls = new AtomicInteger();
+        RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
+            engineCalls.incrementAndGet();
+            admitted.set(admission);
+            // The reporter deadline passed (native rc=7): completion was never
+            // confirmed, so the coordinator must retain ownership.
+            return NativeResultMapper.map(7);
+        };
+        RunCoordinator coordinator = new RunCoordinator(repository, Runnable::run,
+                Runnable::run, engine, TEST_TIMEOUT_MS);
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+        assertEquals(RunResult.Detail.NATIVE_EXIT, unverified.getResult().getDetail());
+        assertEquals(RunResult.Type.INDETERMINATE, unverified.getResult().getType());
+        assertFalse(unverified.getResult().isSuccess());
+        assertTrue(unverified.getReason().contains("outcome unverified"));
+        assertEquals(1, engineCalls.get());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(admitted.get().isActive());
+        assertTrue(repository.isFrozen());
+        assertFalse(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, new FakeLease()).isAccepted());
+
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(admitted.get().isActive());
+        assertFalse(repository.isFrozen());
+
+        // The next operation is admitted only by an explicit new submit.
+        FakeLease secondLease = new FakeLease();
+        assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                RunConfig.ExecutionMode.MANUAL, secondLease).isAccepted());
+        assertEquals(RunCoordinator.State.INDETERMINATE, coordinator.getSnapshot().getState());
+        assertEquals(2, engineCalls.get());
+        assertTrue(coordinator.recoverIndeterminate(
+                coordinator.getSnapshot().getOperationId()));
+        assertEquals(1, secondLease.closeCount.get());
     }
 
     @Test

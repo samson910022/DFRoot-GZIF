@@ -3,6 +3,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): update native marker wording from preferences to run-config. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): poll run-scoped terminal markers; /dev/dfm6 is progress only. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): iterate the shared progress table and bound the reader with the composed deadline. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): map reader deadline expiry to rc7, never a definitive failure while children are alive. See NOTICE. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -549,7 +550,9 @@ static int exploit(void) {
                              &g_libcxx_r);
     if (hook_rc) goto done;
 
-    rc = 2;
+    /* Unknown until a run-scoped marker is observed or the read deadline
+     * expires; a deadline expiry is indeterminate, not a definitive failure. */
+    rc = RUN_STATUS_TERMINAL_INDETERMINATE;
     usleep(500000);
     
     printf("\n=== init  ===\n");
@@ -562,9 +565,10 @@ static int exploit(void) {
      * progress_outcome policy. */
     int seen[RUN_STATUS_PROGRESS_MARKER_COUNT] = {0};
 
-    /* The reader budget strictly exceeds the writer's late-load wait plus its
-     * soft-reboot command wait, so a well-behaved writer always publishes a
-     * terminal marker before this loop gives up. */
+    /* The reader budget covers the writer's shared late-load budget (command
+     * AND poll) plus its soft-reboot command wait, so a well-behaved writer
+     * always publishes a marker before this loop gives up. If it does not,
+     * privileged children may still be alive: the expiry is indeterminate. */
     int64_t start = monotonic_ms();
     for (;;) {
         usleep(10000);
@@ -591,10 +595,11 @@ static int exploit(void) {
         }
 
         int64_t now = monotonic_ms();
-        if (now < 0 || !run_status_wait_continues(
-                           now - start, RUN_STATUS_TERMINAL_READ_WAIT_MS)) {
-            printf("timeout: ERROR - check logcat & dmesg\n");
-            rc = 2;
+        int expired = now < 0 || !run_status_wait_continues(
+                           now - start, RUN_STATUS_TERMINAL_READ_WAIT_MS);
+        if (expired) {
+            printf("timeout: indeterminate - privileged child may still be running\n");
+            rc = run_status_reader_timeout_code(expired);
             goto done;
         }
     }

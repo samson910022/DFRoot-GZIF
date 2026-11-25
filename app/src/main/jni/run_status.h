@@ -2,11 +2,14 @@
 /* Modified 2026-11-25 (DFRoot GZIF): share the progress-marker table and composed deadlines across both native binaries. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): publish markers atomically and reserve rc=7 for indeterminate outcomes. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): distinguish writer exit rc7 from the reader rc7 channel and document the pre-link timeout path. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): reader expiry is rc7 and the late-load command/poll share one budget. See NOTICE. */
 #ifndef DFROOT_RUN_STATUS_H
 #define DFROOT_RUN_STATUS_H
 
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include "run_config_codec.h"
 
@@ -27,10 +30,12 @@
  *       confirmed (run_status_publication_exit_code), and
  *   (b) a run-scoped rc=7 marker, the reader's dedicated indeterminate channel.
  * A PRE-LINK publication failure leaves NO marker at all, so the reader cannot
- * propagate a writer rc=7 to itself: it surfaces its own bounded-wait timeout
- * as rc=2 (NATIVE_SETUP_FAILED). A POST-LINK unconfirmed publication publishes
- * the rc=7 marker, which the reader maps to RESULT_INDETERMINATE. In neither
- * case can either channel report SUCCESS. */
+ * propagate a writer rc=7 to itself: it surfaces its own read-deadline expiry
+ * as rc=7 (RUN_STATUS_TERMINAL_INDETERMINATE), never SUCCESS or a definitive
+ * failure, because privileged children may still be alive. rc=2 remains only
+ * for setup() failures before any operation starts. A POST-LINK unconfirmed
+ * publication publishes the rc=7 marker, which the reader maps to
+ * RESULT_INDETERMINATE. In neither case can either channel report SUCCESS. */
 enum run_status_code {
     RUN_STATUS_TERMINAL_SUCCESS = 0,
     RUN_STATUS_TERMINAL_ERROR = 1,
@@ -39,8 +44,11 @@ enum run_status_code {
     RUN_STATUS_TERMINAL_INDETERMINATE = 7
 };
 
-/* Shared timing budget (ms). The terminal reader must outlive the writer's
- * late-load poll and soft-reboot command wait combined, so it can never give
+/* Shared timing budget (ms). The late-load command wait and the subsequent
+ * late_load_running() poll share ONE RUN_STATUS_LATE_LOAD_WAIT_MS budget: the
+ * poll receives only the time the command left, never a fresh full limit. The
+ * true worst-case writer duration is therefore LATE_LOAD_WAIT_MS +
+ * SOFT_REBOOT_WAIT_MS, which the reader budget must cover so it can never give
  * up before the writer has had a chance to publish a run-scoped marker. */
 #define RUN_STATUS_LATE_LOAD_WAIT_MS 60000
 #define RUN_STATUS_SOFT_REBOOT_WAIT_MS 30000
@@ -101,8 +109,45 @@ int run_status_classify(struct run_status_result *out);
 
 /* ---- Pure protocol helpers shared by bootstrap and exp (host-tested) ---- */
 
-/* A soft-reboot command that returned 0 maps to rc=4; any failure maps to 6. */
+/* A soft-reboot command that returned 0 maps to rc=4; any OBSERVED failure maps to 6. */
 int run_status_soft_reboot_code(int command_exit_code);
+
+/* ---- Bounded, non-killing child waits and their terminal mapping ----
+ *
+ * Shared by bootstrap and the host tests. The wait polls with waitpid(WNOHANG)
+ * and is EINTR-safe; it NEVER signals or kills the child. A child that outlives
+ * its deadline is left running, so its effect stays unverified. Only an
+ * OBSERVED exit may produce a command success/failure code: timeout and wait
+ * failures always map to the indeterminate code rc=7. */
+/* Returns 1 when an exit was observed (*exit_code = WEXITSTATUS, or -1 for a
+ * signal death), 0 on deadline expiry (child still alive), -1 on wait error. */
+int run_status_wait_child_bounded(pid_t child, int64_t limit_ms, int *exit_code);
+
+/* Late-load command: observed 0 -> rc0, observed nonzero -> rc1, timeout or
+ * an unobserved exit -> rc7. */
+int run_status_late_load_wait_code(int command_exit_code, int timed_out);
+
+/* Soft-reboot command: observed 0 -> rc4, observed nonzero -> rc6, timeout or
+ * an unobserved exit -> rc7. */
+int run_status_soft_reboot_wait_code(int command_exit_code, int timed_out);
+
+/* Late-load poll deadline: expiry -> rc7; a still-continuing wait -> -1. */
+int run_status_bounded_wait_timeout_code(int expired);
+
+/* Reader deadline expiry: indeterminate rc7, never SUCCESS or a definitive
+ * failure code. A still-continuing read -> -1 (keep polling). */
+int run_status_reader_timeout_code(int expired);
+
+/* Remaining time in one shared budget. Returns the clamped positive remainder,
+ * or -1 when the deadline is already exhausted or the inputs are invalid. The
+ * caller passes this to the bounded wait instead of granting a fresh limit. */
+int64_t run_status_remaining_budget(int64_t elapsed_ms, int64_t limit_ms);
+
+/* A failed fork() starts no child, so it maps to the ordinary local command
+ * failure (rc1 late-load / rc6 soft-reboot) as before. Timeout or an
+ * unobserved exit still maps to rc7 through the wait-code helpers. */
+int run_status_late_load_launch_code(int launch_failed, int command_exit_code, int timed_out);
+int run_status_soft_reboot_launch_code(int launch_failed, int command_exit_code, int timed_out);
 
 /* Legacy global /dev markers are progress-only, including /dev/dfm6; they
  * never produce a terminal exit code. This is the single source of truth for

@@ -4,6 +4,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): use the shared composed deadlines and bound the soft-reboot command wait without killing. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): replace shell cp with hardened sticky-bit exclusive staging and unconditional mode restoration. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): never report an unconfirmed publication as its intended success/error code. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): bound every child wait without killing, and publish rc7 on timeout. See NOTICE. */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -145,38 +146,21 @@ static int terminal(int code)
     return result;
 }
 
-static int run_ctx(const char *ctx, char *const argv[])
-{
-    pid_t pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        if (ctx) {
-            int fd = open("/proc/self/attr/exec", O_WRONLY);
-            if (fd >= 0) { write(fd, ctx, strlen(ctx)); close(fd); }
-        }
-        execv(argv[0], argv);
-        _exit(127);
-    }
-    int status = 0;
-    pid_t waited;
-    do {
-        waited = waitpid(pid, &status, 0);
-    } while (waited < 0 && errno == EINTR);
-    if (waited != pid)
-        return -1;
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-/* Bounded variant for the soft-reboot command. The waitpid poll is EINTR-safe
- * and non-blocking; on timeout the child is left alone (no forced kill) and
- * the caller maps the timeout to rc=6. */
+/* Bounded command launch. The wait is delegated to the shared, EINTR-safe,
+ * non-blocking, non-killing run_status_wait_child_bounded(): on timeout the
+ * child is left alone, *timed_out is set, and the caller maps the unobserved
+ * outcome to rc=7 (never to a command success/failure code). A fork() failure
+ * is different: no child exists, so *launch_failed is set and the caller maps
+ * it to the ordinary local command failure instead of indeterminate. */
 static int run_ctx_timed(const char *ctx, char *const argv[], int64_t limit_ms,
-                         int *timed_out)
+                         int *timed_out, int *launch_failed)
 {
     pid_t pid = fork();
-    if (pid < 0)
+    if (pid < 0) {
+        if (launch_failed != NULL)
+            *launch_failed = 1;
         return -1;
+    }
     if (pid == 0) {
         if (ctx) {
             int fd = open("/proc/self/attr/exec", O_WRONLY);
@@ -185,27 +169,17 @@ static int run_ctx_timed(const char *ctx, char *const argv[], int64_t limit_ms,
         execv(argv[0], argv);
         _exit(127);
     }
+    if (launch_failed != NULL)
+        *launch_failed = 0;
     if (timed_out != NULL)
         *timed_out = 0;
-    int64_t start = monotonic_ms();
-    int status = 0;
-    for (;;) {
-        pid_t waited;
-        do {
-            waited = waitpid(pid, &status, WNOHANG);
-        } while (waited < 0 && errno == EINTR);
-        if (waited == pid)
-            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        if (waited < 0)
-            return -1;
-        int64_t now = monotonic_ms();
-        if (now < 0 || !run_status_wait_continues(now - start, limit_ms)) {
-            if (timed_out != NULL)
-                *timed_out = 1;
-            return -1;
-        }
-        usleep(100000);
-    }
+    int exit_code = -1;
+    int observed = run_status_wait_child_bounded(pid, limit_ms, &exit_code);
+    if (observed == 1)
+        return exit_code;
+    if (observed == 0 && timed_out != NULL)
+        *timed_out = 1;
+    return -1;
 }
 
 /* Global /dev markers are progress diagnostics only; terminal outcomes are
@@ -287,8 +261,16 @@ int main(void)
         touch("/dev/dfme2");
         return terminal(RUN_STATUS_TERMINAL_ERROR);
     }
-    int late_rc = run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
-                                           "--package-name", config.manager, NULL });
+    /* One shared budget covers the late-load command AND the poll below.
+     * Capture its start before the command wait so the poll receives only the
+     * remaining time, never a fresh full limit. */
+    int64_t late_start = monotonic_ms();
+    int late_timed_out = 0;
+    int late_launch_failed = 0;
+    int late_rc = run_ctx_timed(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
+                                                "--package-name", config.manager, NULL },
+                                RUN_STATUS_LATE_LOAD_WAIT_MS, &late_timed_out,
+                                &late_launch_failed);
     /* Restore the staging directory mode whether or not late-load succeeded.
      * A restore failure is a generic bootstrap error (rc=1); the terminal
      * marker protocol and all global progress markers stay unchanged. */
@@ -297,9 +279,18 @@ int main(void)
         fprintf(stderr, "bootstrap: staging mode restoration failed: %s\n",
                 loader_stage_last_error(&stage));
     }
-    if (late_rc != 0) {
+    /* A deadline expiry is NOT a late-load failure: the child is still alive
+     * and its effect is unknown, so the only honest terminal code is rc=7.
+     * A fork() failure started no child and stays the ordinary rc=1 failure. */
+    int late_terminal = run_status_late_load_launch_code(
+            late_launch_failed, late_rc, late_timed_out);
+    if (late_timed_out) {
+        fprintf(stderr, "bootstrap: late-load command wait exceeded %d ms\n",
+                RUN_STATUS_LATE_LOAD_WAIT_MS);
+    }
+    if (late_terminal != RUN_STATUS_TERMINAL_SUCCESS) {
         touch("/dev/dfme2");
-        return terminal(RUN_STATUS_TERMINAL_ERROR);
+        return terminal(late_terminal);
     }
     if (restored != 0) {
         return terminal(RUN_STATUS_TERMINAL_ERROR);
@@ -312,29 +303,44 @@ int main(void)
         return terminal(RUN_STATUS_TERMINAL_SUCCESS);
     }
 
-    int64_t start = monotonic_ms();
+    /* Reuse the shared late-load deadline: the poll gets only what the command
+     * wait left, so the whole late-load phase cannot consume two full budgets. */
+    int64_t late_now = monotonic_ms();
+    int64_t late_elapsed = (late_start < 0 || late_now < 0) ? -1 : late_now - late_start;
+    int64_t late_poll_budget = run_status_remaining_budget(
+            late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS);
+    int64_t poll_start = monotonic_ms();
     for (;;) {
         if (!late_load_running()) {
             break;
         }
         int64_t now = monotonic_ms();
-        if (now < 0 || !run_status_wait_continues(now - start,
-                                                  RUN_STATUS_LATE_LOAD_WAIT_MS)) {
-            fprintf(stderr, "bootstrap: late-load wait exceeded %d ms\n",
+        int expired = poll_start < 0 || now < 0
+                      || !run_status_wait_continues(now - poll_start, late_poll_budget);
+        if (expired) {
+            fprintf(stderr, "bootstrap: late-load wait exceeded the shared %d ms budget\n",
                     RUN_STATUS_LATE_LOAD_WAIT_MS);
-            return terminal(RUN_STATUS_TERMINAL_ERROR);
+            /* The late-load process is still alive and unobserved. Do not
+             * kill it and do not claim an error: rc=7 is indeterminate. */
+            return terminal(run_status_bounded_wait_timeout_code(expired));
         }
         sleep(1);
     }
 
     int soft_timed_out = 0;
+    int soft_launch_failed = 0;
     int soft_rc = run_ctx_timed("u:r:ksu:s0",
                                 (char *[]){ KSUD, "soft-reboot", NULL },
-                                RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out);
+                                RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out,
+                                &soft_launch_failed);
     if (soft_timed_out) {
         fprintf(stderr, "bootstrap: soft-reboot command wait exceeded %d ms\n",
                 RUN_STATUS_SOFT_REBOOT_WAIT_MS);
-        return terminal(RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL);
     }
-    return terminal(run_status_soft_reboot_code(soft_rc));
+    /* rc=4/6 is published only for a genuinely observed command exit. A
+     * deadline expiry (or any unobserved exit) leaves the soft-reboot child
+     * alive, so its effect is indeterminate: rc=7, never an early failure.
+     * A fork() failure started no child and stays the ordinary rc=6 failure. */
+    return terminal(run_status_soft_reboot_launch_code(
+            soft_launch_failed, soft_rc, soft_timed_out));
 }

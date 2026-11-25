@@ -2,6 +2,8 @@
 /* Modified 2026-11-25 (DFRoot GZIF): export the shared progress-marker table and route injected faults through the real write/fsync error branches. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): publish via temp+link, reserve rc=7, and never confirm an unfsynced publication. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): publish rc7 before retraction, retry temp unlink, and chmod only fully written payloads. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): share bounded, non-killing child waits and map every timeout to rc7. See NOTICE. */
+/* Modified 2026-11-25 (DFRoot GZIF): map reader expiry to rc7 and expose the shared-budget remainder. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -11,6 +13,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -752,6 +755,110 @@ int run_status_progress_outcome(const char *marker_path)
 int run_status_wait_continues(int64_t elapsed_ms, int64_t limit_ms)
 {
     return elapsed_ms >= 0 && limit_ms > 0 && elapsed_ms < limit_ms;
+}
+
+static int64_t status_monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void status_wait_sleep_slice(void)
+{
+    struct timespec slice = { 0, 100000000L };
+    while (nanosleep(&slice, &slice) < 0 && errno == EINTR) {
+    }
+}
+
+int run_status_wait_child_bounded(pid_t child, int64_t limit_ms, int *exit_code)
+{
+    if (child <= 0 || limit_ms <= 0) {
+        return -1;
+    }
+    int64_t start = status_monotonic_ms();
+    if (start < 0) {
+        return -1;
+    }
+    for (;;) {
+        int status = 0;
+        pid_t waited;
+        do {
+            waited = waitpid(child, &status, WNOHANG);
+        } while (waited < 0 && errno == EINTR);
+        if (waited == child) {
+            if (exit_code != NULL) {
+                *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            }
+            return 1;
+        }
+        if (waited < 0) {
+            return -1;
+        }
+        int64_t now = status_monotonic_ms();
+        if (now < 0 || !run_status_wait_continues(now - start, limit_ms)) {
+            /* Deadline expired: the child is deliberately left running. No
+             * kill(), no signal, no forced reap: its effect stays unverified. */
+            return 0;
+        }
+        status_wait_sleep_slice();
+    }
+}
+
+int run_status_late_load_wait_code(int command_exit_code, int timed_out)
+{
+    if (timed_out || command_exit_code < 0) {
+        return RUN_STATUS_TERMINAL_INDETERMINATE;
+    }
+    return command_exit_code == 0
+           ? RUN_STATUS_TERMINAL_SUCCESS
+           : RUN_STATUS_TERMINAL_ERROR;
+}
+
+int run_status_soft_reboot_wait_code(int command_exit_code, int timed_out)
+{
+    if (timed_out || command_exit_code < 0) {
+        return RUN_STATUS_TERMINAL_INDETERMINATE;
+    }
+    return run_status_soft_reboot_code(command_exit_code);
+}
+
+int run_status_bounded_wait_timeout_code(int expired)
+{
+    return expired ? RUN_STATUS_TERMINAL_INDETERMINATE : -1;
+}
+
+int run_status_reader_timeout_code(int expired)
+{
+    return run_status_bounded_wait_timeout_code(expired);
+}
+
+int64_t run_status_remaining_budget(int64_t elapsed_ms, int64_t limit_ms)
+{
+    if (limit_ms <= 0 || elapsed_ms < 0 || elapsed_ms >= limit_ms) {
+        return -1;
+    }
+    return limit_ms - elapsed_ms;
+}
+
+int run_status_late_load_launch_code(int launch_failed, int command_exit_code, int timed_out)
+{
+    if (launch_failed) {
+        /* No child was started: this is a definite local failure, not a
+         * timeout with a live child and not an indeterminate outcome. */
+        return RUN_STATUS_TERMINAL_ERROR;
+    }
+    return run_status_late_load_wait_code(command_exit_code, timed_out);
+}
+
+int run_status_soft_reboot_launch_code(int launch_failed, int command_exit_code, int timed_out)
+{
+    if (launch_failed) {
+        return RUN_STATUS_TERMINAL_SOFT_REBOOT_FAIL;
+    }
+    return run_status_soft_reboot_wait_code(command_exit_code, timed_out);
 }
 
 int run_status_exit_code(const struct run_status_result *result)

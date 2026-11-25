@@ -1,6 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): prove atomic run ownership, uncertainty retention, cleanup, and bounded observation. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover the admitted operation ID passed to the production engine. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove an Error from lease close cannot strand cleanup or later submits. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): prove native rc7 keeps ownership until an explicit recovery. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -646,6 +647,145 @@ public class RunCoordinatorTest {
         assertEquals(RunResult.Detail.PROCESS_INTERRUPTION,
                 coordinator.getSnapshot().getResult().getDetail());
         assertFalse(coordinator.getSnapshot().getResult().isSuccess());
+        assertEquals(1, lease.closeCount.get());
+    }
+
+    @Test
+    public void nativeRc7RetainsLeaseFreezeAndAdmissionUntilExplicitRecovery() {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
+        FakeEngine.Plan plan = engine.immediatePlan(NativeResultMapper.map(7));
+        plan.action = call -> call.reporter.report("reporter deadline passed; rc=7 published\n");
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+        assertEquals(RunResult.Type.INDETERMINATE, unverified.getResult().getType());
+        assertEquals(RunResult.Detail.NATIVE_EXIT, unverified.getResult().getDetail());
+        assertEquals(ExploitRunner.RESULT_INDETERMINATE, unverified.getResult().getCode());
+        assertFalse(unverified.getResult().isSuccess());
+        assertNotNull(unverified.getReason());
+        assertTrue(unverified.getReason().contains("outcome unverified"));
+        assertTrue(unverified.getLog().stream().anyMatch(entry ->
+                entry.getMessage().contains("outcome unverified")));
+        assertTrue(unverified.getLog().stream().anyMatch(entry ->
+                entry.getMessage().contains("reporter deadline passed")));
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+        assertEquals(1, engine.callCount());
+
+        // Single-flight admission stays locked: every new submit is rejected.
+        FakeLease rejectedLease = new FakeLease();
+        assertFalse(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                rejectedLease).isAccepted());
+        assertFalse(coordinator.submit(context(), RunConfig.ExecutionMode.UNATTENDED_BOOT,
+                rejectedLease).isAccepted());
+        assertEquals(0, rejectedLease.closeCount.get());
+
+        // Only an explicit caller with the exact operation ID may close it.
+        assertFalse(coordinator.recoverIndeterminate("wrong-operation-id"));
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(repository.isFrozen());
+        assertSame(unverified, coordinator.getSnapshot());
+
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(plan.call.admission.isActive());
+        assertFalse(repository.isFrozen());
+        assertEquals(RunCoordinator.State.TERMINAL, coordinator.getSnapshot().getState());
+        assertEquals(RunResult.Detail.NATIVE_EXIT,
+                coordinator.getSnapshot().getResult().getDetail());
+        assertEquals(1, engine.callCount());
+
+        // Recovery, not an automatic retry, admits the next operation.
+        engine.immediatePlan(NativeResultMapper.map(0));
+        FakeLease secondLease = new FakeLease();
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                secondLease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+        assertEquals(RunCoordinator.State.TERMINAL, coordinator.getSnapshot().getState());
+        assertTrue(coordinator.getSnapshot().getResult().isSuccess());
+        assertEquals(1, secondLease.closeCount.get());
+        assertEquals(2, engine.callCount());
+    }
+
+    @Test
+    public void nativeRc7AfterSupervisionTimeoutKeepsTimeoutResultAndOwnership() {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
+        FakeEngine.Plan plan = engine.immediatePlan(NativeResultMapper.map(7));
+        plan.action = call -> call.events.onTimeout();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+        assertEquals(RunResult.Detail.PROCESS_TIMEOUT, unverified.getResult().getDetail());
+        assertEquals(ExploitRunner.RESULT_INDETERMINATE, unverified.getResult().getCode());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+        assertEquals(1, engine.callCount());
+
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(repository.isFrozen());
+    }
+
+    @Test
+    public void recoveryClaimIsTakenByOnlyOneCaller() throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
+        FakeEngine.Plan plan = engine.immediatePlan(NativeResultMapper.map(7));
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+        RunCoordinator.Snapshot unverified = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, unverified.getState());
+
+        // Deterministically model another correct-ID caller that already took
+        // the claim: a second caller must not clean up or report success too.
+        Field activeOperation = RunCoordinator.class.getDeclaredField("activeOperation");
+        activeOperation.setAccessible(true);
+        Object operation = activeOperation.get(coordinator);
+        Field recoveryClaimed = operation.getClass().getDeclaredField("recoveryClaimed");
+        recoveryClaimed.setAccessible(true);
+        assertFalse(recoveryClaimed.getBoolean(operation));
+        recoveryClaimed.setBoolean(operation, true);
+
+        assertFalse(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+        assertEquals(1, engine.callCount());
+
+        // With the claim free, one caller closes everything exactly once.
+        recoveryClaimed.setBoolean(operation, false);
+        assertTrue(coordinator.recoverIndeterminate(unverified.getOperationId()));
+        assertEquals(1, lease.closeCount.get());
+        assertFalse(plan.call.admission.isActive());
+        assertFalse(repository.isFrozen());
+        assertFalse(coordinator.recoverIndeterminate(unverified.getOperationId()));
         assertEquals(1, lease.closeCount.get());
     }
 

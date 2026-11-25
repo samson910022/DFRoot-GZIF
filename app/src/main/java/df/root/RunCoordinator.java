@@ -2,6 +2,8 @@
 // Modified 2026-11-24 (DFRoot GZIF): retain application-scoped device-protected context for pre-unlock engine work. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): thread the admitted operation ID through the coordinator engine boundary. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): contain close() Errors so cleanup cannot strand the terminal snapshot. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): an unconfirmed native outcome keeps ownership until explicit recovery. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): recovery is single-claim and trusted-caller-only. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -51,6 +53,9 @@ public final class RunCoordinator {
     static final int MAX_LOG_ENTRIES = 200;
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
+    private static final String UNVERIFIED_REASON =
+            "outcome unverified: native rc=7 terminal publication was not confirmed; "
+            + "the worker may still be running and explicit recovery is required";
 
     private static volatile RunCoordinator instance;
 
@@ -302,7 +307,15 @@ public final class RunCoordinator {
             if (completed == null) {
                 throw new IllegalStateException("engine returned null");
             }
-            finish(operation, completed, completed.getReason());
+            if (isUnverifiedNativeResult(completed)) {
+                // Native rc=7 means completion was never confirmed. A timeout or
+                // a direct child exit must never be reported as the whole
+                // operation being done: keep the lease, the frozen config and
+                // single-flight admission until an explicit recovery.
+                markOutcomeUnverified(operation, completed);
+            } else {
+                finish(operation, completed, completed.getReason());
+            }
         } catch (Exception e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -333,6 +346,90 @@ public final class RunCoordinator {
             snapshot = changed;
         }
         notifyListeners(changed);
+    }
+
+    /**
+     * Native rc=7 is mapped to this exact typed result. It is the only engine
+     * result that means "completion was never confirmed" rather than an
+     * observed exit, a supervision timeout/interruption, or an exception.
+     */
+    private static boolean isUnverifiedNativeResult(RunResult result) {
+        return result != null
+                && result.getType() == RunResult.Type.INDETERMINATE
+                && result.getDetail() == RunResult.Detail.NATIVE_EXIT
+                && result.getCode() == ExploitRunner.RESULT_INDETERMINATE;
+    }
+
+    /**
+     * Keeps ownership of an operation whose native outcome was not confirmed.
+     * No finish(), no kill(), no retry: the admission and lease stay open, the
+     * config stays frozen, and new submissions stay rejected. The only exit is
+     * an explicit {@link #recoverIndeterminate(String)} call by a trusted
+     * caller; a later phase will persist and authorize that boundary.
+     */
+    private void markOutcomeUnverified(Operation operation, RunResult completed) {
+        Snapshot changed;
+        synchronized (lock) {
+            if (!isCurrentLocked(operation) || operation.terminal) {
+                return;
+            }
+            if (result == null || state != State.INDETERMINATE) {
+                result = completed;
+                reason = UNVERIFIED_REASON;
+                state = State.INDETERMINATE;
+                appendLogLocked("indeterminate: outcome unverified; retaining lease and "
+                        + "configuration freeze until explicit recovery");
+            } else {
+                // A supervision timeout/interruption already published the
+                // unverified state. Keep its result and ownership intact, but
+                // state plainly that the combined outcome is unverified.
+                appendLogLocked("indeterminate: native rc=7 also unconfirmed; ownership retained");
+                reason = "outcome unverified: " + (reason == null ? "native rc=7" : reason)
+                        + "; explicit recovery required";
+            }
+            changed = buildSnapshotLocked();
+            snapshot = changed;
+        }
+        notifyListeners(changed);
+    }
+
+    /**
+     * Explicit recovery from an unverified (INDETERMINATE) operation.
+     *
+     * <p>This is the ONLY way to close that operation's retained admission and
+     * lease and to release single-flight admission. No timer, retry, observer,
+     * or lifecycle callback calls it: the caller must present the exact
+     * operation ID. A later phase will persist and authorize this boundary.</p>
+     *
+     * <p>Trusted-caller boundary: this method has no exported component, intent
+     * action, broadcast, or binder path. It is a direct in-process API for a
+     * trusted caller (tests exercise it here); the service/UI never wire it.</p>
+     *
+     * @return {@code true} only for the caller that actually claims this
+     *         recovery; {@code false} if no such operation was current or
+     *         another caller already claimed it.
+     */
+    public boolean recoverIndeterminate(String operationId) {
+        Operation operation;
+        RunResult currentResult;
+        String currentReason;
+        synchronized (lock) {
+            if (state != State.INDETERMINATE || cleanupPending || activeOperation == null
+                    || activeOperation.recoveryClaimed
+                    || !Objects.equals(operationId, this.operationId)) {
+                return false;
+            }
+            // Claim under the same lock as the check: concurrent callers with
+            // the correct ID cannot both observe an unclaimed operation.
+            activeOperation.recoveryClaimed = true;
+            operation = activeOperation;
+            currentResult = result;
+            currentReason = reason;
+        }
+        // finish() keeps the indeterminate result, closes the admission and
+        // lease exactly once, and publishes TERMINAL only after both closes.
+        finish(operation, currentResult, currentReason);
+        return true;
     }
 
     private void appendOperationLog(Operation operation, String message) {
@@ -604,6 +701,7 @@ public final class RunCoordinator {
         boolean terminal;
         boolean admissionClosed;
         boolean leaseClosed;
+        boolean recoveryClaimed;
 
         Operation(String id, RunConfig.ExecutionMode mode, ResourceLease lease, Context context,
                   Long expectedGeneration) {
