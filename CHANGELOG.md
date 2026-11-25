@@ -1,5 +1,20 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-25 — R4.7: per-start foreground lifetime and owner-token gate (R2-20)
+
+Short note (R4.9 consolidates docs): `ExploitService` now tracks every start as
+`PENDING → CLAIMED → ACCEPTED/REJECTED/CANCELLED → TERMINAL`, issues `stopSelf`
+once per resolved start only when no owned start is unresolved and no owned
+operation is active, and removes the foreground notification only at that point.
+A terminal snapshot for one operation cannot cancel or stop a newer pending
+request. Each service instance mints a one-way `RunCoordinator.OwnerToken`,
+invalidated before pending work is cancelled on destruction; the coordinator
+rejects a dead owner under the admission lock and rechecks before `engine.run()`.
+A proven pre-engine owner loss clears the durable attempt as `PRECHECK_FAILED`
+without an engine call; an engine that already started is never cancelled and an
+unverified outcome keeps lease, freeze and barrier. Legacy callers without a
+token keep the previous contract. No root probe, kill/signal or replay.
+
 ## 2026-11-25 — R4.6: main-thread outcome reporting off the storage lock (R2-18)
 
 Short note (R4.9 consolidates docs): `ExploitService` now enqueues every

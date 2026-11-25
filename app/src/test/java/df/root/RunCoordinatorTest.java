@@ -5,6 +5,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): pin recovery to real engine completion and single-claim concurrency. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the final unattended gate, fail-closed reads, production wiring, and no revocation after engine start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove request-correlated outcomes are fresh and never alter active operation ownership. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin the foreground owner-token denial at submit and before engine start, and no revocation after start. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -1340,6 +1341,98 @@ public class RunCoordinatorTest {
                     PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP);
             RunCoordinator.resetForTesting();
         }
+    }
+
+    @Test
+    public void deadOwnerTokenAtSubmitRejectsWithoutAttemptEngineOrLeaseOwnership()
+            throws OperationAttemptStore.Failure {
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        RunCoordinator coordinator = gatedCoordinator(store, () -> true);
+        RunCoordinator.OwnerToken token = new RunCoordinator.OwnerToken();
+        token.invalidate();
+        FakeLease lease = new FakeLease();
+
+        RunCoordinator.Submission rejected = coordinator.submit(context(),
+                RunConfig.ExecutionMode.MANUAL, lease, 3L, "dead-owner-at-submit", token);
+
+        assertFalse(rejected.isAccepted());
+        assertTrue(rejected.getReason().contains("foreground owner was destroyed before admission"));
+        assertNull("a dead owner must not publish a durable attempt", store.load());
+        assertEquals(0, engine.callCount());
+        assertEquals("the coordinator never owns a rejected lease", 0, lease.closeCount.get());
+        assertEquals(RunCoordinator.State.IDLE, coordinator.getSnapshot().getState());
+        assertEquals("dead-owner-at-submit", coordinator.getSnapshot().getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED,
+                coordinator.getSnapshot().getRequestOutcome());
+    }
+
+    @Test
+    public void deadOwnerTokenBeforeEngineStartIsProvenPreEffectRejection()
+            throws OperationAttemptStore.Failure {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        RunCoordinator coordinator = new RunCoordinator(repository, queuedWorker, Runnable::run,
+                engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run);
+        coordinator.initialize();
+        engine.immediatePlan(NativeResultMapper.map(0));
+        RunCoordinator.OwnerToken token = new RunCoordinator.OwnerToken();
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                null, "owner-died-before-engine", token).isAccepted());
+        assertEquals(RunCoordinator.State.STARTING, coordinator.getSnapshot().getState());
+        assertNotNull("the attempt was published at admission", store.load());
+        assertTrue(store.load().isUnconfirmed());
+
+        token.invalidate();
+        queuedWorker.runAll();
+
+        RunCoordinator.Snapshot terminal = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.TERMINAL, terminal.getState());
+        assertEquals(RunResult.Type.PRECHECK_FAILED, terminal.getResult().getType());
+        assertEquals(RunResult.Detail.PREFLIGHT_REJECTION, terminal.getResult().getDetail());
+        assertTrue(terminal.getReason().contains("foreground owner was destroyed before engine start"));
+        assertEquals(0, engine.callCount());
+        assertEquals(1, lease.closeCount.get());
+        assertNull("a proven pre-effect rejection clears the durable attempt", store.load());
+        assertFalse(repository.isFrozen());
+    }
+
+    @Test
+    public void deadOwnerTokenAfterEngineStartNeverCancelsAndUnverifiedOutcomeRetainsOwnership()
+            throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        RunCoordinator coordinator = new RunCoordinator(repository, worker, Runnable::run,
+                engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run);
+        coordinator.initialize();
+        FakeEngine.Plan plan = engine.blockingPlan();
+        RunCoordinator.OwnerToken token = new RunCoordinator.OwnerToken();
+        FakeLease lease = new FakeLease();
+        CountDownLatch indeterminate = stateLatch(coordinator, RunCoordinator.State.INDETERMINATE);
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL, lease,
+                null, "owner-died-after-engine", token).isAccepted());
+        assertTrue(plan.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        token.invalidate();
+
+        assertEquals(RunCoordinator.State.RUNNING, coordinator.getSnapshot().getState());
+        assertTrue(plan.call.admission.isActive());
+        assertEquals("an already started engine is never cancelled", 1, engine.callCount());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(repository.isFrozen());
+        assertNotNull(store.load());
+
+        plan.finish(NativeResultMapper.map(7)); // unverified: keep ownership and barrier
+        await(indeterminate);
+
+        assertEquals(RunCoordinator.State.INDETERMINATE, coordinator.getSnapshot().getState());
+        assertEquals(1, engine.callCount());
+        assertEquals(0, lease.closeCount.get());
+        assertTrue(plan.call.admission.isActive());
+        assertTrue(repository.isFrozen());
+        assertNotNull(store.load());
     }
 
     private RunCoordinator gatedCoordinator(OperationAttemptStore store,

@@ -12,6 +12,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): unverified diagnostics name only the observed cause; an unknown exit or exception never claims native rc=7. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): gate unattended admission immediately before the durable publish and re-check authorization before engine start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): publish request-correlated acceptance, rejection and cancellation without changing operation ownership. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): gate admission and pre-engine start on the foreground service owner token; never cancel work after the engine started. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -30,6 +31,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Process-wide owner of one privileged operation.
@@ -59,6 +61,26 @@ public final class RunCoordinator {
         ACCEPTED,
         REJECTED,
         CANCELLED
+    }
+
+    /**
+     * One-way liveness token minted by the foreground service instance that
+     * submits a request. It is NOT an operation owner: invalidating it only
+     * prevents a NOT-YET-started operation from being admitted on behalf of a
+     * destroyed host. Once {@code engineStarted} is set, the coordinator keeps
+     * exclusive ownership and the token has no effect.
+     */
+    public static final class OwnerToken {
+        private final AtomicBoolean alive = new AtomicBoolean(true);
+
+        public boolean isAlive() {
+            return alive.get();
+        }
+
+        /** Irreversible; called by the owning service before it cancels its local work. */
+        public void invalidate() {
+            alive.set(false);
+        }
     }
 
     /** Engine implementations return only after actual completion, never merely on timeout. */
@@ -94,6 +116,12 @@ public final class RunCoordinator {
     /** Honest proven-pre-effect reason for a post-publish, pre-engine rejection. */
     static final String UNATTENDED_AUTH_CHANGED =
             "unattended authorization changed before engine start";
+    /** Dead foreground owner at admission: no attempt, no engine, no lease ownership. */
+    static final String FOREGROUND_OWNER_GONE_AT_SUBMIT =
+            "foreground owner was destroyed before admission";
+    /** Dead foreground owner after publish but before engine.run(): proven pre-effect rejection. */
+    static final String FOREGROUND_OWNER_GONE_BEFORE_ENGINE =
+            "foreground owner was destroyed before engine start";
 
     /**
      * Honest, origin-aware diagnostic for an unconfirmed outcome. It names ONLY
@@ -434,19 +462,19 @@ public final class RunCoordinator {
      */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease) {
-        return submit(context, requestedMode, lease, (Long) null, null);
+        return submit(context, requestedMode, lease, (Long) null, null, null);
     }
 
     /** Generation-bound manual admission; boot and legacy callers may pass {@code null}. */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease, Long expectedGeneration) {
-        return submit(context, requestedMode, lease, expectedGeneration, null);
+        return submit(context, requestedMode, lease, expectedGeneration, null, null);
     }
 
     /** Request-correlated admission for callers that originate a user/service request. */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease, String requestId) {
-        return submit(context, requestedMode, lease, null, requestId);
+        return submit(context, requestedMode, lease, null, requestId, null);
     }
 
     /**
@@ -456,6 +484,18 @@ public final class RunCoordinator {
      */
     public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
                              ResourceLease lease, Long expectedGeneration, String requestId) {
+        return submit(context, requestedMode, lease, expectedGeneration, requestId, null);
+    }
+
+    /**
+     * Service admission with a foreground lifetime token. A {@code null} token
+     * keeps the exact legacy contract for trusted callers that have no
+     * foreground host; the token is an additional denial seam, never a source
+     * of authority.
+     */
+    public Submission submit(Context context, RunConfig.ExecutionMode requestedMode,
+                             ResourceLease lease, Long expectedGeneration, String requestId,
+                             OwnerToken ownerToken) {
         if (context == null) {
             return Submission.rejected(null, "context is required");
         }
@@ -494,20 +534,32 @@ public final class RunCoordinator {
         Context operationContext = applicationContext.isDeviceProtectedStorage()
                 ? applicationContext : applicationContext.createDeviceProtectedStorageContext();
         synchronized (lock) {
-            if (cleanupPending) {
+            // A destroyed foreground host must not admit a queued/claimed
+            // request. Checked under the SAME lock that publishes the durable
+            // attempt: no barrier, no operation, no lease ownership can result.
+            // The caller closes its own service-local lease. This is only a
+            // denial seam; start() rechecks before engine.run().
+            if (ownerToken != null && !ownerToken.isAlive()) {
+                // A fresh correlated rejection is published with the decision,
+                // just like the OFF final gate; no attempt and no worker exist.
+                unauthorizedDetail = FOREGROUND_OWNER_GONE_AT_SUBMIT;
+            }
+            if (cleanupPending && unauthorizedDetail == null) {
                 return Submission.rejected(operationId, "previous operation cleanup is pending");
             }
-            if (state == State.STARTING || state == State.RUNNING
-                    || state == State.INDETERMINATE) {
+            if (unauthorizedDetail == null
+                    && (state == State.STARTING || state == State.RUNNING
+                    || state == State.INDETERMINATE)) {
                 return Submission.rejected(operationId,
                         "operation " + operationId + " is active (" + state + ")");
             }
-            if (!isInitializedLocked()) {
+            if (unauthorizedDetail == null && !isInitializedLocked()) {
                 return Submission.rejected(operationId, initializationFailure != null
                         ? initializationFailure
                         : "attempt store initialization is not complete");
             }
-            if (persistedAttempt != null && persistedAttempt.isUnconfirmed()) {
+            if (unauthorizedDetail == null && persistedAttempt != null
+                    && persistedAttempt.isUnconfirmed()) {
                 return Submission.rejected(persistedAttempt.getOperationId(),
                         priorAttemptReason(persistedAttempt, bootCount));
             }
@@ -516,12 +568,14 @@ public final class RunCoordinator {
             // publishes the durable attempt, immediately before that publish.
             // Manual consent is never gated. OFF or an unreadable/throwing gate
             // means NO publish, NO engine, NO lease owned by the coordinator.
-            if (requestedMode == RunConfig.ExecutionMode.UNATTENDED_BOOT
+            if (unauthorizedDetail == null
+                    && requestedMode == RunConfig.ExecutionMode.UNATTENDED_BOOT
                     && !unattendedAuthorized()) {
                 unauthorizedDetail = UNATTENDED_AUTH_REJECT;
-                // Publish the fresh rejection snapshot under the SAME lock as
-                // the authorization decision; noteRequestRejected() below only
-                // notifies observers, so a new submit cannot interleave here.
+            }
+            // Publish the fresh correlated rejection under the SAME lock as the
+            // decision, so a new submit cannot interleave before observers see it.
+            if (unauthorizedDetail != null) {
                 requestFailure = unauthorizedDetail;
                 this.requestId = requestId;
                 requestOutcome = RequestOutcome.REJECTED;
@@ -546,7 +600,7 @@ public final class RunCoordinator {
                 }
 
                 operation = new Operation(id, requestedMode, lease, operationContext,
-                        expectedGeneration);
+                        expectedGeneration, ownerToken);
                 persistedAttempt = attempt;
                 attemptPublishedInThisProcess = true;
                 activeOperation = operation;
@@ -748,15 +802,28 @@ public final class RunCoordinator {
                 }
             };
             IReporter reporter = message -> appendOperationLog(operation, message);
+            boolean ownerGoneBeforeEngine;
             boolean authLostBeforeEngine;
             synchronized (lock) {
-                // Second, atomic recheck: the gate read and engineStarted share
-                // the same lock, so an OFF toggle cannot slip between the read
-                // and engine.run(). An already-started engine keeps ownership.
+                // Final, atomic recheck under the same lock as engineStarted:
+                // neither an OFF toggle nor a destroyed foreground host can
+                // slip between the read and engine.run(). A token is only a
+                // denial seam BEFORE engine start; once engineStarted is set the
+                // coordinator keeps exclusive ownership and never cancels
+                // privileged work, regardless of what the host does.
+                ownerGoneBeforeEngine = !operation.engineStarted
+                        && operation.ownerToken != null && !operation.ownerToken.isAlive();
                 authLostBeforeEngine = unattendedAuthorizationLostLocked(operation);
-                if (!authLostBeforeEngine) {
+                if (!ownerGoneBeforeEngine && !authLostBeforeEngine) {
                     operation.engineStarted = true;
                 }
+            }
+            if (ownerGoneBeforeEngine) {
+                // Proven pre-effect rejection: engine.run() was never called,
+                // so finish() clears the durable attempt and closes resources.
+                finish(operation, RunResult.precheckFailed(FOREGROUND_OWNER_GONE_BEFORE_ENGINE),
+                        FOREGROUND_OWNER_GONE_BEFORE_ENGINE);
+                return;
             }
             if (authLostBeforeEngine) {
                 // engine.run() was never called; finish() clears the durable
@@ -1368,6 +1435,7 @@ public final class RunCoordinator {
         final ResourceLease lease;
         final Context context;
         final Long expectedGeneration;
+        final OwnerToken ownerToken;
         ConfigurationRepository.RunAdmission admission;
         boolean terminal;
         boolean admissionClosed;
@@ -1380,12 +1448,13 @@ public final class RunCoordinator {
         boolean engineFinished;
 
         Operation(String id, RunConfig.ExecutionMode mode, ResourceLease lease, Context context,
-                  Long expectedGeneration) {
+                  Long expectedGeneration, OwnerToken ownerToken) {
             this.id = id;
             this.mode = mode;
             this.lease = lease;
             this.context = context;
             this.expectedGeneration = expectedGeneration;
+            this.ownerToken = ownerToken;
         }
     }
 }
