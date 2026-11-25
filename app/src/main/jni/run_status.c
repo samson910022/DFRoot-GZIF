@@ -9,6 +9,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): gate the post-link/pre-confirmation observation window with a host-only hook. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): map contradictory terminal markers to indeterminate rc7 instead of definitive rc1. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): require a matching confirmation marker for every definitive non-7 code; publish rc7 on any publication failure before retraction. See NOTICE. */
+/* Modified 2026-11-26 (DFRoot GZIF): narrow the post-confirm guarantee to what is observed; add a host-only confirmation-link pause. See NOTICE. */
 #define _POSIX_C_SOURCE 200809L
 #include "run_status.h"
 
@@ -43,6 +44,9 @@ static int writer_wait_fd = -1;
 static int writer_notify_fd = -1;
 static int post_link_wait_fd = -1;
 static int post_link_notify_fd = -1;
+static int confirm_post_link_wait_fd = -1;
+static int confirm_post_link_notify_fd = -1;
+static int confirm_unlink_fault;
 static int retract_wait_fd = -1;
 static int retract_notify_fd = -1;
 void run_status_inject_fault(int fault) { injected_fault = fault; }
@@ -59,6 +63,15 @@ void run_status_set_post_link_pause(int wait_fd, int notify_fd)
 {
     post_link_wait_fd = wait_fd;
     post_link_notify_fd = notify_fd;
+}
+void run_status_set_confirm_post_link_pause(int wait_fd, int notify_fd)
+{
+    confirm_post_link_wait_fd = wait_fd;
+    confirm_post_link_notify_fd = notify_fd;
+}
+void run_status_set_confirm_unlink_fault(int enabled)
+{
+    confirm_unlink_fault = enabled ? 1 : 0;
 }
 void run_status_set_retract_pause(int wait_fd, int notify_fd)
 {
@@ -872,6 +885,27 @@ static int publish_marker(int code, enum marker_kind kind,
                               "post-link pause ended unexpectedly") != 0) {
         return -1;
     }
+    /* R2-14 residual boundary, host only: pause immediately AFTER the
+     * confirmation link() and BEFORE its temp unlink/directory fsync. At this
+     * instant both the intended marker and a matching confirmation are visible,
+     * so a concurrent reader can record a definitive-looking result with
+     * publication_confirmed == 1. No failure is detected and no rc7 exists yet;
+     * any later rc7 correction cannot revoke that already consumed result. */
+    if (kind == MARKER_CONFIRM) {
+        if (status_gated_pause(&confirm_post_link_wait_fd,
+                               &confirm_post_link_notify_fd,
+                               "confirmation post-link pause notification failed",
+                               "confirmation post-link pause ended unexpectedly") != 0) {
+            return -1;
+        }
+        /* Arm the existing transient unlink fault only AFTER phase 1 is fully
+         * published and the confirmation link is visible, so the detected
+         * failure is strictly post-confirm and consumes no phase-1 retry. */
+        if (confirm_unlink_fault) {
+            injected_fault |= RUN_STATUS_FAULT_UNLINK_TEMP;
+            confirm_unlink_fault = 0;
+        }
+    }
 #endif
     if (status_unlink_temp(temp_path) != 0) {
         (void)status_fail_phase_errno(kind, "unlink failed");
@@ -927,11 +961,15 @@ int run_status_write(int code)
 unconfirmed:
     {
         /* The indeterminate reader channel is published FIRST, before ANY
-         * final link is retracted, so a concurrent reader sees indeterminate
-         * and never a clean absence or an actionable success. rc=7 needs no
-         * confirmation. For an rc=7 intended code the channel already exists
-         * and is deliberately kept. The first diagnostic is restored for the
-         * caller: bootstrap maps -1 to rc=7, never to the intended code. */
+         * final link is retracted. ONCE rc7 has actually been published AND
+         * OBSERVED it outranks success and conflicts, and needs no
+         * confirmation. This is a correction, not a revocation: rc7 is produced
+         * only AFTER a failure is detected, so a reader that already consumed a
+         * definitive-looking confirmation in the window between the confirmation
+         * link() and its temp unlink/directory fsync cannot have that result
+         * revoked. For an rc=7 intended code the channel already exists and is
+         * deliberately kept. The first diagnostic is restored for the caller:
+         * bootstrap maps -1 to rc=7, never to the intended code. */
         char first_error[RUN_STATUS_DIAGNOSTIC_MAX];
         snprintf(first_error, sizeof(first_error), "%s", status_error);
 

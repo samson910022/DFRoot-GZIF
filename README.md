@@ -91,8 +91,11 @@ yields **no decision** (keep polling) with a "not publication-confirmed;
 completion unverified" diagnostic — it is never acted on as success. On **any**
 detected publication failure (including a confirmation-step failure), rc7 is
 published **before** any final link is retracted, temps are cleaned, and the
-writer exits 7; the indeterminate channel needs no confirmation and outranks
-success and conflicts. A duplicate/conflicting publication also publishes rc7.
+writer exits 7. A duplicate/conflicting publication also publishes rc7. **Exact
+guarantee:** ONCE rc7 has been published AND OBSERVED it outranks success and
+conflicts and needs no confirmation. This is a correction, not a revocation:
+rc7 is produced only AFTER detection, so a reader that consumed a
+definitive-looking result earlier cannot have that result taken back.
 
 **Residual window — OPEN hardware/OS gate, not proved safe.** `link()` makes the
 final pathname visible before temp unlink and directory fsync complete. If the
@@ -100,9 +103,15 @@ writer dies abnormally after the confirmation link but before its fsync, an
 external reader can still observe a definitive-looking result that was never
 durably acknowledged. If it dies between intended-marker publication and
 confirmation, the reader sees only an unconfirmed marker and must not decide.
-These abnormal-death instants are not closed by host tests; device crash/power-
-loss validation of `/dev` marker durability remains required. The safety policy
-is unchanged: rc7 precedence and indeterminate ownership still apply.
+The same observation window exists on an **ordinary detected failure**: after
+the acknowledgement is visible but before a failure is detected and its
+corrective rc7 published, a concurrent reader may classify a definitive-looking
+result; the later rc7 cannot revoke what was already consumed. Deterministic
+host fixtures record both observations; they are boundary fixtures, not a fix
+proof and not device safety. These instants are not closed by host tests;
+device crash/power-loss validation of `/dev` marker durability remains required.
+The safety policy is unchanged: rc7 precedence and indeterminate ownership
+still apply, no device safety is implied, and R2-14 remains OPEN.
 
 ## Operation ownership, boot, and soft reboot
 
@@ -364,6 +373,30 @@ guard test pins the removed phrases out and the honest text in. No device, ADB,
 payload, privileged-container, APK-assembly or native work was performed; no
 device safety is implied and R2-16 is scoped, not claimed closed.
 
+### R5.7 note (2026-11-26) — R2-14 residual publication-window boundary (scoped docs + host fixtures)
+
+Documentation and harmless host fixtures only; R2-14 remains OPEN and the
+privileged publication mechanism is NOT redesigned. Narrowed the overclaim in
+`run_status.h`/`run_status.c` that a concurrent reader never sees actionable
+success on ANY detected failure. The provable statement is now explicit: ONCE
+rc7 has been published AND OBSERVED it outranks success/conflicts; BEFORE that,
+a reader may have consumed a definitive-looking confirmation in the window
+between the confirmation `link()` and its temp unlink/directory fsync; a
+detected failure produces corrective rc7 only AFTER detection; later correction
+cannot revoke an already consumed result. Added a host-only `RUN_STATUS_TEST_HOOKS`
+pause immediately after the confirmation `link()`, plus two deterministic
+fixtures: `run_status.r2_14_residual_confirm_window_boundary` (pipe-gated reader
+records the early definitive observation, then the later rc7 correction) and
+`run_status.publication_state_machine_boundary` (pure table over unconfirmed /
+confirmed / detected-failure / abnormal-death with a proved / not-proved column;
+abnormal-death is observationally identical to confirmed and is marked NOT
+proved safe). Production `jni/CMakeLists.txt` does not define
+`RUN_STATUS_TEST_HOOKS`, and no production control flow, rc contract, `/dev/df`
+or `/dev/dfm6` progress-only SUCCESS semantics, or confirmation protocol
+behavior changed. Full host suite: 142 tests, 0 failures, warnings-clean. No
+device, ADB, payload, privileged-container, APK-assembly or root work was done;
+no device safety is implied and no R2-14 closure is claimed.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`
@@ -436,7 +469,7 @@ gates in this section are current.
 | R2-12 | `6ebf9e3` | Unverified observations no longer masquerade as success: terminal classifier failures map to rc=7, one authoritative unverified-outcome predicate prevents timeout/interruption flags from hiding an unknown exit, and `RunCoordinator` retains ownership and the durable attempt on every unverified result or engine exception. |
 | R2-13 | `2a74dd0` | Uncertain persisted attempt records fail closed: incomplete/corrupt records are a barrier, not absence; a store is poisoned after a failed checked commit so its process-local cache cannot prove durable absence until a post-restart store re-reads durable state. |
 | R2-14 | `6012c21` | The post-link publication window is documented as provable, not stronger: pre-link failures leave no final marker; once rc=7 is published it outranks success/conflicts; only results acted on **after publication completes** are indeterminate. A deterministic concurrent-reader host test proves an early confirmed observation is possible and cannot be revoked. |
-| R2-14 (R4.3) | `916a18e` | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification, with three new confirmation-protocol cases. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
+| R2-14 (R4.3) | `916a18e` | Narrowed in code, not proved safe: a definitive non-7 code requires a matching `dfroot_confirm_` marker; an unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. The early-observation test is fix verification for the previously reproduced unconfirmed-marker case; the broader "ANY detected failure" claim was narrowed by R5.7. The abnormal-death instant (death after the confirmation link but before its fsync, or between the two phases) remains an OPEN hardware/OS gate — no claim of proved safety. |
 | R2-16 / R2-17 | `b87318f` | Queued unattended requests re-read the Start-at-Boot component setting at admission and fail closed on OFF/unreadable without touching an admitted operation; every rejected submission publishes a fresh rejection snapshot so the Activity leaves its pending state and shows the real barrier reason. |
 | R2-16 (R4.4) | `7e41d27` | Closed the remaining pending-admission window: the authoritative authorization gate sits inside `submit()` immediately before the durable publish (fail closed when unreadable), with a second recheck immediately before engine start. An OFF toggle during a blocked publish, configuration wait or queued worker now yields a proven pre-effect `PRECHECK_FAILED` with a checked barrier clear and no engine call; OFF after engine start is deliberately not revoked. Hardware/OS FGS eligibility remains a separate gate. The final atomicity with the Settings write is still **open** — see the R5.6 honest boundary above. |
 | R2-18 | `d32006e` | Checked attempt-store work runs on a bounded single-thread admission executor with claim-once/close-once ownership, and the read-only availability diagnostic runs on a separate worker with sequence/generation guards. No safety check is bypassed: Boot OFF, the durable barrier, single-flight and fail-closed diagnostics stay authoritative. |

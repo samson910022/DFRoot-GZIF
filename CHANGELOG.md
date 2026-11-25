@@ -1,5 +1,48 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.7: R2-14 residual publication-window boundary (scoped docs + harmless host fixtures) — PR #2
+
+Documentation and harmless host fixtures only; **R2-14 remains OPEN** and the
+privileged publication mechanism was not redesigned, made device-safe, or
+claimed fixed. Narrowed the overclaim in `run_status.h` / `run_status.c` that a
+concurrent reader "never sees actionable success on ANY detected failure".
+Replacement, provable statement: **ONCE rc7 has been published AND OBSERVED it
+outranks success/conflicts; BEFORE that a reader may have consumed a
+definitive-looking confirmation in the window between the confirmation `link()`
+and its temp unlink/directory fsync; a detected failure produces corrective rc7
+only AFTER detection; later correction cannot revoke an already consumed
+result.** The OPEN hardware/OS gate note is retained in both files.
+
+Added a host-only `#ifdef RUN_STATUS_TEST_HOOKS` pause in `publish_marker` for
+`MARKER_CONFIRM` immediately AFTER `link()` and BEFORE temp unlink/fsync, using
+the existing one-shot wait_fd/notify_fd pipe handshake; a companion host-only
+setter arms the existing transient unlink fault only after phase 1 completes,
+so the detected failure is strictly post-confirm. Production
+`app/src/main/jni/CMakeLists.txt` compiles `run_status.c` into both binaries
+with no `RUN_STATUS_TEST_HOOKS` definition; `exp.c` / `bootstrap.c` contain no
+hook usage. No production control-flow change (only comments plus `#ifdef`
+hook code in `run_status.c`/`run_status.h`).
+
+New deterministic fixtures: `run_status.r2_14_residual_confirm_window_boundary`
+records observation (1) a definitive-looking rc0 with
+`publication_confirmed == 1` while the writer is gated after the confirmation
+link and before its fsync, with no rc7 yet, and (2) after release and the
+injected post-confirm unlink fault, rc7 published before retraction and
+classified as indeterminate; the fixture states that (1) was consumed before
+detection and cannot be revoked. `run_status.publication_state_machine_boundary`
+is a pure table over unconfirmed / confirmed / detected-failure /
+abnormal-death with an explicit proved / not-proved column; abnormal-death is
+observationally identical to confirmed and marked NOT proved safe.
+
+Verification: `cmake -S app/src/main/jni/host-tests -B
+/mnt/240G_SSD/opencode_tmp/dfroot-hosttests-r5 -DCMAKE_BUILD_TYPE=Debug &&
+cmake --build ... -j && ctest --test-dir ... --output-on-failure
+--no-tests=error` → **142/142 host CTest passed, 0 failures**, warnings-clean.
+Unchanged: rc contract 0/1/2/3/4/6/7, `/dev/df` and `/dev/dfm6` progress-only
+SUCCESS semantics, the confirmation protocol and all Java behavior. No device,
+ADB, payload, privileged-container, APK-assembly or root work; no device safety
+implied; no commit, stage or push.
+
 ## 2026-11-26 — R5.6: honest final-authorization boundary (R2-16 scoped docs/boundary phase) — PR #2
 
 Documentation/boundary phase only: ZERO executable or control-flow changes in
@@ -220,7 +263,7 @@ Scope: R2-14 only. No device/ADB, payload, privileged container, APK assembly,
 Java suite, loader pin, boot claim, preflight, kill/signal, progress-marker or
 rc-contract change. The reproduced early-observation race is closed in code at
 the detected-failure level; the abnormal-death instant remains an open
-hardware/OS gate and is NOT claimed proved safe (see residual window below).
+hardware/OS gate and is NOT claimed proved safe (see residual window below). The broader "ANY detected failure" claim was later narrowed by R5.7; see the R5.7 boundary note below.
 
 - **Code fix, not documentation or a passing reproduction.** `run_status_write()`
   now publishes two checked markers in the same root: the intended

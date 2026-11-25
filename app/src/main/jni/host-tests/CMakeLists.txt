@@ -13,6 +13,7 @@
 # Modified 2026-11-25 (DFRoot GZIF): register the harmless classifier-failure rc7 reader case. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): register the post-link early-observation gated reader case. See NOTICE.
 # Modified 2026-11-25 (DFRoot GZIF): register confirmation-protocol fix-verification cases and update the reworked early-observation case. See NOTICE.
+# Modified 2026-11-26 (DFRoot GZIF): register the R2-14 residual-window boundary and proved/not-proved state-machine cases. See NOTICE.
 cmake_minimum_required(VERSION 3.16)
 project(dfroot_run_config_host_tests LANGUAGES C)
 
@@ -224,6 +225,8 @@ foreach(status_case IN ITEMS
         post_link_early_observation
         confirmed_publication_yields_success
         confirmation_failure_is_indeterminate
+        r2_14_residual_confirm_window_boundary
+        publication_state_machine_boundary
         unconfirmed_or_crossed_markers_never_confirm
         late_load_command_timeout
         soft_reboot_command_timeout

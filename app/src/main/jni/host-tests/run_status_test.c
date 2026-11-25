@@ -8,6 +8,7 @@
 /* Modified 2026-11-25 (DFRoot GZIF): gate the whole post-link/pre-rc7 observation window with a deterministic concurrent reader. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): assert conflicting terminal observations map to indeterminate rc7, not definitive rc1. See NOTICE. */
 /* Modified 2026-11-25 (DFRoot GZIF): rework the post-link case into fix verification: unconfirmed markers yield no decision, and a matching confirmation is required for success. See NOTICE. */
+/* Modified 2026-11-26 (DFRoot GZIF): add R2-14 residual-window boundary fixtures that record both observations and a proved/not-proved state-machine table. See NOTICE. */
 #include "run_status.h"
 
 #include <dirent.h>
@@ -1541,6 +1542,219 @@ static void test_confirmation_failure_is_indeterminate(void)
     expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
 }
 
+/* R2-14 residual-window boundary fixture — NOT a fix proof, NOT device safety.
+ * Two observations are recorded under pipe gates (no sleeps and no luck):
+ *  (1) while the writer is paused immediately AFTER the confirmation link()
+ *      and BEFORE its temp unlink/fsync, a concurrent reader classifies a
+ *      definitive-looking rc0 with publication_confirmed == 1. No failure has
+ *      been detected and no rc7 marker exists yet.
+ *  (2) after release, the transient post-confirm unlink fault is detected and
+ *      rc7 is published before retraction; ONCE published AND observed, rc7
+ *      outranks the earlier rc0 and any conflict.
+ * Boundary: rc7 in (2) was produced only AFTER detection and CANNOT revoke the
+ * result already consumed in (1). The R2-14 gate stays OPEN. */
+static void test_r2_14_residual_confirm_window_boundary(void)
+{
+    configure(OUR_ID);
+    int gate[2], observed[2];
+    int confirm_release[2], confirm_paused[2];
+    int retract_release[2], retract_paused[2];
+    int diagnostic[2];
+    if (pipe(gate) != 0 || pipe(observed) != 0
+        || pipe(confirm_release) != 0 || pipe(confirm_paused) != 0
+        || pipe(retract_release) != 0 || pipe(retract_paused) != 0
+        || pipe(diagnostic) != 0) {
+        die("residual-window boundary pipes failed");
+    }
+    run_status_set_confirm_post_link_pause(confirm_release[0], confirm_paused[1]);
+    run_status_set_retract_pause(retract_release[0], retract_paused[1]);
+    /* The existing transient unlink fault is armed for the confirmation phase
+     * only; it is applied when the gate is released, after the first observation. */
+    run_status_set_confirm_unlink_fault(1);
+
+    pid_t writer = fork();
+    if (writer < 0) die("residual-window boundary writer fork failed");
+    if (writer == 0) {
+        close(gate[0]); close(gate[1]);
+        close(observed[0]); close(observed[1]);
+        close(confirm_release[1]); close(confirm_paused[0]);
+        close(retract_release[1]); close(retract_paused[0]);
+        close(diagnostic[0]);
+        /* The host-only gate arms a one-shot EIO on the post-confirm temp
+         * unlink; no fault is active during phase 1 and none is active until
+         * the residual observation has been recorded at the confirmation gate. */
+        int rc = run_status_write(RUN_STATUS_TERMINAL_SUCCESS);
+        const char *message = run_status_last_error();
+        size_t length = message == NULL ? 0 : strlen(message);
+        if (length > RUN_STATUS_DIAGNOSTIC_MAX) length = RUN_STATUS_DIAGNOSTIC_MAX;
+        if (length > 0 && write(diagnostic[1], message, length) != (ssize_t)length) {
+            _exit(2);
+        }
+        close(diagnostic[1]);
+        _exit(rc == 0 ? 0 : RUN_STATUS_TERMINAL_INDETERMINATE);
+    }
+
+    pid_t reader = fork();
+    if (reader < 0) die("residual-window boundary reader fork failed");
+    if (reader == 0) {
+        close(gate[1]);
+        close(observed[0]);
+        close(confirm_release[0]); close(confirm_release[1]);
+        close(confirm_paused[0]); close(confirm_paused[1]);
+        close(retract_release[0]); close(retract_release[1]);
+        close(retract_paused[0]); close(retract_paused[1]);
+        close(diagnostic[0]); close(diagnostic[1]);
+        char command;
+        for (;;) {
+            ssize_t count = read(gate[0], &command, 1);
+            if (count == 0) break;
+            if (count != 1) _exit(2);
+            struct run_status_result result;
+            /* N = no decision, C = definitive non-7 with
+             * publication_confirmed == 1, R = observed rc7, X = any other
+             * classification (conflict, unconfirmed, or a wrong code). */
+            char verdict = 'X';
+            if (run_status_classify(&result) == 0) {
+                if (result.verdict == RUN_STATUS_VERDICT_NONE) {
+                    verdict = 'N';
+                } else if (result.verdict == RUN_STATUS_VERDICT_TERMINAL) {
+                    if (result.code == RUN_STATUS_TERMINAL_SUCCESS
+                        && result.publication_confirmed == 1) {
+                        verdict = 'C';
+                    } else if (result.code == RUN_STATUS_TERMINAL_INDETERMINATE) {
+                        verdict = 'R';
+                    }
+                }
+            }
+            if (write(observed[1], &verdict, 1) != 1) _exit(3);
+        }
+        _exit(0);
+    }
+
+    close(gate[0]); close(observed[1]);
+    close(confirm_release[0]); close(confirm_paused[1]);
+    close(retract_release[0]); close(retract_paused[1]);
+    close(diagnostic[1]);
+
+    char byte;
+    if (read(confirm_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("writer never reached the confirmation post-link pause");
+    }
+
+    /* RECORD 1: the confirmation link is visible but its temp unlink and
+     * directory fsync have not run. Both markers exist, so classification is
+     * definitive even though the publication has not been durability-checked. */
+    expect_confirm_present(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    char name[RUN_STATUS_MARKER_NAME_MAX];
+    make_terminal_name(name, sizeof(name), OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    make_path(marker_path, sizeof(marker_path), name);
+    struct stat st;
+    if (lstat(marker_path, &st) != 0 || !S_ISREG(st.st_mode)) {
+        die("intended marker missing at the confirmation post-link gate");
+    }
+    /* No failure detected yet: the corrective rc7 does not exist, so this
+     * definitive-looking observation precedes any correction by construction. */
+    make_terminal_name(name, sizeof(name), OUR_ID, RUN_STATUS_TERMINAL_INDETERMINATE);
+    make_path(marker_path, sizeof(marker_path), name);
+    if (lstat(marker_path, &st) == 0) {
+        die("rc7 was published before the residual observation was consumed");
+    }
+    if (errno != ENOENT) {
+        perror("lstat residual-window early rc7");
+        exit(1);
+    }
+    struct run_status_result first = classify();
+    if (first.verdict != RUN_STATUS_VERDICT_TERMINAL
+        || first.code != RUN_STATUS_TERMINAL_SUCCESS
+        || first.publication_confirmed != 1
+        || run_status_exit_code(&first) != RUN_STATUS_TERMINAL_SUCCESS) {
+        fprintf(stderr, "residual observation was not definitive-looking: "
+                        "verdict=%d code=%d confirmed=%d\n",
+                (int)first.verdict, first.code, first.publication_confirmed);
+        exit(1);
+    }
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "1", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("residual-window first-observation handshake failed");
+        }
+        if (byte != 'C') {
+            fprintf(stderr, "reader did not record the definitive residual "
+                            "observation: '%c'\n", byte);
+            exit(1);
+        }
+    }
+
+    /* RECORD 2: release the writer. The injected post-confirm unlink EIO is now
+     * detected, rc7 is published first, and the writer pauses before retracting
+     * either final link, so the rc7-over-rc0 precedence is deterministic. */
+    if (write(confirm_release[1], "g", 1) != 1) {
+        die("confirmation post-link release failed");
+    }
+    if (read(retract_paused[0], &byte, 1) != 1 || byte != 'p') {
+        die("writer never reached the retract pause after the detected failure");
+    }
+    expect_confirm_present(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "2", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("residual-window correction handshake failed");
+        }
+        if (byte != 'R') die("observed rc7 did not outrank the earlier rc0");
+    }
+
+    if (write(retract_release[1], "g", 1) != 1) die("retract release failed");
+    for (int i = 0; i < READER_POLLS; i++) {
+        if (write(gate[1], "3", 1) != 1 || read(observed[0], &byte, 1) != 1) {
+            die("residual-window steady-state handshake failed");
+        }
+        if (byte != 'R') die("reader did not keep rc7 in the steady state");
+    }
+
+    /* Both observations were recorded above. The first was consumed before
+     * detection and cannot be revoked by the later corrective rc7. */
+    char message[RUN_STATUS_DIAGNOSTIC_MAX + 1];
+    size_t length = 0;
+    for (;;) {
+        ssize_t count = read(diagnostic[0], message + length, sizeof(message) - 1 - length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) {
+            perror("read residual-window writer diagnostic");
+            exit(1);
+        }
+        if (count == 0) break;
+        length += (size_t)count;
+        if (length == sizeof(message) - 1) break;
+    }
+    message[length] = '\0';
+    const char expected_error[] = "confirmation marker unlink failed";
+    if (strncmp(message, expected_error, sizeof(expected_error) - 1) != 0) {
+        fprintf(stderr, "residual-window first diagnostic was lost: '%s'\n", message);
+        exit(1);
+    }
+
+    int status = 0;
+    if (waitpid(writer, &status, 0) != writer || !WIFEXITED(status)
+        || WEXITSTATUS(status) != RUN_STATUS_TERMINAL_INDETERMINATE) {
+        die("residual-window boundary writer did not exit rc=7");
+    }
+    close(gate[1]);
+    if (waitpid(reader, &status, 0) != reader || !WIFEXITED(status)
+        || WEXITSTATUS(status) != 0) {
+        die("residual-window boundary reader fixture failed");
+    }
+    close(observed[0]);
+    close(confirm_release[1]); close(confirm_paused[0]);
+    close(retract_release[1]); close(retract_paused[0]);
+    close(diagnostic[0]);
+    run_status_set_confirm_post_link_pause(-1, -1);
+    run_status_set_retract_pause(-1, -1);
+    run_status_set_confirm_unlink_fault(0);
+    expect_no_final(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_confirm(OUR_ID, RUN_STATUS_TERMINAL_SUCCESS);
+    expect_no_temp_files();
+    expect_terminal(RUN_STATUS_TERMINAL_INDETERMINATE);
+}
+
 /* Crossed/missing/malformed confirmations must never turn any observation into
  * success. All fixtures are harmless hand-written files with no privileged
  * operation involved. */
@@ -2215,6 +2429,94 @@ static void test_classifier_failure_indeterminate(void)
     free(e);
 }
 
+/* Pure, deterministic state-machine table for the R2-14 boundary. Harmless
+ * hand-written marker fixtures only: no writer hooks, no fault injection, no
+ * device. The safety column is explicit so this table cannot be misread as
+ * closing the OPEN gate. */
+struct publication_state_row {
+    const char *state;
+    int intended_code;      /* -1 = no intended marker */
+    int confirm_code;       /* -1 = no confirmation marker */
+    enum run_status_verdict expected_verdict;
+    int expected_code;      /* -1 for NONE */
+    int expected_confirmed;
+    const char *safety;     /* exactly "proved" or "not proved" */
+};
+
+static void test_publication_state_machine_boundary(void)
+{
+    static const struct publication_state_row rows[] = {
+        { "unconfirmed", RUN_STATUS_TERMINAL_SUCCESS, -1,
+          RUN_STATUS_VERDICT_NONE, -1, 0, "proved" },
+        { "confirmed", RUN_STATUS_TERMINAL_SUCCESS, RUN_STATUS_TERMINAL_SUCCESS,
+          RUN_STATUS_VERDICT_TERMINAL, RUN_STATUS_TERMINAL_SUCCESS, 1, "proved" },
+        { "detected-failure", RUN_STATUS_TERMINAL_INDETERMINATE, -1,
+          RUN_STATUS_VERDICT_TERMINAL, RUN_STATUS_TERMINAL_INDETERMINATE,
+          0, "proved" },
+        /* Abnormal death after the confirmation link() but before its temp
+         * unlink/fsync presents exactly the files of a confirmed run. The
+         * reader cannot tell them apart, so this state is NOT proved safe. */
+        { "abnormal-death", RUN_STATUS_TERMINAL_SUCCESS, RUN_STATUS_TERMINAL_SUCCESS,
+          RUN_STATUS_VERDICT_TERMINAL, RUN_STATUS_TERMINAL_SUCCESS, 1,
+          "not proved" }
+    };
+    configure(OUR_ID);
+    /* reset_root writes back into its argument, so pass a copy of root rather
+     * than aliasing the global buffer it reads from. */
+    char case_root[PATH_MAX];
+    if (snprintf(case_root, sizeof(case_root), "%s", root) < 0
+        || strlen(case_root) >= sizeof(case_root)) {
+        die("state-machine fixture root is too long");
+    }
+    int not_proved_rows = 0;
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        reset_root(case_root);
+        if (rows[i].intended_code >= 0) {
+            write_terminal_fixture(OUR_ID, rows[i].intended_code);
+        }
+        if (rows[i].confirm_code >= 0) {
+            write_confirm_fixture(OUR_ID, rows[i].confirm_code);
+        }
+        struct run_status_result result = classify();
+        if (result.verdict != rows[i].expected_verdict
+            || result.code != rows[i].expected_code
+            || result.publication_confirmed != rows[i].expected_confirmed) {
+            fprintf(stderr, "state '%s' observation mismatch: verdict=%d code=%d "
+                            "confirmed=%d (expected %d/%d/%d)\n",
+                    rows[i].state, (int)result.verdict, result.code,
+                    result.publication_confirmed, (int)rows[i].expected_verdict,
+                    rows[i].expected_code, rows[i].expected_confirmed);
+            exit(1);
+        }
+        int expected_exit = rows[i].expected_verdict == RUN_STATUS_VERDICT_NONE
+                            ? -1 : rows[i].expected_code;
+        if (run_status_exit_code(&result) != expected_exit) {
+            fprintf(stderr, "state '%s' mapped to the wrong exit code\n", rows[i].state);
+            exit(1);
+        }
+        if (!strcmp(rows[i].safety, "not proved")) {
+            not_proved_rows++;
+            if (strcmp(rows[i].state, "abnormal-death") != 0) {
+                die("only abnormal-death may be marked not proved");
+            }
+        } else if (strcmp(rows[i].safety, "proved")) {
+            die("state-machine safety column must be explicit");
+        }
+    }
+    if (not_proved_rows != 1) {
+        die("state-machine table must record exactly one not-proved state");
+    }
+    /* A confirmed run and an abnormal death after the confirmation link are
+     * observationally identical; that is precisely why classification cannot
+     * close the residual window and why R2-14 stays OPEN. */
+    if (rows[1].expected_verdict != rows[3].expected_verdict
+        || rows[1].expected_code != rows[3].expected_code
+        || rows[1].expected_confirmed != rows[3].expected_confirmed) {
+        die("abnormal-death must be indistinguishable from a confirmed result");
+    }
+    reset_root(case_root);
+}
+
 static void run_case(const char *name)
 {
     if (!strcmp(name, "rc0")) {
@@ -2304,6 +2606,10 @@ static void run_case(const char *name)
         test_confirmed_publication_yields_success();
     } else if (!strcmp(name, "confirmation_failure_is_indeterminate")) {
         test_confirmation_failure_is_indeterminate();
+    } else if (!strcmp(name, "r2_14_residual_confirm_window_boundary")) {
+        test_r2_14_residual_confirm_window_boundary();
+    } else if (!strcmp(name, "publication_state_machine_boundary")) {
+        test_publication_state_machine_boundary();
     } else if (!strcmp(name, "unconfirmed_or_crossed_markers_never_confirm")) {
         test_unconfirmed_or_crossed_markers_never_confirm();
     } else if (!strcmp(name, "late_load_command_timeout")) {
