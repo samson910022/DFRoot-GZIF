@@ -1,16 +1,11 @@
 # Modified 2026-11-17 (DFRoot GZIF): agp 9.4.0 -> 9.5.0. See NOTICE.
+# Modified 2026-11-24 (DFRoot GZIF): removed the appcompat / material /
+# constraintlayout / preference library declarations. app/build.gradle.kts has
+# an empty dependencies {} block and the source uses the framework
+# android.preference.* API, so none of them were ever resolved. Keep only the
+# AGP plugin alias, which is the single source of truth for the AGP version.
 [versions]
 agp = "9.5.0"
-appcompat = "1.7.1"
-material = "1.13.0"
-constraintlayout = "2.2.1"
-preference = "1.2.1"
-
-[libraries]
-androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
-material = { group = "com.google.android.material", name = "material", version.ref = "material" }
-androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
-androidx-preference = { group = "androidx.preference", name = "preference", version.ref = "preference" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

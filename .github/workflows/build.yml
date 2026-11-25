@@ -2,120 +2,378 @@ name: Build
 
 on:
   push:
-    branches: [master, main]
-    tags: ['v*']
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*'
   pull_request:
-    branches: [master, main]
+    branches:
+      - master
+      - main
   workflow_dispatch:
 
+# Least privilege by default: only the tag-only publisher needs write access.
 permissions:
-  contents: write
+  contents: read
+
+# Cancel superseded branch/PR runs, but never cancel a release publication.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
+  test-ci:
+    name: Fast CI checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      - name: Run signing regression tests
+        run: |
+          bash tests/signing/run_tests.sh
+
+      - name: Run signed and unsigned release smoke
+        run: |
+          bash tests/signing/smoke_signed_release.sh "$HOME"
+
+      - name: Run workflow policy tests
+        run: |
+          python3 tests/workflow/test_policy.py
+
+      - name: Run make contract tests
+        run: |
+          python3 -B tests/make/test_make.py
+
   build-lkms:
     name: LKMs / ${{ matrix.kmi }}
+    needs: test-ci
     runs-on: ubuntu-latest
+    # DDK kernel builds are slow (toolchain download + full module build).
+    timeout-minutes: 60
+    permissions:
+      contents: read
     strategy:
       matrix:
         kmi:
-          - android12-5.10
-          - android13-5.10
+          # This is the GZIF fork: README/PORTING-GZIF.md and
+          # app/src/main/jni/CMakeLists.txt support android13-5.15 only.
+          # Building the other 7 upstream KMIs produced artifacts that were
+          # never consumed by the APK (CMake embeds only dfroot-android13-5.15.ko),
+          # so the matrix is reduced to the single KMI actually shipped.
           - android13-5.15
-          - android14-5.15
-          - android14-6.1
-          - android15-6.6
-          - android16-6.12
-          - android17-6.18
     container:
-      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828
-      options: --privileged
+      # No --privileged: the same digest-pinned DDK image builds the LKM locally
+      # via podman with --network=none, --cap-drop=ALL and no-new-privileges, so
+      # no extra caps are required.
+      # Digest pinned (floating tags are mutable): resolved via GHCR token +
+      # manifest HEAD and cross-verified with `docker buildx imagetools inspect`.
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Build dfroot.ko
         run: |
+          set -eu
           cd lkm
-          make -j$(nproc)
+          make -j"$(nproc)"
           llvm-objcopy --strip-unneeded \
             -R .comment -R .note.gnu.build-id -R .note.gnu.property \
             -R .note.Linux -R .note.GNU-stack \
             -R .BTF -R .BTF.base -R .llvm_addrsig \
             -R .hyp.text -R .hyp.bss -R .hyp.rodata -R .hyp.event_ids \
             -R .hyp.patchable_function_entries -R .hyp.data dfroot.ko
-          mkdir -p $GITHUB_WORKSPACE/out
-          cp dfroot.ko $GITHUB_WORKSPACE/out/dfroot-${{ matrix.kmi }}.ko
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp dfroot.ko "$GITHUB_WORKSPACE/out/dfroot-${{ matrix.kmi }}.ko"
           make clean
 
       - name: Upload dfroot.ko
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: df-lkm-${{ matrix.kmi }}
           path: out/dfroot-${{ matrix.kmi }}.ko
+          if-no-files-found: error
+          overwrite: true
 
   build-dfroot:
+    name: CI DFRoot APKs
     needs: build-lkms
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v7
-
-      - name: Validate signing config
-        if: github.event_name != 'pull_request'
-        run: |
-          if [ "${{ secrets.KEYSTORE }}" = "" ]; then
-            echo "::error::Signing secrets not configured. KEYSTORE secret is required for release builds."
-            exit 1
-          fi
-
-      - name: Create signing.properties
-        if: github.event_name != 'pull_request'
-        run: |
-          echo KEYSTORE_FILE=../keystore.jks > signing.properties
-          echo KEYSTORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }} >> signing.properties
-          echo KEY_ALIAS=${{ secrets.KEY_ALIAS }} >> signing.properties
-          echo KEY_PASSWORD=${{ secrets.KEY_PASSWORD }} >> signing.properties
-          echo ${{ secrets.KEYSTORE }} | base64 --decode > keystore.jks
-
-      - name: Download DF LKMs
-        uses: actions/download-artifact@v7
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          pattern: df-lkm-*
-          merge-multiple: true
-          path: app/src/main/jni/ko/
+          persist-credentials: false
 
-      - uses: actions/setup-java@v6
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
         with:
           distribution: temurin
           java-version: 21
 
-      - uses: gradle/actions/setup-gradle@v6
+      - name: Download DF LKM (android13-5.15)
+        # The single-file archive is rooted at out/, so this places the KO at
+        # the exact path embedded by app/src/main/jni/CMakeLists.txt.
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: df-lkm-android13-5.15
+          path: app/src/main/jni/ko/
 
-      - name: Build DFRoot APK
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      - name: Build debug and release APKs
+        # This fresh checkout has no signing material; release is intentionally
+        # unsigned. Retry transient Gradle/toolchain failures up to three times.
         run: |
-          set -e
-          for i in 1 2 3; do
-            if [ "${{ github.event_name }}" = "pull_request" ]; then
-              if ./gradlew :app:assembleDebug; then break; fi
-            else
-              if ./gradlew :app:assembleRelease; then break; fi
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --console=plain; then
+              break
             fi
-            if [ "$i" = "3" ]; then
-              echo "Gradle build failed after 3 attempts"
+            if [[ $attempt -eq 3 ]]; then
+              echo "Gradle build failed after 3 attempts" >&2
               exit 1
             fi
-            echo "Gradle build failed (attempt $i), retrying in 30s..."
+            echo "Gradle build failed (attempt $attempt), retrying in 30s..." >&2
             sleep 30
           done
 
-      - name: Upload DFRoot APK
-        uses: actions/upload-artifact@v7
+      - name: Verify APK counts
+        # Fail closed if the build produced zero or more than one APK of either
+        # variant; a missing release APK is not a successful unsigned CI build.
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debug=(app/build/outputs/apk/debug/DFRoot_*.apk)
+          release=(app/build/outputs/apk/release/DFRoot_*.apk)
+          if [[ ${#debug[@]} -ne 1 || ${#release[@]} -ne 1 ]]; then
+            echo "Expected exactly one debug APK and one release APK" >&2
+            exit 1
+          fi
+
+      - name: Upload DFRoot APKs
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: DFRoot
           path: |
-            app/build/outputs/apk/release/DFRoot_*.apk
             app/build/outputs/apk/debug/DFRoot_*.apk
+            app/build/outputs/apk/release/DFRoot_*.apk
+            GPL-3.0.txt
+            LICENSE
+            NOTICE
+            THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+          overwrite: true
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
+  build-release:
+    name: Signed release APK
+    needs: build-lkms
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out release history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          files: app/build/outputs/apk/release/DFRoot_*.apk
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag is on master
+        # Fail before any signing secret is referenced.
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "Release tag HEAD must be an ancestor of origin/master" >&2
+            exit 1
+          fi
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Write signing material
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          java scripts/WriteSigningProperties.java ci .
+
+      - name: Download DF LKM (android13-5.15)
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: df-lkm-android13-5.15
+          path: app/src/main/jni/ko/
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      - name: Build signed release APK
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if ./gradlew :app:assembleRelease --no-daemon --console=plain; then
+              break
+            fi
+            if [[ $attempt -eq 3 ]]; then
+              echo "Gradle build failed after 3 attempts" >&2
+              exit 1
+            fi
+            echo "Gradle build failed (attempt $attempt), retrying in 30s..." >&2
+            sleep 30
+          done
+
+      - name: Verify signed release APK
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/DFRoot_*.apk)
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            echo "Expected exactly one release APK, found ${#apks[@]}" >&2
+            exit 1
+          fi
+          sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
+          apksigner=
+          if [[ -d $sdk/build-tools ]]; then
+            apksigner=$(find "$sdk/build-tools" -mindepth 2 -maxdepth 2 -type f -name apksigner -print | sort -V | tail -n 1)
+          fi
+          if [[ -z $apksigner || ! -x $apksigner ]]; then
+            echo "apksigner was not found in the Android SDK" >&2
+            exit 1
+          fi
+          "$apksigner" verify --verbose --print-certs "${apks[0]}"
+
+      - name: Package signed release APK
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          apks=(app/build/outputs/apk/release/DFRoot_*.apk)
+          if [[ ${#apks[@]} -ne 1 ]]; then
+            echo "Expected exactly one release APK, found ${#apks[@]}" >&2
+            exit 1
+          fi
+          apk=${apks[0]##*/}
+          mkdir -p release
+          cp -- "${apks[0]}" "release/$apk"
+          cp -- GPL-3.0.txt LICENSE NOTICE THIRD_PARTY_NOTICES.md release/
+          (
+            cd release
+            sha256sum -- "$apk" > "$apk.sha256"
+          )
+
+      - name: Upload signed release
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: DFRoot-release
+          path: |
+            release/DFRoot_*.apk
+            release/DFRoot_*.apk.sha256
+            release/LICENSE
+            release/GPL-3.0.txt
+            release/NOTICE
+            release/THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+          overwrite: true
+          # Signed APKs are consumed by the publish job in the same run; keep
+          # the sensitive artifact available only as long as it is needed.
+          retention-days: 1
+
+      - name: Clean up signing material
+        if: ${{ always() }}
+        run: |
+          rm -f -- signing.properties keystore.jks .keystore.jks-*.tmp .signing.properties-*.tmp
+
+  publish:
+    name: Publish GitHub Release
+    needs: build-release
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download signed release
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: DFRoot-release
+          path: dist
+
+      - name: Verify release checksum
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checksums=(dist/DFRoot_*.apk.sha256)
+          apks=(dist/DFRoot_*.apk)
+          if [[ ${#checksums[@]} -ne 1 || ${#apks[@]} -ne 1 ]]; then
+            echo "Expected exactly one release APK and checksum" >&2
+            exit 1
+          fi
+          checksum=${checksums[0]##*/}
+          apk=${apks[0]##*/}
+          if [[ $checksum != "$apk.sha256" ]]; then
+            echo "Checksum filename does not match the release APK" >&2
+            exit 1
+          fi
+          mapfile -t checksum_lines < "dist/$checksum"
+          if [[ ${#checksum_lines[@]} -ne 1 ]]; then
+            echo "Expected exactly one checksum line for the release APK" >&2
+            exit 1
+          fi
+          line=${checksum_lines[0]}
+          if [[ ! $line =~ ^([0-9a-f]{64})('  '|' *')(.+)$ ]]; then
+            echo "Malformed checksum line for the release APK" >&2
+            exit 1
+          fi
+          manifest_name=${BASH_REMATCH[3]}
+          if [[ $manifest_name != "$apk" ]]; then
+            echo "Checksum manifest filename does not match the release APK" >&2
+            exit 1
+          fi
+          (
+            cd dist
+            sha256sum --check "$checksum"
+          )
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
+        with:
+          files: |
+            dist/DFRoot_*.apk
+            dist/DFRoot_*.apk.sha256
+            dist/LICENSE
+            dist/GPL-3.0.txt
+            dist/NOTICE
+            dist/THIRD_PARTY_NOTICES.md
+          fail_on_unmatched_files: true
+          overwrite_files: true

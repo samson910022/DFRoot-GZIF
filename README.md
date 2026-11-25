@@ -102,29 +102,81 @@ The exploit uses this primitive to patch shellcode into `libc++.so` in the kerne
 make
 ```
 
+The top-level `make` performs **one** DDK build for the single KMI this fork
+ships (`android13-5.15`). It uses the exact digest-pinned image that CI uses,
+read from `.github/workflows/build.yml` by `scripts/ddk-image.sh` (no floating
+tags, no caller-supplied image). Podman runs it with `--network=none`,
+`--cap-drop=ALL` and `no-new-privileges`, mounting only `lkm/` and the KO output
+directory. `SIGN_PASS` and `SIGN_ALIAS` must be **exported in the environment**;
+the Makefile rejects them as `make` command-line assignments (which would leak
+into shell history, process listings and echoed output).
+
+Toolchain: Gradle wrapper **9.9.2** (distribution SHA-256 pinned in
+`gradle/wrapper/gradle-wrapper.properties`), AGP **9.5.0** declared once in
+`gradle/libs.versions.toml` and consumed through the version-catalog alias
+(there is no root `build.gradle.kts` AGP version pin), JDK 21 (toolchain-pinned),
+SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
+
 ### Building this fork (DFRoot GZIF)
 
 The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 `app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
 
-- build it with the top-level `make` (podman + DDK images; chains all eight
-  KMIs — long), or
+- build it with the top-level `make` (podman + the digest-pinned `android13-5.15`
+  DDK image — long), or
 - build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
   the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
   for GZIF, or
-- fetch the prebuilt `dfroot-android13-5.15.ko` (sha256 `94f8be98…`) from CI
-  artifacts (`.github/workflows/build.yml`) and place it at
-  `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
+- fetch the CI-built `dfroot-android13-5.15.ko` from the
+  `df-lkm-android13-5.15` artifact of `.github/workflows/build.yml`; its
+  sha256 is
+  `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`.
+  Place it at `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
 
-Then: JDK 21 (toolchain-pinned) · SDK 36 · NDK r28c (`28.2.13676358`) ·
-CMake 3.22.1 · `./gradlew :app:assembleRelease` →
+The CI/release artifact is 13,384 B and is **not byte-identical** to the locally
+`make`-built KO (13,504 B, sha256 `94f8be98…`): CI strips `.note.gnu.build-id`
+(and other notes/sections) with `llvm-objcopy --strip-unneeded`, so the size,
+bytes and hash differ even though both are built from the same source. The full
+hash above identifies the CI/release artifact.
+
+Then: `./gradlew :app:assembleRelease` →
 `app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
 `adb install -r` → enable adb → open **DFRoot GZIF** → LAUNCH ROOT.
 
-Signing: `signing.properties` at the repo root (gitignored) with
-`KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD`.
-Do **not** commit it. Local `make` now requires explicit `SIGN_PASS`/`SIGN_ALIAS`
-(no default credentials); CI uses the `KEYSTORE` secrets.
+### Signing variants and CI events
+
+- **Debug** is always signed with the standard Android debug keystore
+  (`signingConfigs.getByName("debug")`), independently of `signing.properties`,
+  and is installable for development.
+- **Release** is **unsigned** when `signing.properties` is absent: Gradle only
+  warns at configuration time and the build succeeds. An unsigned release APK
+  is not a production artifact — Android will not install it over an installed
+  signed build. To produce an installable signed Release, add a gitignored root
+  `signing.properties` with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` /
+  `KEY_ALIAS` / `KEY_PASSWORD` (or use the top-level `make`, which generates a
+  local keystore from the exported `SIGN_PASS` / `SIGN_ALIAS`). **Do not commit
+  it.** Incomplete properties fail closed with a readable configuration error.
+- **CI event matrix** (`.github/workflows/build.yml`): pull requests, pushes to
+  `master`/`main`, and manual `workflow_dispatch` runs build a
+  **debug-keystore-signed Debug + unsigned Release** pair of APKs and run all
+  fast policy/contract tests **with no secrets available** — there is no release
+  signing on those events. Only a **push of a `v*` tag** runs `build-release` in
+  the protected `release` environment, where the `KEYSTORE*` secrets exist,
+  builds and verifies a **signed Release**, and publishes it (with
+  `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`) as a GitHub
+  Release. Branch/PR builds never see secrets and never publish a GitHub Release.
+  Branch/PR/manual unsigned APKs are nevertheless public Actions artifacts (the
+  repository is public): the `DFRoot` artifact also carries `GPL-3.0.txt`,
+  `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` alongside the APKs.
+- The `KEYSTORE` value — the protected CI secret, or the environment value read
+  by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
+  (produce it with `base64 -w0 keystore.jks`). It is decoded and the resulting
+  JKS validated before any signing material is published; a raw JKS is rejected.
+
+> [!WARNING]
+> The release signing key is new. Android refuses to overwrite-update an
+> installed application with an APK signed by a different key: uninstall any
+> existing DFRoot GZIF installation before installing a signed release build.
 
 ## Credits
 
