@@ -6,6 +6,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): confirm the main-thread boundary still queues exactly one admission task before driving it. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF): confirm a duplicate boot start is rejected before a second WakeLock while its request is queued. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.3): wire the coordinator's reporter to the deterministic queue that already counts one boot work plus one report. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R6.4): install the inline host seam in service-driven boundary tests so main-thread start setup (foreground attach, WakeLock, admission enqueue) is observable. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -383,6 +384,11 @@ public class BootReceiverBoundaryTest {
 
         ServiceController<ExploitService> controller = Robolectric.buildService(ExploitService.class)
                 .create().withIntent(request);
+        // R6.4: main-thread starts offload foreground attach, WakeLock acquisition
+        // and admission enqueue to the owned express host executor. Install the
+        // inline host seam so that setup runs synchronously and the single queued
+        // admission task stays observable before onStartCommand returns.
+        controller.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         // Hold the blocking admission work on a controllable executor instead of
         // the real single-thread daemon worker. onStartCommand only queues it;
         // driving it explicitly removes the race against onDestroy() so the
@@ -435,6 +441,9 @@ public class BootReceiverBoundaryTest {
 
         ServiceController<ExploitService> controller = Robolectric.buildService(ExploitService.class)
                 .create();
+        // R6.4: run the express/host start setup inline so the main-thread
+        // start's admission enqueue is observable by the assertions below.
+        controller.get().setHostExecutorForTesting(Runnable::run); // R6.4 inline host seam
         CapturingExecutor admission = new CapturingExecutor();
         controller.get().setAdmissionExecutorForTesting(admission);
         // R5.3: the duplicate's outcome report now goes through the

@@ -1,5 +1,38 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — Final correctness review fix (PR #2): guaranteed sweep for refused terminals
+
+The FINAL correctness review found one Required stranding gap in the R6.4
+second-fix-loop guarantee. A refused TERMINAL render only called
+`scheduleDeferredFlush()`, which returns immediately once
+`MAX_DEFERRED_FLUSH_REDECISIONS = 3` is spent, and the post-winner sweep was
+scheduled only in a flush winner's `finally`. With a full 64-slot host queue at
+terminal publication (observer callbacks arrive on the main thread) and no later
+flush winner, `resolveTerminalOperation` never ran and the accepted start was
+never stopped.
+
+Fix: `rememberRefusedRender()` and the offloaded-flush post-refusal path in
+`maybeFlushResolvedStarts()` now ALSO queue the **uncapped, single-flight,
+destroy-aware `schedulePostFlushSweep()`** directly at refusal time, outside
+`deferredRendersLock`/`flushMonitor`. The sweep drains the bounded terminal replay
+queue on the host-only deferred executor, never spends the loser deferral budget,
+and is never an admission, engine, retry, privileged or completion-claim action.
+The four-slot terminal-only cap, overflow/non-terminal honesty, destroy-time
+no-op, R5.4 epoch serialization, R6.3 deadline/deferral bounds, all admission
+gates, owner token, `START_NOT_STICKY` and the 32/64/64/16/4 bounds are unchanged.
+
+Two new deterministic fixtures pin the no-winner path
+(`refusedTerminalRenderIsResolvedByUncappedSweepWithoutLaterWinner`) and the
+offloaded-flush refusal path
+(`refusedOffloadedFlushPostAfterDeferralCapQueuesGuaranteedSweep`): three
+deferrals spent, a real TERMINAL render / offloaded flush post refused, **no
+winner injected**, the single queued task is the uncapped sweep, and draining it
+stops the start exactly once with no duplicate `stopForeground`, no
+engine/admission/lease work and no completion claim at refusal. Focused
+verification: `ExploitServiceAsyncTest` 34 + `ExploitServiceTest` 47 = **81 tests,
+0 failures**. No commit/stage/push. Host-only evidence, **not a device ANR
+proof**; R2-14 and R2-16 remain OPEN.
+
 ## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **sixth repair round** (final local HEAD
@@ -48,8 +81,8 @@ records; the counts and gate states in this section are current.
   one-shot backstop that does not re-queue after a no-op sweep; the four-slot
   render replay drops overflow and non-terminal refusals with honest logs;
   rare refusal paths still take short caller-side `startsLock` sections; and
-  the pre-existing timing-sensitive
-  `hostExecutorIsOwnedBoundedAndShutdownGracefully` test is unchanged.
+  the R6.4-added timing-sensitive
+  `hostExecutorIsOwnedBoundedAndShutdownGracefully` test remains green in full runs.
 - **Final comprehensive reviews are PENDING at the current R6 head `9e1aff7`:**
   the main agent runs the correctness/lifecycle, security, architecture/native
   and test/build/CI reviews after this consolidation. APPROVE outcomes recorded
@@ -71,8 +104,11 @@ admits work, acquires a lease, starts the engine or claims completion. (2) The
 single `deferredRenderSnapshot` slot became a four-slot bounded queue of
 TERMINAL-only snapshots, replayed from BOTH `runDeferredFlushRedecision` and
 `runPostFlushSweep`; a terminal render refused after the three-deferral budget is
-spent is now still resolved. Non-terminal refusals and overflow are dropped with
-honest logs, and the queue is cleared on create/destroy. R5.4 epoch serialization,
+spent is now still resolved — **qualified by the final review fix below**: this
+originally still required a later flush winner, and the uncapped sweep is now
+queued directly at refusal so no winner is needed. Non-terminal refusals and
+overflow are dropped with honest logs, and the queue is cleared on
+create/destroy. R5.4 epoch serialization,
 R6.3 deadline/deferral/sweep, admission gates, 64/64 bounds, owner token and
 `START_NOT_STICKY` are unchanged; no executor post holds `startsLock` or the new
 replay lock. Three deterministic host fixtures were added:

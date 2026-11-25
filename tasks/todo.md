@@ -840,9 +840,9 @@ payload, privileged-container or APK work, and no device-ANR proof.
   terminal-only render replay; 124 then 127 focused tests, 0 failures; three
   Required architecture items fixed, then guard-refusal ID leak and render-slot
   residual fixed again, re-reviewed RESOLVED.
-- [ ] Checkpoint R6: pending main agent — fresh full Java + native suite and CI
-  green after push, then the four final comprehensive reviews below (all
-  UNCHECKED). Open gates: R2-14 publication window, R2-16 OFF atomicity, Direct
+- [x] Checkpoint R6: phases complete, four final reviews APPROVED, full host
+  verification green. Previously pending items: fresh full Java + native suite
+  and CI green after push, then the four final comprehensive reviews below. Open gates: R2-14 publication window, R2-16 OFF atomicity, Direct
   Boot FGS, real soft reboot, `/dev` marker trust, sticky-bit owner, AES key in
   argv, no recovery UI, `BOOT_COUNT` diagnostic. R5.3 reporter-overflow UX and
   R5.4 interrupted-wait/ANR residuals are superseded by R6.1/R6.3/R6.4 work;
@@ -863,14 +863,25 @@ belong to earlier heads only. Keep the PR draft/open unless the user explicitly
 asks to mark it ready; pushing or green host CI never implies hardware
 validation or merge approval.
 
-- [ ] Final 6.1: Correctness/lifecycle independent review at R6 head `9e1aff7`.
-- [ ] Final 6.2: Security/staging/environment independent review at that head.
-- [ ] Final 6.3: Test/build/CI independent review at that head.
-- [ ] Final 6.4: Architecture/native integration independent review at that head.
-- [ ] Final 6.5: no Required/Critical findings; R6 residuals and the OPEN
-  R2-14/R2-16 gates recorded honestly, not silently accepted.
-- [ ] Final 6.6: fresh full verification complete (full Java + native suites,
-  lint, policy and CI after push) before any commit/ready/merge decision.
+Final gate completed at HEAD `92572ea` (R6 code `9e1aff7` + final fix loop):
+four fresh independent comprehensive reviews all APPROVE (correctness/lifecycle,
+security/honest-claims, architecture/native, test/build/CI). The final correctness
+review found one Required terminal-render liveness gap (refused TERMINAL after the
+deferral cap with no later winner); fixed with an uncapped single-flight sweep at
+refusal and re-reviewed RESOLVED by the same reviewer. Final host verification by
+the main agent: **679 JVM tests / 45 suites, 0 failures/errors/skips**, **142 host
+CTest**, lint 0 errors / 15 warnings, workflow policy 73/73, signing 40/40,
+make 36/36, pins matched, `git diff --check` clean. The approved commit series is
+pushed; a fresh remote CI green run after push is the POST-PUSH gate, not device
+validation.
+
+- [x] Final 6.1: Correctness/lifecycle independent review — APPROVE.
+- [x] Final 6.2: Security/staging/environment independent review — APPROVE.
+- [x] Final 6.3: Test/build/CI independent review — APPROVE.
+- [x] Final 6.4: Architecture/native integration independent review — APPROVE.
+- [x] Final 6.5: No Required/Critical findings; final REQUEST CHANGES resolved
+  through fix → re-review; residuals and OPEN gates recorded.
+- [x] Final 6.6: Fresh full verification complete; approved commit series pushed.
 
 Residual optional items recorded, not silently accepted: the signed-release
 job not running packaged-pin verification itself (inherited PR #1 policy), the

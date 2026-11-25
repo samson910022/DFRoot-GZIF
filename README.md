@@ -87,7 +87,10 @@ whole winning flush phase; the flush guard is released in the posted task's
 exactly one `stopSelf`, and a refused TERMINAL render is remembered in a
 **four-slot terminal-only replay queue** drained by both the deferred
 re-decision and the post-winner sweep (non-terminal refusals and overflow are
-dropped with honest logs).
+dropped with honest logs). The refusal itself also queues the **uncapped
+single-flight sweep**, so a terminal render is guaranteed that sweep
+independently of the three-deferral budget and of any later flush winner; the
+sweep is host-only, destroy-aware and spends no loser deferral.
 
 **What this does NOT prove:** this is bounded **host-only** evidence of
 responsive returns, **not a device ANR proof**. Caller-side bookkeeping in rare
@@ -431,11 +434,13 @@ recovery; `engineFinished` only proves the Java engine call returned/threw; a
 new `BOOT_COUNT` is diagnostic only. Unattended soft reboot stays OFF and
 manual soft reboot remains experimental/unvalidated on GZIF.
 
-**Final comprehensive reviews are pending at the current R6 head `9e1aff7`**
-(this R5 section was written when the pending head was `33980e2`; R6 has since
-added four phase commits). The main agent runs correctness/lifecycle, security,
-architecture/native and test/build/CI reviews after the R6.5 consolidation. The
-APPROVE outcomes recorded for R4 were at `74d35f5` and the R5 final reviews at
+**Final comprehensive reviews all APPROVE at the R6 final head (`92572ea`, R6
+code `9e1aff7`)** (this R5 section was written when the pending head was
+`33980e2`; R6 has since added four phase commits and a final fix loop). Four
+fresh reviews ran: correctness/lifecycle, security/honest-claims,
+architecture/native and test/build/CI, all APPROVE; the one Required final
+finding was fixed and re-reviewed RESOLVED. The APPROVE outcomes recorded for
+R4 were at `74d35f5` and the R5 final reviews at
 `689f378`; both are historical and neither is an approval of the current HEAD.
 `tasks/plan.md` and `tasks/todo.md` keep the final 6.1–6.6 checkboxes
 UNCHECKED. Residual optional items recorded, not silently accepted: R5.3
@@ -447,10 +452,11 @@ platform call still holds `startsLock`), but the NEW R6 residuals remain: the
 25-tick budget is per visible arming session, `onPause()` does not explicitly
 cancel the watch (ticks are no-ops while paused), the post-winner sweep is a
 bounded one-shot backstop that does not re-queue after a no-op sweep, the
-four-slot render replay drops overflow and non-terminal refusals with honest
-logs, rare refusal paths still take short caller-side `startsLock` sections,
-and the pre-existing timing-sensitive
-`hostExecutorIsOwnedBoundedAndShutdownGracefully` test is unchanged. Also
+four-slot render replay still drops overflow beyond four and all non-terminal
+refusals with honest logs (and is a strict no-op after `onDestroy()`), rare
+refusal paths still take short caller-side `startsLock` sections,
+and the R6.4-added timing-sensitive
+`hostExecutorIsOwnedBoundedAndShutdownGracefully` test remains green in full runs. Also
 recorded: R5.8 optional `if: always()` upload-bypass guard, benign duplicate
 correlated rejection, the signed-release packaged-pin gate inherited from PR
 #1, recovery UI out of scope, `/dev` marker-root trust, AES key in argv,
@@ -559,10 +565,13 @@ Host-only evidence, not a device guarantee:
 - A bounded render-post refusal is no longer silent when it carries a TERMINAL
   outcome: only terminal snapshots enter a small bounded (four-slot) replay queue
   that BOTH the bounded deferred re-decision and the post-winner sweep re-apply.
-  A terminal render refused after the three-deferral budget is spent is therefore
-  still resolved and retired exactly once. Non-terminal refusals carry nothing to
-  replay and are dropped with an honest log; the queue is cleared on destroy and
-  is never unbounded.
+  The refusal itself now also queues the **uncapped single-flight sweep**, so a
+  terminal render refused after the three-deferral budget is spent is still
+  resolved and retired exactly once **without needing any later flush winner**;
+  the sweep never spends the loser budget. Non-terminal refusals carry nothing to
+  replay and are dropped with an honest log; the queue is cleared on destroy,
+  never unbounded, and all sweep/replay work is a strict no-op after destruction.
+  This is host-only bookkeeping evidence, **not a device ANR proof**.
 - `shutdown()` in `onDestroy()` gracefully drains already-submitted host and
   express work without interrupting a winner and refuses new work.
 - Host-only fixtures pin bounded main-thread returns, one `stopForeground`, one
@@ -597,6 +606,21 @@ unchanged; no new lock is taken while posting to any executor. Three determinist
 fake-host fixtures pin these boundaries. No device/ADB/payload/APK work: this is
 host-only evidence, not device safety proof, and no refusal path admits or
 completes work.
+
+**Final correctness-review fix (same day):** the prior guarantee still depended
+on a later flush winner, because a refused render only called the capped deferral
+(which returns immediately once the three-deferral budget is spent) and the
+post-winner sweep was scheduled only in a winner's `finally`. Both the refused
+TERMINAL render and the refused offloaded-flush post now also queue the
+**uncapped, single-flight, destroy-aware sweep** directly at refusal time,
+outside `deferredRendersLock`/`flushMonitor`. A queued terminal is therefore
+guaranteed a sweep independently of the deferral cap and of any later winner;
+the sweep stays host-only, single-claim, and never an admission, engine, retry or
+completion-claim action. The four-slot terminal-only cap, overflow/non-terminal
+drops and destroy-time no-op remain honest residuals, and R2-14/R2-16 remain
+OPEN. Two deterministic fixtures pin the no-winner path and the offloaded-flush
+refusal path (no duplicate `stopSelf`/`stopForeground`, no engine/admission/lease
+work); this is host-only evidence, **not a device ANR proof**.
 
 ### R5.5 note (2026-11-26) — final pre-engine gate ordering
 
