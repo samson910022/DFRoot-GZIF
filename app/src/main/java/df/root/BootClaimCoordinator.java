@@ -1,4 +1,5 @@
 // Modified 2026-11-25 (DFRoot GZIF): add the short off-main durable boot claim before explicit service start. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): suppress boot claims while an unconfirmed attempt survives process death. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -52,14 +53,23 @@ final class BootClaimCoordinator {
 
     private final BootCountReader reader;
     private final BootClaimStore store;
+    private final OperationAttemptStore attemptStore;
     private final Executor executor;
     private final Logger logger;
     private final boolean shutdownAfterSubmit;
 
     BootClaimCoordinator(BootCountReader reader, BootClaimStore store, Executor executor,
                          Logger logger, boolean shutdownAfterSubmit) {
+        this(reader, store, OperationAttemptStore.inMemory(), executor, logger,
+                shutdownAfterSubmit);
+    }
+
+    BootClaimCoordinator(BootCountReader reader, BootClaimStore store,
+                         OperationAttemptStore attemptStore, Executor executor,
+                         Logger logger, boolean shutdownAfterSubmit) {
         this.reader = Objects.requireNonNull(reader, "reader");
         this.store = Objects.requireNonNull(store, "store");
+        this.attemptStore = Objects.requireNonNull(attemptStore, "attemptStore");
         this.executor = Objects.requireNonNull(executor, "executor");
         this.logger = Objects.requireNonNull(logger, "logger");
         this.shutdownAfterSubmit = shutdownAfterSubmit;
@@ -70,6 +80,7 @@ final class BootClaimCoordinator {
         return new BootClaimCoordinator(
                 new BootCountReader.SettingsGlobal(context.getContentResolver()),
                 SharedPreferencesBootClaimStore.forDeviceProtectedStorage(context),
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context),
                 newClaimExecutor(), Logger.ANDROID, true);
     }
 
@@ -109,6 +120,21 @@ final class BootClaimCoordinator {
             Long bootCount = reader.read();
             if (bootCount == null || bootCount <= 0L) {
                 logger.info("boot: BOOT_COUNT unavailable or non-positive; no attempt");
+                return;
+            }
+            // A persisted unconfirmed attempt outlives the process. No boot
+            // claim, no service start, and no automatic replay: only explicit
+            // owner recovery may remove that barrier.
+            OperationAttempt persisted;
+            try {
+                persisted = attemptStore.load();
+            } catch (OperationAttemptStore.Failure e) {
+                logger.error("boot: persisted attempt unreadable; no attempt", e);
+                return;
+            }
+            if (persisted != null && persisted.isUnconfirmed()) {
+                logger.info("boot: unconfirmed operation " + persisted.getOperationId()
+                        + " from a prior process blocks boot start; explicit recovery required");
                 return;
             }
             if (!store.claim(bootCount)) {

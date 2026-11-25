@@ -4,6 +4,8 @@
 // Modified 2026-11-25 (DFRoot GZIF): contain close() Errors so cleanup cannot strand the terminal snapshot. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): an unconfirmed native outcome keeps ownership until explicit recovery. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): recovery is single-claim and trusted-caller-only. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): persist an unconfirmed admission barrier across process death. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): make durable attempt clearing idempotent and await init without dropping requests. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -17,9 +19,11 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Process-wide owner of one privileged operation.
@@ -53,6 +57,8 @@ public final class RunCoordinator {
     static final int MAX_LOG_ENTRIES = 200;
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
+    /** Short bounded wait so the first service request is not dropped during off-main init. */
+    static final long INITIALIZATION_WAIT_MS = 500L;
     private static final String UNVERIFIED_REASON =
             "outcome unverified: native rc=7 terminal publication was not confirmed; "
             + "the worker may still be running and explicit recovery is required";
@@ -64,8 +70,13 @@ public final class RunCoordinator {
     private final Executor mainExecutor;
     private final Engine engine;
     private final long initializationTimeoutMillis;
+    private final OperationAttemptStore attemptStore;
+    private final BootCountReader bootCountReader;
+    private final Executor initializationExecutor;
     private final boolean ownsWorkerExecutor;
+    private final boolean ownsInitializationExecutor;
     private final Object lock = new Object();
+    private final CountDownLatch initializationComplete = new CountDownLatch(1);
     private final Set<Listener> listeners = new CopyOnWriteArraySet<>();
     private final Queue<LogEntry> log = new ArrayDeque<>();
 
@@ -80,17 +91,40 @@ public final class RunCoordinator {
     private String requestFailure;
     private long logCharacters;
     private long logSequence;
+    private boolean initializationDone;
+    private boolean initializationSucceeded;
+    private String initializationFailure;
+    private OperationAttempt persistedAttempt;
     private volatile Snapshot snapshot;
 
+    /**
+     * Safe test/default seam: no durable barrier exists and initialization is
+     * already complete. Production uses the explicit constructor below and a
+     * real {@link #initialize()} call before any admission.
+     */
     RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                    Executor mainExecutor, Engine engine, long initializationTimeoutMillis) {
-        this(repository, workerExecutor, mainExecutor, engine,
-                initializationTimeoutMillis, false);
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                OperationAttemptStore.inMemory(), () -> null, Runnable::run,
+                true, false, false);
+    }
+
+    /** Explicit seam for deterministic initialization and process-restart tests. */
+    RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
+                   Executor mainExecutor, Engine engine, long initializationTimeoutMillis,
+                   OperationAttemptStore attemptStore, BootCountReader bootCountReader,
+                   Executor initializationExecutor) {
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                attemptStore, bootCountReader, initializationExecutor,
+                false, false, false);
     }
 
     private RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                            Executor mainExecutor, Engine engine,
-                           long initializationTimeoutMillis, boolean ownsWorkerExecutor) {
+                           long initializationTimeoutMillis, OperationAttemptStore attemptStore,
+                           BootCountReader bootCountReader, Executor initializationExecutor,
+                           boolean preInitialized, boolean ownsWorkerExecutor,
+                           boolean ownsInitializationExecutor) {
         if (initializationTimeoutMillis < 0) {
             throw new IllegalArgumentException("initializationTimeoutMillis must be non-negative");
         }
@@ -99,7 +133,17 @@ public final class RunCoordinator {
         this.mainExecutor = Objects.requireNonNull(mainExecutor, "mainExecutor");
         this.engine = Objects.requireNonNull(engine, "engine");
         this.initializationTimeoutMillis = initializationTimeoutMillis;
+        this.attemptStore = Objects.requireNonNull(attemptStore, "attemptStore");
+        this.bootCountReader = Objects.requireNonNull(bootCountReader, "bootCountReader");
+        this.initializationExecutor = Objects.requireNonNull(initializationExecutor,
+                "initializationExecutor");
         this.ownsWorkerExecutor = ownsWorkerExecutor;
+        this.ownsInitializationExecutor = ownsInitializationExecutor;
+        this.initializationDone = preInitialized;
+        this.initializationSucceeded = preInitialized;
+        if (preInitialized) {
+            initializationComplete.countDown();
+        }
         this.snapshot = buildSnapshotLocked();
     }
 
@@ -117,9 +161,21 @@ public final class RunCoordinator {
                     thread.setDaemon(true);
                     return thread;
                 });
+                ExecutorService attemptInitialization = Executors.newSingleThreadExecutor(runnable -> {
+                    Thread thread = new Thread(runnable, "dfroot-attempt-init");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+                Context app = context.getApplicationContext();
+                Context source = app != null ? app : context;
+                Context deContext = source.isDeviceProtectedStorage()
+                        ? source : source.createDeviceProtectedStorageContext();
                 instance = new RunCoordinator(repository, worker,
                         ConfigurationRepository.newMainExecutor(), RunCoordinator::runProductionEngine,
-                        INITIALIZATION_TIMEOUT_MS, true);
+                        INITIALIZATION_TIMEOUT_MS,
+                        SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(deContext),
+                        new BootCountReader.SettingsGlobal(source.getContentResolver()),
+                        attemptInitialization, false, true, true);
             }
             return instance;
         }
@@ -132,10 +188,112 @@ public final class RunCoordinator {
     static synchronized void resetForTesting() {
         RunCoordinator current = instance;
         instance = null;
-        if (current != null && current.ownsWorkerExecutor
-                && current.workerExecutor instanceof ExecutorService) {
-            ((ExecutorService) current.workerExecutor).shutdownNow();
+        if (current != null) {
+            if (current.ownsWorkerExecutor
+                    && current.workerExecutor instanceof ExecutorService) {
+                ((ExecutorService) current.workerExecutor).shutdownNow();
+            }
+            if (current.ownsInitializationExecutor
+                    && current.initializationExecutor instanceof ExecutorService) {
+                ((ExecutorService) current.initializationExecutor).shutdownNow();
+            }
         }
+    }
+
+    /**
+     * Loads the persisted attempt BEFORE any admission. Called once from
+     * {@link ExploitService#onCreate()} and dispatched off the main thread via
+     * the injected executor. Submit fails closed until this completes, and a
+     * failed load permanently blocks admission in this process.
+     */
+    public void initialize() {
+        Runnable load = () -> {
+            OperationAttempt loaded;
+            try {
+                loaded = attemptStore.load();
+            } catch (Exception e) {
+                markInitializationFailed("attempt store load failed: " + e);
+                return;
+            }
+            synchronized (lock) {
+                if (initializationDone) {
+                    return;
+                }
+                persistedAttempt = loaded;
+                initializationSucceeded = true;
+                initializationDone = true;
+                appendLogLocked("attempt store initialized: "
+                        + (loaded == null ? "no persisted attempt"
+                        : "unconfirmed " + loaded.getOperationId()));
+                Snapshot changed = buildSnapshotLocked();
+                snapshot = changed;
+                initializationComplete.countDown();
+            }
+        };
+        try {
+            initializationExecutor.execute(load);
+        } catch (RuntimeException e) {
+            markInitializationFailed("attempt store initialization dispatch failed: " + e);
+        }
+    }
+
+    private void markInitializationFailed(String detail) {
+        synchronized (lock) {
+            if (initializationDone) {
+                return;
+            }
+            initializationFailure = detail;
+            initializationSucceeded = false;
+            initializationDone = true;
+            appendLogLocked(detail);
+            Snapshot changed = buildSnapshotLocked();
+            snapshot = changed;
+            initializationComplete.countDown();
+        }
+    }
+
+    private boolean isInitializedLocked() {
+        return initializationDone && initializationSucceeded;
+    }
+
+    private long currentBootCount() {
+        Long value;
+        try {
+            value = bootCountReader.read();
+        } catch (RuntimeException e) {
+            return 0L;
+        }
+        return value != null && value > 0L ? value : 0L;
+    }
+
+    private static String failureDetail(Exception failure) {
+        String detail = failure.getMessage();
+        Throwable cause = failure.getCause();
+        if (cause != null && cause.getMessage() != null) {
+            detail = (detail == null || detail.isEmpty() ? "" : detail + ": ") + cause.getMessage();
+        }
+        return detail == null || detail.isEmpty() ? failure.getClass().getSimpleName() : detail;
+    }
+
+    /**
+     * Boot count is diagnostic only: a later boot never authorizes replay of an
+     * unconfirmed attempt from a previous process.
+     */
+    private static String priorAttemptReason(OperationAttempt prior, long currentBootCount) {
+        String when;
+        if (prior.getBootCount() == 0L || currentBootCount == 0L) {
+            when = "BOOT_COUNT unavailable";
+        } else if (currentBootCount == prior.getBootCount()) {
+            when = "same boot count " + currentBootCount;
+        } else if (currentBootCount < prior.getBootCount()) {
+            when = "earlier boot count " + currentBootCount
+                    + " (recorded " + prior.getBootCount() + ")";
+        } else {
+            when = "new boot count " + currentBootCount
+                    + " (recorded " + prior.getBootCount() + ")";
+        }
+        return "unconfirmed operation " + prior.getOperationId()
+                + " from a prior process (" + when + ") blocks admission; explicit recovery required";
     }
 
     /**
@@ -160,7 +318,22 @@ public final class RunCoordinator {
             return Submission.rejected(null, "resource lease is required");
         }
 
+        // An in-flight off-main load is not a rejection: wait briefly outside
+        // the admission lock, then re-check state under that lock. Failure and
+        // timeout still fail closed; no request is retried automatically.
+        if (initializationComplete.getCount() != 0L) {
+            try {
+                initializationComplete.await(INITIALIZATION_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return Submission.rejected(null,
+                        "interrupted while waiting for attempt store initialization");
+            }
+        }
+
+        long bootCount = currentBootCount();
         Operation operation;
+        OperationAttempt attempt;
         Snapshot admitted;
         Context applicationContext = context.getApplicationContext();
         if (applicationContext == null) {
@@ -179,9 +352,35 @@ public final class RunCoordinator {
                 return Submission.rejected(operationId,
                         "operation " + operationId + " is active (" + state + ")");
             }
+            if (!isInitializedLocked()) {
+                return Submission.rejected(operationId, initializationFailure != null
+                        ? initializationFailure
+                        : "attempt store initialization is not complete");
+            }
+            if (persistedAttempt != null && persistedAttempt.isUnconfirmed()) {
+                return Submission.rejected(persistedAttempt.getOperationId(),
+                        priorAttemptReason(persistedAttempt, bootCount));
+            }
 
-            operation = new Operation(UUID.randomUUID().toString(), requestedMode, lease,
-                    operationContext, expectedGeneration);
+            String id = UUID.randomUUID().toString();
+            attempt = new OperationAttempt(id, requestedMode, bootCount, true,
+                    "admitted " + requestedMode + " operation " + id);
+            boolean published;
+            try {
+                // Checked, durable barrier: it exists before the engine can
+                // publish run_config or start privileged work.
+                published = attemptStore.publish(attempt);
+            } catch (OperationAttemptStore.Failure e) {
+                return Submission.rejected(operationId, "attempt store publish failed: " + e);
+            }
+            if (!published) {
+                return Submission.rejected(operationId,
+                        "attempt store refused admission: another unconfirmed operation is pending");
+            }
+
+            operation = new Operation(id, requestedMode, lease, operationContext,
+                    expectedGeneration);
+            persistedAttempt = attempt;
             activeOperation = operation;
             operationId = operation.id;
             mode = requestedMode;
@@ -365,7 +564,7 @@ public final class RunCoordinator {
      * No finish(), no kill(), no retry: the admission and lease stay open, the
      * config stays frozen, and new submissions stay rejected. The only exit is
      * an explicit {@link #recoverIndeterminate(String)} call by a trusted
-     * caller; a later phase will persist and authorize that boundary.
+     * caller. The persisted attempt stays unconfirmed across process death.
      */
     private void markOutcomeUnverified(Operation operation, RunResult completed) {
         Snapshot changed;
@@ -399,15 +598,17 @@ public final class RunCoordinator {
      * <p>This is the ONLY way to close that operation's retained admission and
      * lease and to release single-flight admission. No timer, retry, observer,
      * or lifecycle callback calls it: the caller must present the exact
-     * operation ID. A later phase will persist and authorize this boundary.</p>
+     * operation ID. The checked attempt-store clear must succeed before any
+     * lease/freeze release or new admission is possible.</p>
      *
      * <p>Trusted-caller boundary: this method has no exported component, intent
      * action, broadcast, or binder path. It is a direct in-process API for a
      * trusted caller (tests exercise it here); the service/UI never wire it.</p>
      *
      * @return {@code true} only for the caller that actually claims this
-     *         recovery; {@code false} if no such operation was current or
-     *         another caller already claimed it.
+     *         recovery and durably cleared the attempt; {@code false} if no
+     *         such operation was current, another caller claimed it, or the
+     *         checked clear failed.
      */
     public boolean recoverIndeterminate(String operationId) {
         Operation operation;
@@ -426,10 +627,93 @@ public final class RunCoordinator {
             currentResult = result;
             currentReason = reason;
         }
+        boolean cleared;
+        String failure = null;
+        try {
+            cleared = attemptStore.clear(operation.id);
+        } catch (OperationAttemptStore.Failure e) {
+            cleared = false;
+            failure = failureDetail(e);
+        }
+        if (!cleared) {
+            synchronized (lock) {
+                if (activeOperation == operation && !operation.terminal) {
+                    operation.recoveryClaimed = false;
+                    appendLogLocked("indeterminate recovery refused: persisted attempt clear failed"
+                            + (failure == null ? "" : " (" + failure + ")"));
+                    Snapshot changed = buildSnapshotLocked();
+                    snapshot = changed;
+                }
+            }
+            return false;
+        }
+        synchronized (lock) {
+            if (activeOperation == operation) {
+                // The durable barrier is already gone. finish() must not try
+                // to clear it a second time and strand cleanup on a false CAS.
+                operation.attemptCleared = true;
+                persistedAttempt = null;
+            }
+        }
         // finish() keeps the indeterminate result, closes the admission and
         // lease exactly once, and publishes TERMINAL only after both closes.
         finish(operation, currentResult, currentReason);
         return true;
+    }
+
+    /**
+     * Explicit recovery of a persisted unconfirmed attempt after process death.
+     *
+     * <p>Requires an affirmative owner acknowledgement and a checked store
+     * clear. It only removes the barrier: it never retries, starts a service,
+     * acquires resources, or admits an operation. A subsequent operation needs
+     * its own explicit submission after initialization.</p>
+     *
+     * <p>Trusted-caller boundary: there is no exported component, intent action,
+     * broadcast, or binder path in this phase. This is a direct in-process API
+     * for a trusted caller; no UI or recovery intent is wired to it.</p>
+     *
+     * @return {@code true} only when the acknowledged, matching, unconfirmed
+     *         attempt was durably cleared.
+     */
+    public boolean recoverPersistedAttempt(String operationId, boolean ownerAcknowledged) {
+        if (!ownerAcknowledged || operationId == null || operationId.isEmpty()) {
+            return false;
+        }
+        OperationAttempt loaded;
+        try {
+            loaded = attemptStore.load();
+        } catch (OperationAttemptStore.Failure e) {
+            return false;
+        }
+        synchronized (lock) {
+            if (!isInitializedLocked() || cleanupPending || isActiveStateLocked()
+                    || loaded == null || !loaded.isUnconfirmed()
+                    || !loaded.getOperationId().equals(operationId)) {
+                return false;
+            }
+            boolean cleared;
+            try {
+                cleared = attemptStore.clear(operationId);
+            } catch (OperationAttemptStore.Failure e) {
+                cleared = false;
+            }
+            if (!cleared) {
+                return false;
+            }
+            if (activeOperation != null) {
+                activeOperation.attemptCleared = true;
+            }
+            if (persistedAttempt != null
+                    && persistedAttempt.getOperationId().equals(operationId)) {
+                persistedAttempt = null;
+            }
+            appendLogLocked("persisted attempt " + operationId
+                    + " recovered by explicit owner acknowledgement; no work started");
+            Snapshot changed = buildSnapshotLocked();
+            snapshot = changed;
+            return true;
+        }
     }
 
     private void appendOperationLog(Operation operation, String message) {
@@ -445,25 +729,74 @@ public final class RunCoordinator {
         notifyListeners(changed);
     }
 
-    /** Closes resources once, then publishes TERMINAL only after cleanup has finished. */
+    /**
+     * Closes resources once, then publishes TERMINAL only after cleanup has
+     * finished. A confirmed result also needs a checked durable clear: a false
+     * or throwing clear keeps ownership as INDETERMINATE and never publishes a
+     * confirmed TERMINAL. {@link Operation#attemptCleared} makes a later clear
+     * after explicit recovery idempotent, so cleanup cannot be stranded.
+     */
     private void finish(Operation operation, RunResult completed, String completedReason) {
-        RunResult terminalResult;
-        String terminalReason;
+        RunResult terminalResult = null;
+        String terminalReason = null;
         String admissionFailure = null;
         String leaseFailure = null;
+        Snapshot held = null;
         synchronized (lock) {
             if (!isCurrentLocked(operation) || operation.terminal) {
                 return;
             }
-            operation.terminal = true;
-            cleanupPending = true;
+            RunResult candidate;
+            String candidateReason;
             if (state == State.INDETERMINATE && result != null) {
-                terminalResult = result;
-                terminalReason = reason;
+                candidate = result;
+                candidateReason = reason;
             } else {
-                terminalResult = completed;
-                terminalReason = completedReason == null ? completed.getReason() : completedReason;
+                candidate = completed;
+                candidateReason = completedReason;
             }
+            if (candidate == null) {
+                candidate = RunResult.exception(
+                        new IllegalStateException("engine returned no result"));
+                candidateReason = candidate.getReason();
+            }
+            if (candidate.getType() != RunResult.Type.INDETERMINATE
+                    && !operation.attemptCleared) {
+                boolean cleared;
+                String failure = null;
+                try {
+                    cleared = attemptStore.clear(operation.id);
+                } catch (OperationAttemptStore.Failure e) {
+                    cleared = false;
+                    failure = failureDetail(e);
+                }
+                if (!cleared) {
+                    String detail = "terminal confirmation could not be persisted: "
+                            + (failure == null ? "checked clear returned false" : failure);
+                    RunResult unconfirmed = RunResult.exception(new IllegalStateException(
+                            detail + "; original result " + candidate.getType()));
+                    result = unconfirmed;
+                    reason = unconfirmed.getReason() + "; explicit recovery required";
+                    state = State.INDETERMINATE;
+                    appendLogLocked("indeterminate: " + detail
+                            + "; lease, configuration freeze and ownership retained");
+                    held = buildSnapshotLocked();
+                    snapshot = held;
+                } else {
+                    operation.attemptCleared = true;
+                    persistedAttempt = null;
+                }
+            }
+            if (held == null) {
+                operation.terminal = true;
+                cleanupPending = true;
+                terminalResult = candidate;
+                terminalReason = candidateReason == null ? candidate.getReason() : candidateReason;
+            }
+        }
+        if (held != null) {
+            notifyListeners(held);
+            return;
         }
 
         try {
@@ -702,6 +1035,7 @@ public final class RunCoordinator {
         boolean admissionClosed;
         boolean leaseClosed;
         boolean recoveryClaimed;
+        boolean attemptCleared;
 
         Operation(String id, RunConfig.ExecutionMode mode, ResourceLease lease, Context context,
                   Long expectedGeneration) {

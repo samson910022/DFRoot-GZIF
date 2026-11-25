@@ -1,5 +1,7 @@
 // Modified 2026-11-24 (DFRoot GZIF): atomically publish the admitted native run-config snapshot. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): reject '=' in text values and require 0600 only after chmod. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): gate publication on the persisted admitted operation ID. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): null-safe persisted identity comparison in the publish gate. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -48,6 +50,42 @@ final class RunConfigArtifact {
         }
         publish(root.toPath(), operationId, config, plan, mode, Build.FINGERPRINT,
                 System.getProperty("os.version", "unknown"), FileSystem.DEFAULT);
+    }
+
+    /**
+     * Production entry point: refuse to publish unless the DE attempt store's
+     * unconfirmed record names this exact operation. The record ID, not the
+     * caller's ID, is the authority for the native artifact.
+     */
+    static void publishAuthorized(Context context, String operationId, RunConfig config,
+                                  RunPreflight.Plan plan, RunConfig.ExecutionMode mode)
+            throws IOException {
+        File root = context.getFilesDir() == null ? null : context.getFilesDir().getParentFile();
+        if (root == null) {
+            throw new IOException("device-protected app root is unavailable");
+        }
+        publishAuthorized(root.toPath(), operationId, config, plan, mode,
+                SharedPreferencesOperationAttemptStore.forDeviceProtectedStorage(context),
+                Build.FINGERPRINT, System.getProperty("os.version", "unknown"), FileSystem.DEFAULT);
+    }
+
+    /** Deterministic seam for the authorized publish gate. */
+    static void publishAuthorized(Path directory, String operationId, RunConfig config,
+                                  RunPreflight.Plan plan, RunConfig.ExecutionMode mode,
+                                  OperationAttemptStore store, String fingerprint, String kernel,
+                                  FileSystem fileSystem) throws IOException {
+        OperationAttempt admitted;
+        try {
+            admitted = Objects.requireNonNull(store, "store").load();
+        } catch (OperationAttemptStore.Failure e) {
+            throw new IOException("persisted admitted attempt is unreadable", e);
+        }
+        if (admitted == null || !admitted.isUnconfirmed()
+                || !admitted.getOperationId().equals(operationId)) {
+            throw new IOException("run_config publish refused: operation " + operationId
+                    + " is not the persisted admitted attempt");
+        }
+        publish(directory, operationId, config, plan, mode, fingerprint, kernel, fileSystem);
     }
 
     static void publish(Path directory, String operationId, RunConfig config,
