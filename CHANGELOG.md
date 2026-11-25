@@ -99,9 +99,9 @@ the repair commits (the authoritative finding text lives on the GitHub PR).
 |---|---|---|
 | R2-10 | packaged loader pin gate broken / no negative fixture | `d8b7d30` |
 | R2-11 | staged-entry cleanup identity and exec pin | `c3c9854` |
-| R2-12 | atomic terminal publication and indeterminate channel | `caf8c9e` |
-| R2-13 | indeterminate completion must keep ownership (partial R2-03) | `3aaefdf` |
-| R2-14 | unconfirmed attempt not durable across process death (partial R2-02) | `f0cc8e5` |
+| R2-14 | atomic terminal publication and indeterminate channel | `caf8c9e` |
+| R2-12 | indeterminate completion must keep ownership (partial R2-03) | `3aaefdf` |
+| R2-13 | unconfirmed attempt not durable across process death (partial R2-02) | `f0cc8e5` |
 | R2-15 | pre-admission uncertainty + independently disableable Start at Boot (partial R2-07/09) | `42ba1d5`, `83d93b5` |
 | R2-16 | already-hooked wording and availability honesty (partial R2-04) | `543c431` |
 
@@ -128,7 +128,7 @@ counts** at that point — these are intermediate, not final totals):
   loader can be exec'd without `ETXTBSY`; unavailable conversion fails closed.
   Added exec/replacement/churn/unrelated-entry fixtures. **117/117 local CTest
   cases and 115/115 CI-like cases**, 0 failures.
-- **Re-review Phase 3 — atomic terminal publication (`caf8c9e`, R2-12).** Full
+- **Re-review Phase 3 — atomic terminal publication (`caf8c9e`, R2-14).** Full
   payload written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`,
   EINTR-safe full write, fsync, fchmod 0644, checked close) then atomically
   linked to the run-scoped final path, temp unlinked and directory fsynced; a
@@ -137,14 +137,14 @@ counts** at that point — these are intermediate, not final totals):
   only. Conflict detection, operation-ID binding, progress-only `/dev/dfm*`
   markers, and soft-reboot rc=4/6 preserved. **123/123 host CTest cases** and
   **26 `NativeResultMapperTest` cases**.
-- **Re-review Phase 4 — ownership when unconfirmed (`3aaefdf`, R2-13; partial
+- **Re-review Phase 4 — ownership when unconfirmed (`3aaefdf`, R2-12; partial
   R2-03).** Bounded late-load/soft-reboot waits without killing children or
   lengthening deadlines; timeout or unobserved exit is rc=7. Reader deadline
   expiry is rc=7 within the single shared late-load budget.
   `RunCoordinator` retains lease, frozen configuration, and single-flight
   rejection on indeterminate results and exits only via a single-claim explicit
   recovery API. **131/131 CTest cases, 428 JVM tests, lint 0 errors.**
-- **Re-review Phase 5 — durable attempt barrier (`f0cc8e5`, R2-14; partial
+- **Re-review Phase 5 — durable attempt barrier (`f0cc8e5`, R2-13; partial
   R2-02).** New `OperationAttempt` / `OperationAttemptStore` /
   `SharedPreferencesOperationAttemptStore` boundary persists an unconfirmed
   attempt in device-protected storage before privileged work or `run_config`

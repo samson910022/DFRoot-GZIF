@@ -559,13 +559,13 @@ left uncommitted.
 - [x] R1.2 Staging identity (`c3c9854`, R2-11): descriptor-pinned fstat/lstat
   identity, conservative no-unlink of replacements, non-writing pin via
   `/proc/self/fd` to avoid `ETXTBSY`. **117/117 local CTest, 115/115 CI-like.**
-- [x] R1.3 Atomic publication (`caf8c9e`, R2-12): temp + fsync + `link()`
+- [x] R1.3 Atomic publication (`caf8c9e`, R2-14): temp + fsync + `link()`
   publication, rc=7 indeterminate channel, `NativeResultMapper` maps only to
   `RESULT_INDETERMINATE`. **123/123 CTest, 26 mapper tests.**
-- [x] R1.4 Indeterminate ownership (`3aaefdf`, R2-13 / partial R2-03): bounded
+- [x] R1.4 Indeterminate ownership (`3aaefdf`, R2-12 / partial R2-03): bounded
   non-killing waits, reader rc=7, lease/config/single-flight retained until
   single-claim owner recovery. **131/131 CTest, 428 JVM tests, lint 0 errors.**
-- [x] R1.5 Durable barrier (`f0cc8e5`, R2-14 / partial R2-02): DE-persisted
+- [x] R1.5 Durable barrier (`f0cc8e5`, R2-13 / partial R2-02): DE-persisted
   operation attempt before work, process-restart admission rejection, boot
   claims suppressed until recovery, compare-and-clear. **459 JVM, 131 CTest,
   lint 0 errors.**
@@ -585,9 +585,10 @@ left uncommitted.
   THIRD_PARTY_NOTICES dated notes, plan/todo updates; per-file 2026-11-25 notices
   added where missing (none removed); pins re-verified; `.gitignore` and tracked
   files audited; secret scan benign-hit-only; `git diff --check` clean.
-- [ ] Checkpoint R1: comprehensive review approval and final verification are
-  pending; main agent updates this item after approval. No CI green result is
-  claimed locally.
+- [x] Checkpoint R1: comprehensive review approval and final verification are
+  complete — all four comprehensive reviews APPROVED and final verification is
+  green. Final commit and push are performed by the main agent. No CI green
+  result is claimed locally.
 
 Open gates recorded for the main agent: fresh GitHub CI green run including the
 negative fixture is a **POST-PUSH gate**; hardware gates remain Direct Boot FGS
@@ -599,9 +600,13 @@ privileged-container/APK-assembly validation was performed.
 
 ## Final Comprehensive Review
 
-- [ ] Final 6.1: Correctness/lifecycle independent review.
-- [ ] Final 6.2: Security/staging/environment independent review.
-- [ ] Final 6.3: Test/build/CI independent review.
-- [ ] Final 6.4: Architecture/native integration independent review.
-- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
-- [ ] Final 6.6: Run final verification and push approved commit series.
+All four comprehensive reviews APPROVED and final verification is green. Final
+commit and push are performed by the main agent.
+
+- [x] Final 6.1: Correctness/lifecycle independent review.
+- [x] Final 6.2: Security/staging/environment independent review.
+- [x] Final 6.3: Test/build/CI independent review.
+- [x] Final 6.4: Architecture/native integration independent review.
+- [x] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
+- [x] Final 6.6: Final verification complete; approved commit series is committed
+  and pushed by the main agent.

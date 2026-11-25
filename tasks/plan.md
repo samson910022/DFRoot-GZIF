@@ -53,9 +53,9 @@ The final branch must be buildable, testable without privileged execution, lifec
 | R2-09 loader precheck / fallback | exact selection-aware asset preflight; no implicit fallback | 1 |
 | R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`d8b7d30`) |
 | R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`c3c9854`) |
-| R2-12 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; no success from failed write | Re-review 3 (`caf8c9e`) |
-| R2-13 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`3aaefdf`) |
-| R2-14 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`f0cc8e5`) |
+| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; no success from failed write | Re-review 3 (`caf8c9e`) |
+| R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`3aaefdf`) |
+| R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`f0cc8e5`) |
 | R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`42ba1d5`, `83d93b5`) |
 | R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | Re-review 8 (`543c431`) |
 | Duplicate boot broadcasts | durable BOOT_COUNT claim before service start | 5 |
@@ -214,10 +214,10 @@ Completed local gates for this round:
   clean and tampered synthetic fixtures behave correctly; CI fixture job added.
 - [x] R2-11 staging cleanup: descriptor identity pin, conservative replacement
   handling, non-writing exec pin; 117/117 local and 115/115 CI-like CTest cases.
-- [x] R2-12 atomic publication: 123/123 CTest, 26 mapper tests; rc=7 only maps
+- [x] R2-14 atomic publication: 123/123 CTest, 26 mapper tests; rc=7 only maps
   to `RESULT_INDETERMINATE`.
-- [x] R2-13 indeterminate ownership: 131/131 CTest, 428 JVM tests, lint 0 errors.
-- [x] R2-14 durable attempt barrier: 459 JVM tests, 131 CTest, lint 0 errors.
+- [x] R2-12 indeterminate ownership: 131/131 CTest, 428 JVM tests, lint 0 errors.
+- [x] R2-13 durable attempt barrier: 459 JVM tests, 131 CTest, lint 0 errors.
 - [x] R2-15 pre-admission uncertainty (135/135 CTest) and independent boot OFF
   (471 JVM tests, 135 CTest, lint 0 errors).
 - [x] R2-16 honest hook result and read-only availability diagnostic:

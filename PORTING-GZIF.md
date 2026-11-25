@@ -773,7 +773,7 @@ round's contracts, §16 supersedes them as noted below.
   The write pin is converted through `/proc/self/fd/<n>` to a non-writing pin
   before `install()` returns so the loader is exec-able without `ETXTBSY`;
   failure to convert fails closed.
-- **Atomic terminal publication (R2-12, `caf8c9e`).** A complete marker payload
+- **Atomic terminal publication (R2-14, `caf8c9e`).** A complete marker payload
   is written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`, full
   EINTR-safe write, fsync, fchmod 0644, checked close) and atomically linked to
   the run-scoped final path, then the temp is unlinked and the directory
@@ -781,12 +781,12 @@ round's contracts, §16 supersedes them as noted below.
   unconfirmed post-link failure the indeterminate channel is published **first**,
   then the intended marker is retracted, so a concurrent reader can never
   return SUCCESS; rc=7 outranks success and conflicts in the classifier.
-- **Bounded, non-killing waits (R2-13 / partial R2-03, `3aaefdf`).** Late-load
+- **Bounded, non-killing waits (R2-12 / partial R2-03, `3aaefdf`).** Late-load
   and soft-reboot command waits share one 60 s late-load budget and never signal
   or kill a child. Observed exits map to rc=0/1 and rc=4/6; timeouts and
   unobserved exits map to rc=7. The reader's 100 000 ms budget covers writer
   worst case; its expiry is rc=7, not a definitive failure.
-- **Durable attempt barrier (R2-14 / partial R2-02, `f0cc8e5`).** An
+- **Durable attempt barrier (R2-13 / partial R2-02, `f0cc8e5`).** An
   `OperationAttempt` is persisted in device-protected storage before privileged
   work or `run_config` publication. A new process rejects manual and boot
   requests fail-closed until explicit owner recovery, regardless of

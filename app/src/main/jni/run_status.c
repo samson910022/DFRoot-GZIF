@@ -562,7 +562,7 @@ static int status_write_temp(const char *payload, char *temp_path, size_t capaci
     }
     /* The temp name is unpredictable and carries a non-terminal prefix, so it
      * is ignored by the classifier while the payload is still being written.
-     * Mode bits are tightened to 0644 only after the content is fully written
+     * Mode bits are set to 0644 only after the content is fully written
      * and fsynced (below), never before. Some filesystems ignore mode bits;
      * regular-file type and no-follow are the enforced preconditions. */
 #ifdef RUN_STATUS_TEST_HOOKS
