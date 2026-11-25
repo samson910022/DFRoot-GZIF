@@ -14,6 +14,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): publish request-correlated acceptance, rejection and cancellation without changing operation ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): gate admission and pre-engine start on the foreground service owner token; never cancel work after the engine started. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R4.9): Javadoc only — state the limits of engineFinished and remove the app-data-reset recovery claim. No behavior change. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.1): bounded replayable request-outcome ledger with a separate outcome lock and off-main async reporting; no operation replay or ownership change. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -21,7 +22,9 @@ import android.content.Context;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.Set;
@@ -62,6 +65,46 @@ public final class RunCoordinator {
         ACCEPTED,
         REJECTED,
         CANCELLED
+    }
+
+    /**
+     * Immutable, replayable record of ONE correlated request's outcome.
+     *
+     * <p>This is an observation, never an operation owner and never permission
+     * to replay, retry or cancel work. Absence of a record means uncertainty:
+     * it is NOT proof of admission or of rejection.</p>
+     */
+    public static final class RequestOutcomeRecord {
+        private final String requestId;
+        private final RequestOutcome outcome;
+        private final String reason;
+        private final long sequence;
+
+        RequestOutcomeRecord(String requestId, RequestOutcome outcome, String reason,
+                             long sequence) {
+            this.requestId = requestId;
+            this.outcome = outcome;
+            this.reason = reason;
+            this.sequence = sequence;
+        }
+
+        public String getRequestId() {
+            return requestId;
+        }
+
+        public RequestOutcome getOutcome() {
+            return outcome;
+        }
+
+        /** Honest cause carried by the correlated publication; may be null. */
+        public String getReason() {
+            return reason;
+        }
+
+        /** Monotonic publication order, assigned under {@code outcomeLock}. */
+        public long getSequence() {
+            return sequence;
+        }
     }
 
     /**
@@ -107,6 +150,8 @@ public final class RunCoordinator {
 
     static final int MAX_LOG_ENTRIES = 200;
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
+    /** Bounded replay window for request outcomes; oldest (least-recently used) is evicted. */
+    static final int MAX_OUTCOME_RECORDS = 32;
     static final long INITIALIZATION_TIMEOUT_MS = 10_000L;
     /** Short bounded wait so the first service request is not dropped during off-main init. */
     static final long INITIALIZATION_WAIT_MS = 500L;
@@ -177,9 +222,32 @@ public final class RunCoordinator {
     private final BootCountReader bootCountReader;
     private final Executor initializationExecutor;
     private final UnattendedAuthorization unattendedAuthorization;
+    /**
+     * Dedicated single-thread daemon for best-effort correlated observer delivery.
+     * Never used to record an outcome: the ledger is written on the caller first.
+     */
+    private final Executor outcomeExecutor;
     private final boolean ownsWorkerExecutor;
     private final boolean ownsInitializationExecutor;
+    private final boolean ownsOutcomeExecutor;
     private final Object lock = new Object();
+    /**
+     * Strict lock order: {@code lock -> outcomeLock} or {@code outcomeLock} ALONE.
+     * Never {@code outcomeLock -> lock}: a durable store monitor may be held
+     * under {@code lock}, and acquiring it while holding {@code outcomeLock}
+     * would deadlock against a ledger read on another thread.
+     */
+    private final Object outcomeLock = new Object();
+    /** LRU by access; bounded by MAX_OUTCOME_RECORDS, guarded only by outcomeLock. */
+    private final LinkedHashMap<String, RequestOutcomeRecord> outcomeRecords =
+            new LinkedHashMap<String, RequestOutcomeRecord>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(
+                        Map.Entry<String, RequestOutcomeRecord> eldest) {
+                    return size() > MAX_OUTCOME_RECORDS;
+                }
+            };
+    private long outcomeSequence;
     private final CountDownLatch initializationComplete = new CountDownLatch(1);
     private final Set<Listener> listeners = new CopyOnWriteArraySet<>();
     private final Queue<LogEntry> log = new ArrayDeque<>();
@@ -217,7 +285,16 @@ public final class RunCoordinator {
                    Executor mainExecutor, Engine engine, long initializationTimeoutMillis) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 OperationAttemptStore.inMemory(), () -> null, Runnable::run,
-                () -> true, true, false, false);
+                () -> true, true, false, false, Runnable::run, false);
+    }
+
+    /** Test seam for a controlled outcome-publication executor (the ledger write stays synchronous). */
+    RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
+                   Executor mainExecutor, Engine engine, long initializationTimeoutMillis,
+                   Executor outcomeExecutor) {
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                OperationAttemptStore.inMemory(), () -> null, Runnable::run,
+                () -> true, true, false, false, outcomeExecutor, false);
     }
 
     /** Explicit seam for deterministic initialization and process-restart tests; test-only permissive authorization. */
@@ -227,7 +304,7 @@ public final class RunCoordinator {
                    Executor initializationExecutor) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 attemptStore, bootCountReader, initializationExecutor,
-                () -> true, false, false, false);
+                () -> true, false, false, false, Runnable::run, false);
     }
 
     /** Authorization-aware seam for deterministic OFF-transition tests. */
@@ -238,7 +315,32 @@ public final class RunCoordinator {
                    UnattendedAuthorization unattendedAuthorization) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 attemptStore, bootCountReader, initializationExecutor,
-                unattendedAuthorization, false, false, false);
+                unattendedAuthorization, false, false, false, Runnable::run, false);
+    }
+
+    /** Authorization + outcome-executor seam for deterministic dispatch-failure tests. */
+    RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
+                   Executor mainExecutor, Engine engine, long initializationTimeoutMillis,
+                   OperationAttemptStore attemptStore, BootCountReader bootCountReader,
+                   Executor initializationExecutor,
+                   UnattendedAuthorization unattendedAuthorization, Executor outcomeExecutor) {
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                attemptStore, bootCountReader, initializationExecutor,
+                unattendedAuthorization, false, false, false, outcomeExecutor, false);
+    }
+
+    /** Production seam: owns a dedicated daemon thread for best-effort outcome delivery. */
+    private RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
+                           Executor mainExecutor, Engine engine,
+                           long initializationTimeoutMillis, OperationAttemptStore attemptStore,
+                           BootCountReader bootCountReader, Executor initializationExecutor,
+                           UnattendedAuthorization unattendedAuthorization,
+                           boolean preInitialized, boolean ownsWorkerExecutor,
+                           boolean ownsInitializationExecutor) {
+        this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
+                attemptStore, bootCountReader, initializationExecutor, unattendedAuthorization,
+                preInitialized, ownsWorkerExecutor, ownsInitializationExecutor,
+                newOutcomeExecutor(), true);
     }
 
     private RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
@@ -247,7 +349,8 @@ public final class RunCoordinator {
                            BootCountReader bootCountReader, Executor initializationExecutor,
                            UnattendedAuthorization unattendedAuthorization,
                            boolean preInitialized, boolean ownsWorkerExecutor,
-                           boolean ownsInitializationExecutor) {
+                           boolean ownsInitializationExecutor, Executor outcomeExecutor,
+                           boolean ownsOutcomeExecutor) {
         if (initializationTimeoutMillis < 0) {
             throw new IllegalArgumentException("initializationTimeoutMillis must be non-negative");
         }
@@ -262,14 +365,25 @@ public final class RunCoordinator {
                 "initializationExecutor");
         this.unattendedAuthorization = Objects.requireNonNull(unattendedAuthorization,
                 "unattendedAuthorization");
+        this.outcomeExecutor = Objects.requireNonNull(outcomeExecutor, "outcomeExecutor");
         this.ownsWorkerExecutor = ownsWorkerExecutor;
         this.ownsInitializationExecutor = ownsInitializationExecutor;
+        this.ownsOutcomeExecutor = ownsOutcomeExecutor;
         this.initializationDone = preInitialized;
         this.initializationSucceeded = preInitialized;
         if (preInitialized) {
             initializationComplete.countDown();
         }
         this.snapshot = buildSnapshotLocked();
+    }
+
+    private static Executor newOutcomeExecutor() {
+        ExecutorService outcome = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "dfroot-outcome");
+            thread.setDaemon(true);
+            return thread;
+        });
+        return outcome;
     }
 
     /** Returns the single process-wide coordinator. */
@@ -332,6 +446,9 @@ public final class RunCoordinator {
             if (current.ownsInitializationExecutor
                     && current.initializationExecutor instanceof ExecutorService) {
                 ((ExecutorService) current.initializationExecutor).shutdownNow();
+            }
+            if (current.ownsOutcomeExecutor && current.outcomeExecutor instanceof ExecutorService) {
+                ((ExecutorService) current.outcomeExecutor).shutdownNow();
             }
         }
     }
@@ -582,6 +699,9 @@ public final class RunCoordinator {
                 requestOutcome = RequestOutcome.REJECTED;
                 rejectedSnapshot = buildSnapshotLocked();
                 snapshot = rejectedSnapshot;
+                // lock -> outcomeLock only; a later single-slot snapshot may
+                // replace the correlation fields, but not this record.
+                recordOutcome(requestId, RequestOutcome.REJECTED, unauthorizedDetail);
             }
             if (unauthorizedDetail == null) {
                 String id = UUID.randomUUID().toString();
@@ -619,6 +739,7 @@ public final class RunCoordinator {
                 appendLogLocked("admitted " + mode + " operation " + operationId);
                 admitted = buildSnapshotLocked();
                 snapshot = admitted;
+                recordOutcome(requestId, RequestOutcome.ACCEPTED, null);
             }
         }
         if (unauthorizedDetail != null) {
@@ -653,6 +774,63 @@ public final class RunCoordinator {
     }
 
     /**
+     * Records a correlated outcome in the bounded ledger. Guarded ONLY by
+     * {@code outcomeLock}; callers may already hold {@code lock} (the allowed
+     * order is lock -> outcomeLock), but this method never acquires {@code lock}.
+     * A duplicate requestId+outcome does not add a record or advance the
+     * sequence, so an async report and its posted snapshot publication collapse
+     * into one observation.
+     */
+    private void recordOutcome(String requestId, RequestOutcome outcome, String reason) {
+        if (requestId == null || requestId.isEmpty() || outcome == null
+                || outcome == RequestOutcome.NONE) {
+            return; // null/legacy IDs and non-outcomes are never replayable
+        }
+        synchronized (outcomeLock) {
+            RequestOutcomeRecord existing = outcomeRecords.get(requestId);
+            if (existing != null && existing.getOutcome() == outcome) {
+                return;
+            }
+            String detail = reason == null || reason.isEmpty() ? defaultReason(outcome) : reason;
+            outcomeRecords.put(requestId,
+                    new RequestOutcomeRecord(requestId, outcome, detail, ++outcomeSequence));
+        }
+    }
+
+    /**
+     * Read-only lookup of ONE request's recorded outcome. Takes ONLY
+     * {@code outcomeLock}, so it is never blocked by a checked store operation
+     * holding the durable {@code lock}. Absence means UNCERTAINTY: it is not
+     * evidence of admission, rejection or any privileged effect.
+     */
+    public RequestOutcomeRecord getRequestOutcome(String requestId) {
+        if (requestId == null || requestId.isEmpty()) {
+            return null;
+        }
+        synchronized (outcomeLock) {
+            return outcomeRecords.get(requestId);
+        }
+    }
+
+    /**
+     * Records the outcome synchronously on the caller (outcomeLock only), then
+     * posts ordinary correlated snapshot publication to the dedicated outcome
+     * executor. Observer delivery is best effort: even a rejected enqueue
+     * leaves the ledger record readable by the originating Activity on its next
+     * start. No operation is replayed, retried or cancelled by this method.
+     */
+    void noteRequestOutcomeAsync(String requestId, RequestOutcome outcome, String reason) {
+        Objects.requireNonNull(outcome, "outcome");
+        recordOutcome(requestId, outcome, reason);
+        try {
+            outcomeExecutor.execute(() -> noteRequestOutcome(requestId, outcome, reason));
+        } catch (RuntimeException e) {
+            // Best-effort observer delivery; the durable-lock-free ledger is the
+            // authoritative record for read-only reconciliation.
+        }
+    }
+
+    /**
      * Publishes a request-correlated outcome WITHOUT changing operation state,
      * result, operation ID, mode, generation, durable attempt or log.
      *
@@ -672,6 +850,7 @@ public final class RunCoordinator {
             this.requestId = requestId;
             this.requestOutcome = outcome;
             String detail = reason == null || reason.isEmpty() ? defaultReason(outcome) : reason;
+            recordOutcome(requestId, outcome, detail); // lock -> outcomeLock
             this.requestFailure = detail;
             published = buildSnapshotLocked();
             snapshot = published;
@@ -711,7 +890,10 @@ public final class RunCoordinator {
             String detail = requestFailure == null || requestFailure.isEmpty()
                     ? "request rejected" : requestFailure;
             this.requestFailure = detail;
+            // Legacy signal: no originating token, so there is no correlated
+            // outcome to record (absence stays uncertainty for an older request).
             requestId = null;
+            recordOutcome(requestId, RequestOutcome.REJECTED, detail);
             requestOutcome = RequestOutcome.REJECTED;
             rejected = buildSnapshotLocked();
             snapshot = rejected;

@@ -3,6 +3,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): add a read-only availability diagnostic from the authoritative preflight plan. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): compute the availability diagnostic off the UI thread with a stale-result guard. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): mint a request ID per click and clear pending only on that request's correlated outcome. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.1): reconcile an owned request outcome from the replayable ledger on start; read-only, no replay or privileged effect. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -157,6 +158,42 @@ public class MainActivity extends Activity {
         mCoordinator.addListener(mCoordinatorListener);
         renderConfirmedConfiguration();
         renderRunSnapshot(mCoordinator.getSnapshot());
+        // The listener was removed in onStop(): an outcome delivered while this
+        // Activity was stopped may no longer occupy the single snapshot slot.
+        reconcilePendingRequest();
+    }
+
+    /**
+     * Read-only reconciliation of THIS Activity's own click. The ledger is
+     * consulted under its own lock; no record means uncertainty, never proof of
+     * admission. Nothing is replayed, retried, cleared or started here.
+     */
+    private void reconcilePendingRequest() {
+        if (mDestroyed || !mManualStartPending || mPendingRequestId == null
+                || mCoordinator == null) {
+            return;
+        }
+        RunCoordinator.RequestOutcomeRecord record =
+                mCoordinator.getRequestOutcome(mPendingRequestId);
+        if (record == null) {
+            return; // unconfirmed: keep the pending state honest, do not replay
+        }
+        RunCoordinator.RequestOutcome outcome = record.getOutcome();
+        if (outcome != RunCoordinator.RequestOutcome.ACCEPTED
+                && outcome != RunCoordinator.RequestOutcome.REJECTED
+                && outcome != RunCoordinator.RequestOutcome.CANCELLED) {
+            return;
+        }
+        boolean wasPending = clearPendingRequest();
+        if (wasPending && outcome == RunCoordinator.RequestOutcome.REJECTED) {
+            appendUiMessage("Operation request rejected: "
+                    + requestDetail(record.getReason()) + "\n");
+        } else if (wasPending && outcome == RunCoordinator.RequestOutcome.CANCELLED) {
+            appendUiMessage("Operation request cancelled: "
+                    + requestDetail(record.getReason()) + "\n");
+        }
+        renderOutput();
+        updateRunButton();
     }
 
     @Override
@@ -217,7 +254,10 @@ public class MainActivity extends Activity {
             // No service was started: publish the correlated rejection for this
             // request so the pending state is cleared through the same path as
             // a service-side rejection.
-            mCoordinator.noteRequestOutcome(requestId,
+            // Record synchronously (outcomeLock only, never the durable lock)
+            // and post observation delivery off the caller. If that post fails,
+            // onStart() can still reconcile from the ledger.
+            mCoordinator.noteRequestOutcomeAsync(requestId,
                     RunCoordinator.RequestOutcome.REJECTED,
                     "Unable to start operation service: " + e.getMessage());
         }
@@ -303,13 +343,15 @@ public class MainActivity extends Activity {
             if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.ACCEPTED) {
                 clearPendingRequest();
             } else if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.REJECTED) {
-                clearPendingRequest();
-                appendUiMessage("Operation request rejected: "
-                        + requestDetail(snapshot) + "\n");
+                if (clearPendingRequest()) {
+                    appendUiMessage("Operation request rejected: "
+                            + requestDetail(snapshot) + "\n");
+                }
             } else if (snapshot.getRequestOutcome() == RunCoordinator.RequestOutcome.CANCELLED) {
-                clearPendingRequest();
-                appendUiMessage("Operation request cancelled: "
-                        + requestDetail(snapshot) + "\n");
+                if (clearPendingRequest()) {
+                    appendUiMessage("Operation request cancelled: "
+                            + requestDetail(snapshot) + "\n");
+                }
             }
             // NONE and any other request ID are unrelated and deliberately ignored.
         }
@@ -318,14 +360,21 @@ public class MainActivity extends Activity {
         showTerminalResultOnce(latest);
     }
 
-    private void clearPendingRequest() {
+    /** Idempotent: returns true only for the call that actually clears the pending click. */
+    private boolean clearPendingRequest() {
+        boolean wasPending = mManualStartPending || mPendingRequestId != null
+                || mSuppressedSnapshot != null;
         mManualStartPending = false;
         mSuppressedSnapshot = null;
         mPendingRequestId = null;
+        return wasPending;
     }
 
     private static String requestDetail(RunCoordinator.Snapshot snapshot) {
-        String detail = snapshot.getRequestFailure();
+        return requestDetail(snapshot.getRequestFailure());
+    }
+
+    private static String requestDetail(String detail) {
         return detail == null || detail.isEmpty() ? "no reason supplied" : detail;
     }
 

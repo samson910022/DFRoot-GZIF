@@ -270,6 +270,20 @@ if it is absent, release builds are unsigned and still configure. The file is
 gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 `SIGN_ALIAS` (no default credentials); CI uses the `KEYSTORE` secrets.
 
+## Fifth repair round — R5.1 contract note (2026-11-26)
+
+Short contract note (R5.9 consolidates): `RunCoordinator` keeps a bounded (32
+entries) least-recently-used ledger of correlated request outcomes under a
+separate `outcomeLock`, with a strict `lock -> outcomeLock` order (never the
+reverse). `getRequestOutcome(id)` and the synchronous ledger write of
+`noteRequestOutcomeAsync` take **only** `outcomeLock`, so checked storage under
+the durable `lock` cannot block them; observer delivery is best effort and a
+rejected post leaves the record readable. On `onStart()` the Activity reads
+**only its own** recorded outcome and clears pending state; a missing record is
+uncertainty, never proof of admission. No operation is replayed, retried,
+cancelled or transferred, and the single-snapshot slot and identity guard are
+unchanged.
+
 ## Fourth repair round — R4 consolidated summary (2026-11-26)
 
 Authoritative record of the **fourth repair round** on `fix/app-correctness-safety`

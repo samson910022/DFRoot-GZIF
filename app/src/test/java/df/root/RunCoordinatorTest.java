@@ -6,6 +6,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): pin the final unattended gate, fail-closed reads, production wiring, and no revocation after engine start. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove request-correlated outcomes are fresh and never alter active operation ownership. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the foreground owner-token denial at submit and before engine start, and no revocation after start. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.1): pin bounded outcome-ledger replay, lock isolation and best-effort async delivery. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -39,6 +40,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
@@ -1435,6 +1437,153 @@ public class RunCoordinatorTest {
         assertNotNull(store.load());
     }
 
+    /** The ledger is bounded: the least-recently used oldest record is evicted. */
+    @Test
+    public void outcomeLedgerIsBoundedAndEvictsOldestRecords() throws Exception {
+        RunCoordinator coordinator = coordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run);
+        for (int i = 0; i < RunCoordinator.MAX_OUTCOME_RECORDS + 3; i++) {
+            coordinator.noteRequestOutcome("req-" + i,
+                    RunCoordinator.RequestOutcome.REJECTED, "reason-" + i);
+        }
+
+        assertNull(coordinator.getRequestOutcome("req-0"));
+        assertNull(coordinator.getRequestOutcome("req-2"));
+        RunCoordinator.RequestOutcomeRecord kept = coordinator.getRequestOutcome("req-3");
+        assertNotNull(kept);
+        assertEquals("reason-3", kept.getReason());
+        assertEquals("req-" + (RunCoordinator.MAX_OUTCOME_RECORDS + 2),
+                coordinator.getRequestOutcome(
+                        "req-" + (RunCoordinator.MAX_OUTCOME_RECORDS + 2)).getRequestId());
+        assertTrue(coordinator.getRequestOutcome(
+                "req-" + (RunCoordinator.MAX_OUTCOME_RECORDS + 2)).getSequence()
+                > kept.getSequence());
+
+        Field records = RunCoordinator.class.getDeclaredField("outcomeRecords");
+        records.setAccessible(true);
+        assertEquals(RunCoordinator.MAX_OUTCOME_RECORDS, ((Map<?, ?>) records.get(coordinator)).size());
+    }
+
+    /** A newer single-slot snapshot never removes an older request's recorded outcome. */
+    @Test
+    public void newerSingleSlotSnapshotDoesNotRemoveOlderRecordedOutcome() {
+        RunCoordinator coordinator = coordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run);
+        coordinator.noteRequestOutcome("A", RunCoordinator.RequestOutcome.REJECTED, "reason-A");
+        coordinator.noteRequestOutcome("B", RunCoordinator.RequestOutcome.ACCEPTED, null);
+
+        RunCoordinator.Snapshot latest = coordinator.getSnapshot();
+        assertEquals("B", latest.getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.ACCEPTED, latest.getRequestOutcome());
+        RunCoordinator.RequestOutcomeRecord a = coordinator.getRequestOutcome("A");
+        assertNotNull(a);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, a.getOutcome());
+        assertEquals("reason-A", a.getReason());
+    }
+
+    /** Null/legacy IDs and non-outcomes are not replayable observations. */
+    @Test
+    public void nullLegacyAndNoneOutcomesAreNotRecorded() throws Exception {
+        RunCoordinator coordinator = coordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run);
+        coordinator.noteRequestOutcome(null, RunCoordinator.RequestOutcome.REJECTED, "null id");
+        coordinator.noteRequestOutcome("", RunCoordinator.RequestOutcome.REJECTED, "empty id");
+        coordinator.noteRequestOutcome("none-id", RunCoordinator.RequestOutcome.NONE, null);
+        coordinator.noteRequestRejected("legacy rejection");
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                new FakeLease()).isAccepted());
+
+        assertNull(coordinator.getRequestOutcome(null));
+        assertNull(coordinator.getRequestOutcome(""));
+        assertNull(coordinator.getRequestOutcome("none-id"));
+        Field records = RunCoordinator.class.getDeclaredField("outcomeRecords");
+        records.setAccessible(true);
+        assertTrue(((Map<?, ?>) records.get(coordinator)).isEmpty());
+    }
+
+    /** Ledger reads and async records take only outcomeLock, not the blocked durable lock. */
+    @Test
+    public void blockedStoreDoesNotBlockLedgerReadOrAsyncRecord() throws Exception {
+        BlockingPublishStore store = new BlockingPublishStore();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), queuedWorker,
+                Runnable::run, engine, TEST_TIMEOUT_MS, store, () -> 7L, Runnable::run,
+                () -> true, new QueueExecutor());
+        coordinator.initialize();
+
+        Thread submitter = new Thread(() -> coordinator.submit(context(),
+                RunConfig.ExecutionMode.MANUAL, new FakeLease(), "blocked-A"));
+        submitter.setDaemon(true);
+        submitter.start();
+        await(store.publishEntered); // submit now holds `lock` inside the checked publish
+
+        ExecutorService probe = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> read = probe.submit(
+                    () -> assertNull(coordinator.getRequestOutcome("blocked-A")));
+            read.get(2L, TimeUnit.SECONDS);
+            Future<?> record = probe.submit(() -> coordinator.noteRequestOutcomeAsync(
+                    "blocked-A", RunCoordinator.RequestOutcome.REJECTED,
+                    "recorded while store blocked"));
+            record.get(2L, TimeUnit.SECONDS);
+
+            RunCoordinator.RequestOutcomeRecord observed =
+                    coordinator.getRequestOutcome("blocked-A");
+            assertNotNull(observed);
+            assertEquals(RunCoordinator.RequestOutcome.REJECTED, observed.getOutcome());
+            assertEquals("recorded while store blocked", observed.getReason());
+        } finally {
+            store.releasePublish.countDown();
+            probe.shutdownNow();
+            submitter.join(TEST_TIMEOUT_MS);
+        }
+    }
+
+    /** A rejected observer post leaves the record readable; duplicates do not add records. */
+    @Test
+    public void observerPostFailureLeavesLedgerRecordAndDuplicateIsIdempotent() {
+        RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run, engine, TEST_TIMEOUT_MS, new RejectingExecutor());
+        RunCoordinator.Snapshot before = coordinator.getSnapshot();
+
+        coordinator.noteRequestOutcomeAsync("A", RunCoordinator.RequestOutcome.REJECTED, "reason-A");
+        assertSame(before, coordinator.getSnapshot()); // delivery failed, ledger did not
+        RunCoordinator.RequestOutcomeRecord first = coordinator.getRequestOutcome("A");
+        assertNotNull(first);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, first.getOutcome());
+        assertEquals("reason-A", first.getReason());
+
+        coordinator.noteRequestOutcomeAsync("A", RunCoordinator.RequestOutcome.REJECTED, "reason-A");
+        assertSame(first, coordinator.getRequestOutcome("A"));
+        assertEquals(first.getSequence(), coordinator.getRequestOutcome("A").getSequence());
+    }
+
+    /** Both correlated submit paths write the ledger without changing ownership. */
+    @Test
+    public void submitAcceptanceAndFinalGateRejectionAreRecorded() {
+        RunCoordinator accepted = coordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run);
+        assertTrue(accepted.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                new FakeLease(), "A").isAccepted());
+        RunCoordinator.RequestOutcomeRecord acceptance = accepted.getRequestOutcome("A");
+        assertNotNull(acceptance);
+        assertEquals(RunCoordinator.RequestOutcome.ACCEPTED, acceptance.getOutcome());
+
+        MutableAuthorization authorization = new MutableAuthorization(false);
+        RunCoordinator denied = new RunCoordinator(verifiedRepository(), new QueueExecutor(),
+                Runnable::run, engine, TEST_TIMEOUT_MS, OperationAttemptStore.inMemory(),
+                () -> 7L, Runnable::run, authorization, new RejectingExecutor());
+        denied.initialize();
+        RunCoordinator.Submission rejection = denied.submit(context(),
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, new FakeLease(), "B");
+        assertFalse(rejection.isAccepted());
+        RunCoordinator.RequestOutcomeRecord denial = denied.getRequestOutcome("B");
+        assertNotNull(denial);
+        assertEquals(RunCoordinator.RequestOutcome.REJECTED, denial.getOutcome());
+        assertEquals(RunCoordinator.UNATTENDED_AUTH_REJECT, denial.getReason());
+        assertEquals(RunCoordinator.State.IDLE, denied.getSnapshot().getState());
+    }
+
     private RunCoordinator gatedCoordinator(OperationAttemptStore store,
                                             RunCoordinator.UnattendedAuthorization authorization) {
         RunCoordinator coordinator = new RunCoordinator(verifiedRepository(), worker,
@@ -1679,6 +1828,30 @@ public class RunCoordinatorTest {
             loadEntered.countDown();
             await(releaseLoad);
             return super.load();
+        }
+    }
+
+    /** Blocks inside publish() while the coordinator holds its durable lock. */
+    private static final class BlockingPublishStore implements OperationAttemptStore {
+        private final OperationAttemptStore delegate = OperationAttemptStore.inMemory();
+        final CountDownLatch publishEntered = new CountDownLatch(1);
+        final CountDownLatch releasePublish = new CountDownLatch(1);
+
+        @Override
+        public OperationAttempt load() throws OperationAttemptStore.Failure {
+            return delegate.load();
+        }
+
+        @Override
+        public boolean publish(OperationAttempt attempt) throws OperationAttemptStore.Failure {
+            publishEntered.countDown();
+            await(releasePublish);
+            return delegate.publish(attempt);
+        }
+
+        @Override
+        public boolean clear(String operationId) throws OperationAttemptStore.Failure {
+            return delegate.clear(operationId);
         }
     }
 

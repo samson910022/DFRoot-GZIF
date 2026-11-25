@@ -2,6 +2,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): recheck service request wiring against operation-ID publication. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover request-correlated acknowledgement, overlapping rejections and cancelled service-local work. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): drive the outcome-report executor explicitly in failure/cancellation tests. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.1): cover stopped-Activity outcome reconciliation from the bounded ledger without replay. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -400,6 +401,121 @@ public class MainActivityTest {
         assertSame(cancelled, coordinator.getSnapshot());
         assertEquals(0, immediateEngine.calls.get());
         assertFalse(coordinatorWorker.hasNext());
+    }
+
+    /** R5.1: the stopped Activity reconciles A's own outcome even when B takes the single slot. */
+    @Test
+    public void stoppedActivityReconcilesItsOwnRejectionAfterUnrelatedSlotOverwrite() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 60), true);
+        installIdleCoordinator();
+        ActivityController<MainActivity> controller = launchController();
+        String requestA = clickAndReadRequestId(controller);
+        assertTrue(ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+
+        controller.stop();
+        coordinator.noteRequestOutcome(requestA, RunCoordinator.RequestOutcome.REJECTED,
+                "rejection for A while stopped");
+        coordinator.noteRequestOutcome("unrelated-B", RunCoordinator.RequestOutcome.ACCEPTED, null);
+        coordinatorObservers.runAll();
+        RunCoordinator.Snapshot latest = coordinator.getSnapshot();
+        assertEquals("unrelated-B", latest.getRequestId());
+        assertEquals(RunCoordinator.RequestOutcome.ACCEPTED, latest.getRequestOutcome());
+        assertTrue("the stopped observer must not have cleared pending",
+                ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+
+        controller.start();
+
+        assertFalse(ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+        assertNull(ReflectionHelpers.getField(controller.get(), "mPendingRequestId"));
+        assertTrue(output(controller.get()).contains("Operation request rejected"));
+        assertTrue(output(controller.get()).contains("rejection for A while stopped"));
+        assertSame("B's operation state is untouched by A's reconciliation",
+                latest, coordinator.getSnapshot());
+        assertEquals(RunCoordinator.State.IDLE, latest.getState());
+        assertTrue(controller.get().findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, immediateEngine.calls.get());
+
+        // A later listener callback for the same ID must not report twice.
+        coordinator.noteRequestOutcome(requestA, RunCoordinator.RequestOutcome.REJECTED,
+                "rejection for A while stopped");
+        coordinatorObservers.runAll();
+        assertEquals(1, occurrences(output(controller.get()), "rejection for A while stopped"));
+    }
+
+    @Test
+    public void stoppedActivityReconcilesItsOwnCancellationAfterUnrelatedSlotOverwrite() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 61), true);
+        installIdleCoordinator();
+        ActivityController<MainActivity> controller = launchController();
+        String requestA = clickAndReadRequestId(controller);
+
+        controller.stop();
+        coordinator.noteRequestOutcome(requestA, RunCoordinator.RequestOutcome.CANCELLED,
+                "cancellation for A while stopped");
+        coordinator.noteRequestOutcome("unrelated-B", RunCoordinator.RequestOutcome.ACCEPTED, null);
+        coordinatorObservers.runAll();
+        RunCoordinator.Snapshot latest = coordinator.getSnapshot();
+        assertEquals("unrelated-B", latest.getRequestId());
+
+        controller.start();
+
+        assertFalse(ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+        assertTrue(output(controller.get()).contains("Operation request cancelled"));
+        assertTrue(output(controller.get()).contains("cancellation for A while stopped"));
+        assertSame(latest, coordinator.getSnapshot());
+        assertEquals(RunCoordinator.State.IDLE, latest.getState());
+        assertTrue(controller.get().findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, immediateEngine.calls.get());
+    }
+
+    @Test
+    public void stoppedActivityReconcilesItsOwnAcceptanceWithoutReportingAReasonOrStartingWork() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 62), true);
+        installIdleCoordinator();
+        ActivityController<MainActivity> controller = launchController();
+        String requestA = clickAndReadRequestId(controller);
+
+        controller.stop();
+        coordinator.noteRequestOutcome(requestA, RunCoordinator.RequestOutcome.ACCEPTED, null);
+        coordinator.noteRequestOutcome("unrelated-B", RunCoordinator.RequestOutcome.ACCEPTED, null);
+        coordinatorObservers.runAll();
+        RunCoordinator.Snapshot latest = coordinator.getSnapshot();
+        assertEquals("unrelated-B", latest.getRequestId());
+
+        controller.start();
+
+        assertFalse(ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+        assertFalse(output(controller.get()).contains("Operation request rejected"));
+        assertFalse(output(controller.get()).contains("Operation request cancelled"));
+        assertSame(latest, coordinator.getSnapshot());
+        assertEquals(RunCoordinator.State.IDLE, latest.getState());
+        assertTrue(controller.get().findViewById(R.id.btnRun).isEnabled());
+        assertEquals("reconciliation never replays a click", 0, immediateEngine.calls.get());
+    }
+
+    /** Absence of a record is uncertainty: pending stays and no request is replayed. */
+    @Test
+    public void stoppedActivityWithNoRecordKeepsPendingAndNeverReplaysItsClick() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 63), true);
+        installIdleCoordinator();
+        ActivityController<MainActivity> controller = launchController();
+        String requestA = clickAndReadRequestId(controller);
+
+        controller.stop();
+        coordinator.noteRequestOutcome("unrelated-B", RunCoordinator.RequestOutcome.ACCEPTED, null);
+        coordinatorObservers.runAll();
+        assertNull(coordinator.getRequestOutcome(requestA));
+
+        controller.start();
+
+        assertTrue("an unconfirmed request stays pending",
+                ReflectionHelpers.getField(controller.get(), "mManualStartPending"));
+        assertEquals(requestA, ReflectionHelpers.getField(controller.get(), "mPendingRequestId"));
+        assertFalse(controller.get().findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
     }
 
     @Test
@@ -1310,8 +1426,10 @@ public class MainActivityTest {
         coordinatorWorker = new QueueExecutor();
         coordinatorObservers = new QueueExecutor();
         immediateEngine = new ImmediateEngine();
+        // The dedicated outcome executor is injected here so tests drain it with
+        // the same deterministic queue as ordinary observer publications.
         coordinator = new RunCoordinator(repository, coordinatorWorker, coordinatorObservers,
-                immediateEngine, 0L);
+                immediateEngine, 0L, coordinatorObservers);
         RunCoordinator.setInstanceForTesting(coordinator);
     }
 
@@ -1346,6 +1464,23 @@ public class MainActivityTest {
                 .getNextStartedService();
         assertNotNull("Activity click must enqueue a real foreground-service request", request);
         return request;
+    }
+
+    private String clickAndReadRequestId(ActivityController<MainActivity> controller) {
+        controller.get().findViewById(R.id.btnRun).performClick();
+        String requestId = nextServiceRequest().getStringExtra(ExploitService.EXTRA_REQUEST_ID);
+        assertNotNull(requestId);
+        return requestId;
+    }
+
+    private static int occurrences(String text, String needle) {
+        int count = 0;
+        int from = 0;
+        while ((from = text.indexOf(needle, from)) >= 0) {
+            count++;
+            from += needle.length();
+        }
+        return count;
     }
 
     private ActivityController<MainActivity> launchController() {

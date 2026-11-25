@@ -1,5 +1,18 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — R5.1: replayable request-outcome ledger (R2-17) — PR #2
+
+Short contract note (R5.9 consolidates): a bounded 32-entry LRU
+`RequestOutcomeRecord` ledger lives under a separate `outcomeLock` with a strict
+`lock -> outcomeLock` order; correlated submit/note paths record outcomes,
+`getRequestOutcome` takes only `outcomeLock`, and `noteRequestOutcomeAsync`
+records on the caller before best-effort posting to a dedicated single-thread
+daemon outcome executor. `MainActivity.onStart()` reconciles its own pending ID
+from that ledger after rendering the latest snapshot; absence stays uncertainty,
+no click is replayed, and the single-slot Snapshot/identity guard and operation
+ownership are unchanged. Harness-verified with focused `RunCoordinatorTest` and
+`MainActivityTest` runs; no device, ADB, payload or APK work was performed.
+
 ## 2026-11-26 — Fourth repair round (R4.1–R4.9) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **fourth repair round** (final local HEAD
