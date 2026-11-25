@@ -11,7 +11,7 @@ bundled loader or other third-party component was modified by the 2026-11-25
 PR #2 work; only this repository's GPL-2.0-only application/native sources were
 changed, each with a dated per-file notice.
 
-Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `d8b7d30`..`543c431`):
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `6686973`..`a8003c2`):
 the dependency inventory is **unchanged** — no dependency was added or removed;
 JUnit 4 and Robolectric remain test-only, and the new `buildSrc` loader-pin
 verification tasks are Gradle build logic, not shipped/runtime components.

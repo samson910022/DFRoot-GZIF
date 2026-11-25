@@ -36,7 +36,7 @@ changed. **No bundled loader binary, upstream component, or third-party artifact
 was modified by this work**, and no device/privileged/APK validation was
 performed for it.
 
-Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `d8b7d30`..`543c431`):
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `6686973`..`a8003c2`):
 a second repair round changed **only this repository's own GPL-2.0-only
 application, native, build-logic, and test sources** — restored packaged-loader
 pin verification with a harmless negative fixture (`buildSrc` tasks + CI),

@@ -86,6 +86,49 @@ APKs are treated as conveyance with the same notices and source offer rather
 than as "internal, not third-party" outputs. The signed release bundle is not
 the only unit of conveyance.
 
+## 2026-11-25 — Re-review 3.6 fix (R2-19 recovery truth; R2-04 wording; uncommitted)
+
+Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), left
+uncommitted. Scope: **R2-19** (recovery truth) and the remaining **R2-04**
+caveat (ambiguous `SUCCESS` final-result wording). No payload, device/adb,
+privileged container, APK assembly, dependency, native code, boot gate,
+attempt-store format, UI threading or CI change; no commit/push.
+
+- **R2-19 — recovery is narrow, evidence-based and trusted-caller-only.** There
+  is still no blind retry, no UI/intent/broadcast path and no barrier clear based
+  on ID/state/acknowledgement alone. `recoverIndeterminate(operationId)` now
+  refuses while supervised work may still be running: `engineStarted` is set
+  immediately before `engine.run()`, and `engineFinished` is set only in a
+  `finally` after that call returns (or throws). A supervisor
+  timeout/interruption publishes INDETERMINATE without setting that flag, so a
+  correct-ID caller is refused until the engine call actually returns; a proven
+  pre-effect rejection (engine never started) remains recoverable. Exact ID,
+  single-claim, and checked compare-and-clear still apply, cleanup remains
+  exactly once, and the checked clear precedes every release. Deterministic
+  tests cover blocked-engine refusal, post-return success, failed persistence,
+  and two concurrent correct-ID callers (exactly one wins).
+- **R2-19 — persisted recovery is post-process-death only.** The acknowledged
+  `recoverPersistedAttempt` API clears only an unconfirmed record loaded at
+  initialization, never one published by the current process. It cannot prove
+  external effects stopped and is a trusted-caller escape hatch, **not** an
+  owner feature. There is **NO in-app recovery UI**: an ordinary user with an
+  unconfirmed persisted attempt is intentionally locked out until a trusted
+  caller clears the barrier or app data is reset. A new boot count is diagnostic
+  only, not proof of safety. Mock tests cover with/without acknowledgement and
+  failed persistence, plus same-process refusal.
+- **R2-04 caveat — honest final-result wording.** Generic success is now
+  `DFRoot: run completed — verify root status yourself`; already-hooked is
+  `DFRoot: already attempted/hooked; root status unverified`. The bare `SUCCESS`
+  claim is gone from final-result user messages. Typed result codes/types, the
+  already-hooked SUCCESS code, the no-reentry guard, `/dev/df` and `/dev/dfm6`
+  progress strings, and the no-root-probe policy are strictly unchanged.
+
+Fresh local verification: **554 JVM unit tests across 45 suites** (`:app:testDebugUnitTest`,
+0 failures/errors/skips), `:app:lintDebug` **0 errors / 15 warnings**, host CTest
+unchanged at **135/135**, and `git diff --check` clean. No hardware/device/ADB/
+payload/privileged-container/APK-assembly validation was performed; CI remains a
+POST-PUSH gate. All changes are left uncommitted.
+
 ## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; uncommitted)
 
 Third repair round on `fix/app-correctness-safety` (HEAD `2a74dd0`), left
@@ -125,7 +168,7 @@ ownership) is not weakened.
 ## 2026-11-25 — Re-review 1 repair (R2-10..R2-16; locally committed, not pushed)
 
 Second 2026-11-25 repair round on `fix/app-correctness-safety`, commits
-`d8b7d30` → `543c431` (HEAD `543c431`), on top of the first repair round
+`6686973` → `a8003c2` (HEAD `a8003c2`), on top of the first repair round
 recorded below. `versionCode`/`versionName` remain 408 / `4.8-gzif`. No runtime
 payload, firmware target, bundled binary, dependency, or SUCCESS/root-probe
 policy was widened. The tracking-comment IDs below are mapped by subject area to
@@ -133,18 +176,18 @@ the repair commits (the authoritative finding text lives on the GitHub PR).
 
 | Finding | Subject closed by this round | Commit |
 |---|---|---|
-| R2-10 | packaged loader pin gate broken / no negative fixture | `d8b7d30` |
-| R2-11 | staged-entry cleanup identity and exec pin | `c3c9854` |
-| R2-14 | atomic terminal publication and indeterminate channel | `caf8c9e` |
-| R2-12 | indeterminate completion must keep ownership (partial R2-03) | `3aaefdf` |
-| R2-13 | unconfirmed attempt not durable across process death (partial R2-02) | `f0cc8e5` |
-| R2-15 | pre-admission uncertainty + independently disableable Start at Boot (partial R2-07/09) | `42ba1d5`, `83d93b5` |
-| R2-16 | already-hooked wording and availability honesty (partial R2-04) | `543c431` |
+| R2-10 | packaged loader pin gate broken / no negative fixture | `6686973` |
+| R2-11 | staged-entry cleanup identity and exec pin | `639a9d8` |
+| R2-14 | atomic terminal publication and indeterminate channel | `12a633b` |
+| R2-12 | indeterminate completion must keep ownership (partial R2-03) | `ce781f8` |
+| R2-13 | unconfirmed attempt not durable across process death (partial R2-02) | `7b5397c` |
+| R2-15 | pre-admission uncertainty + independently disableable Start at Boot (partial R2-07/09) | `7c1f39a`, `54cb000` |
+| R2-16 | already-hooked wording and availability honesty (partial R2-04) | `a8003c2` |
 
 Phase-by-phase (each phase is one commit, with the **exact locally recorded
 counts** at that point — these are intermediate, not final totals):
 
-- **Re-review Phase 1 — Gradle pin gate (`d8b7d30`, R2-10).** Moved pin
+- **Re-review Phase 1 — Gradle pin gate (`6686973`, R2-10).** Moved pin
   verification out of the build script into Gradle-supported `buildSrc` tasks
   (`LoaderPinVerifier`, `VerifyPackagedLoaderPinsTask`,
   `VerifyLoaderPinFixturesTask`), fixing the non-static-inner-class failure that
@@ -156,7 +199,7 @@ counts** at that point — these are intermediate, not final totals):
   is rejected. No full-suite count was recorded in this commit; a fresh GitHub
   CI green run is a **POST-PUSH gate** that cannot be executed locally and is
   **not** claimed here.
-- **Re-review Phase 2 — staging cleanup identity (`c3c9854`, R2-11).** Pinned
+- **Re-review Phase 2 — staging cleanup identity (`639a9d8`, R2-11).** Pinned
   the created staged inode with a descriptor; `fstat`/`lstat` identity recheck
   before unlink, conservative no-unlink of replacements, directory-mode restore
   and diagnostic retained. Converted the `O_WRONLY` pin through
@@ -164,7 +207,7 @@ counts** at that point — these are intermediate, not final totals):
   loader can be exec'd without `ETXTBSY`; unavailable conversion fails closed.
   Added exec/replacement/churn/unrelated-entry fixtures. **117/117 local CTest
   cases and 115/115 CI-like cases**, 0 failures.
-- **Re-review Phase 3 — atomic terminal publication (`caf8c9e`, R2-14).** Full
+- **Re-review Phase 3 — atomic terminal publication (`12a633b`, R2-14).** Full
   payload written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`,
   EINTR-safe full write, fsync, fchmod 0644, checked close) then atomically
   linked to the run-scoped final path, temp unlinked and directory fsynced; a
@@ -174,14 +217,14 @@ counts** at that point — these are intermediate, not final totals):
   only. Conflict detection, operation-ID binding, progress-only `/dev/dfm*`
   markers, and soft-reboot rc=4/6 preserved. **123/123 host CTest cases** and
   **26 `NativeResultMapperTest` cases**.
-- **Re-review Phase 4 — ownership when unconfirmed (`3aaefdf`, R2-12; partial
+- **Re-review Phase 4 — ownership when unconfirmed (`ce781f8`, R2-12; partial
   R2-03).** Bounded late-load/soft-reboot waits without killing children or
   lengthening deadlines; timeout or unobserved exit is rc=7. Reader deadline
   expiry is rc=7 within the single shared late-load budget.
   `RunCoordinator` retains lease, frozen configuration, and single-flight
   rejection on indeterminate results and exits only via a single-claim explicit
   recovery API. **131/131 CTest cases, 428 JVM tests, lint 0 errors.**
-- **Re-review Phase 5 — durable attempt barrier (`f0cc8e5`, R2-13; partial
+- **Re-review Phase 5 — durable attempt barrier (`7b5397c`, R2-13; partial
   R2-02).** New `OperationAttempt` / `OperationAttemptStore` /
   `SharedPreferencesOperationAttemptStore` boundary persists an unconfirmed
   attempt in device-protected storage before privileged work or `run_config`
@@ -189,24 +232,24 @@ counts** at that point — these are intermediate, not final totals):
   explicit recovery regardless of boot count, and boot claims are suppressed
   while unconfirmed. Clearing is compare-and-clear by operation ID. **459 JVM
   tests, 131 CTest cases, lint 0 errors.**
-- **Re-review Phase 6 — pre-admission uncertainty (`42ba1d5`, R2-15; partial
+- **Re-review Phase 6 — pre-admission uncertainty (`7c1f39a`, R2-15; partial
   R2-07).** Pure reader decision helper plus narrowly scoped reserved-identity
   diagnostic scan: a valid pre-admission rc=1 marker with no admitted terminal
   marker yields rc=7 with an explicit "completion unverified" diagnostic;
   admitted markers (rc=0 success included) remain authoritative and no stale or
   foreign marker can become success. **135/135 CTest cases**; Java result
   mapping and all prior SUCCESS/soft-reboot semantics unchanged.
-- **Re-review Phase 7 — independent Start-at-Boot OFF (`83d93b5`, R2-15;
+- **Re-review Phase 7 — independent Start-at-Boot OFF (`54cb000`, R2-15;
   partial R2-09).** OFF is reachable from ERROR configuration and
   active/indeterminate operations without disturbing the current operation;
   ON keeps the verified-config, idle-coordinator, and consent gates. The
   receiver component is re-checked at claim time (unreadable/default fails
   closed), and component-setting failures surface in the UI. **471 JVM tests,
   135 CTest cases, lint 0 errors.**
-- **Re-review Phase 8 — honest hook result and availability (`543c431`, R2-16;
-  partial R2-04).** Already-hooked success is relabelled
-  `SUCCESS (already attempted/hooked; root status unverified)` with the SUCCESS
-  code and no-reentry guard preserved; a read-only availability diagnostic is
+- **Re-review Phase 8 — honest hook result and availability (`a8003c2`, R2-16;
+  partial R2-04; wording refined in R3.6 above).** Already-hooked success was
+  relabelled to drop its root-verification claim, with the SUCCESS code and
+  no-reentry guard preserved; a read-only availability diagnostic is
   built from the same authoritative preflight plan in its own view and never
   starts, stages, or substitutes anything. **484 JVM tests across 44 suites,
   135 fresh host CTest cases, lint 0 errors (21 warnings).**

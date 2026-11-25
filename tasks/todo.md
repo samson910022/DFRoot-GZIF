@@ -540,46 +540,46 @@
 
 - [x] Checkpoint 6: Documentation matches code; non-privileged verification green; independent reviews approved; commit created by this change.
 
-<!-- Modified 2026-11-25 (DFRoot GZIF): re-review 1 repair round committed locally (d8b7d30..543c431); documentation/hygiene only; Checkpoint R1 and final comprehensive review remain unchecked. See NOTICE. -->
+<!-- Modified 2026-11-25 (DFRoot GZIF): re-review 1 repair round committed locally (6686973..a8003c2); documentation/hygiene only; Checkpoint R1 and final comprehensive review remain unchecked. See NOTICE. -->
 
 ## Re-review 1 repair round (2026-11-25, R2-10..R2-16)
 
 New repair round on `fix/app-correctness-safety` after the first repair round.
-Commits: `d8b7d30` (pin gate), `c3c9854` (staging identity), `caf8c9e` (atomic
-publication + rc7), `3aaefdf` (indeterminate ownership), `f0cc8e5` (durable
-attempt barrier), `42ba1d5` (pre-admission uncertainty), `83d93b5` (independent
-Boot OFF), `543c431` (honest hook result + availability diagnostic). HEAD
-`543c431`. Findings closed: **R2-10..R2-16**, plus the remaining parts of
+Commits: `6686973` (pin gate), `639a9d8` (staging identity), `12a633b` (atomic
+publication + rc7), `ce781f8` (indeterminate ownership), `7b5397c` (durable
+attempt barrier), `7c1f39a` (pre-admission uncertainty), `54cb000` (independent
+Boot OFF), `a8003c2` (honest hook result + availability diagnostic). HEAD
+`a8003c2`. Findings closed: **R2-10..R2-16**, plus the remaining parts of
 **R2-02/03/04/07/09**. The final documentation/notices/hygiene commit set is
 left uncommitted.
 
-- [x] R1.1 Pin gate (`d8b7d30`, R2-10): buildSrc loader-pin verifier tasks,
+- [x] R1.1 Pin gate (`6686973`, R2-10): buildSrc loader-pin verifier tasks,
   clean/tampered synthetic fixture guard, CI fixture job and `:app:tasks --all`
   regression. Locally verified: tasks resolve, fixtures pass/reject as intended.
-- [x] R1.2 Staging identity (`c3c9854`, R2-11): descriptor-pinned fstat/lstat
+- [x] R1.2 Staging identity (`639a9d8`, R2-11): descriptor-pinned fstat/lstat
   identity, conservative no-unlink of replacements, non-writing pin via
   `/proc/self/fd` to avoid `ETXTBSY`. **117/117 local CTest, 115/115 CI-like.**
-- [x] R1.3 Atomic publication (`caf8c9e`, R2-14): temp + fsync + `link()`
+- [x] R1.3 Atomic publication (`12a633b`, R2-14): temp + fsync + `link()`
   publication, rc=7 indeterminate channel, `NativeResultMapper` maps only to
   `RESULT_INDETERMINATE`. **123/123 CTest, 26 mapper tests.**
-- [x] R1.4 Indeterminate ownership (`3aaefdf`, R2-12 / partial R2-03): bounded
+- [x] R1.4 Indeterminate ownership (`ce781f8`, R2-12 / partial R2-03): bounded
   non-killing waits, reader rc=7, lease/config/single-flight retained until
   single-claim owner recovery. **131/131 CTest, 428 JVM tests, lint 0 errors.**
-- [x] R1.5 Durable barrier (`f0cc8e5`, R2-13 / partial R2-02): DE-persisted
+- [x] R1.5 Durable barrier (`7b5397c`, R2-13 / partial R2-02): DE-persisted
   operation attempt before work, process-restart admission rejection, boot
   claims suppressed until recovery, compare-and-clear. **459 JVM, 131 CTest,
   lint 0 errors.**
-- [x] R1.6 Pre-admission uncertainty (`42ba1d5`, R2-15 / partial R2-07): pure
+- [x] R1.6 Pre-admission uncertainty (`7c1f39a`, R2-15 / partial R2-07): pure
   decision helper + reserved diagnostic, admitted markers authoritative.
   **135/135 CTest**; Java mapping unchanged.
-- [x] R1.7 Independent Boot OFF (`83d93b5`, R2-15 / partial R2-09): OFF reachable
+- [x] R1.7 Independent Boot OFF (`54cb000`, R2-15 / partial R2-09): OFF reachable
   in ERROR and active/indeterminate states, ON gates retained, claim-time
   component recheck, UI surfaces failures. **471 JVM, 135 CTest, lint 0 errors.**
-- [x] R1.8 Honest hook result + availability (`543c431`, R2-16 / partial R2-04):
-  `SUCCESS (already attempted/hooked; root status unverified)` with unchanged
-  code/no-reentry guard, read-only availability diagnostic from the authoritative
-  preflight plan. **484 JVM tests (44 suites), 135 host CTest cases, lint 0
-  errors / 21 warnings.**
+- [x] R1.8 Honest hook result + availability (`a8003c2`, R2-16 / partial R2-04):
+  dropped the root-verification claim with unchanged code/no-reentry guard,
+  read-only availability diagnostic from the authoritative preflight plan.
+  Bare `SUCCESS` wording is further refined in R3.6 below. **484 JVM tests
+  (44 suites), 135 host CTest cases, lint 0 errors / 21 warnings.**
 - [x] R1.9 Documentation/notices/hygiene: README re-review section, CHANGELOG
   phase table, PORTING §16 + stale-contract corrections, NOTICE and
   THIRD_PARTY_NOTICES dated notes, plan/todo updates; per-file 2026-11-25 notices
@@ -597,6 +597,47 @@ sticky-bit `/data/local/tmp` owner and `/dev` marker-root trust; AES-key argv
 redesign and recovery-UI delivery are out of scope; `BOOT_COUNT` as a new-boot
 boundary still needs owner acknowledgement. No device/hardware/ADB/payload/
 privileged-container/APK-assembly validation was performed.
+
+<!-- Modified 2026-11-25 (DFRoot GZIF): R3.6 recovery-truth and honest-wording round; Java/docs only, left uncommitted. See NOTICE. -->
+
+## Re-review 3.6 repair round (2026-11-25, R2-19 + R2-04 caveat)
+
+Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), left
+uncommitted. Java/docs only: no native code, boot gate, attempt-store format,
+dependency, UI threading, CI, device/ADB, payload, privileged container, or APK
+assembly.
+
+- [x] R3.6.1 Recovery truth (`RunCoordinator.java`): `recoverIndeterminate` keeps
+  exact ID + single claim + checked compare-and-clear and adds engine-completion
+  evidence (`engineStarted` before `engine.run()`, `engineFinished` only in a
+  `finally` after the call returns/throws). A supervision timeout while the
+  engine is blocked is refused; a proven pre-effect rejection remains
+  recoverable; exactly-once cleanup preserved. Tests: blocked engine refused,
+  post-return success, failed persistence refused, concurrent correct-ID callers
+  one winner (`RunCoordinatorTest`, `RunCoordinatorAttemptTest`,
+  `RunCoordinatorProcessIntegrationTest`).
+- [x] R3.6.2 Persisted attempt (`RunCoordinator.java`): post-process-death only;
+  requires acknowledgement + exact ID + checked clear + a record loaded at
+  initialization (never one published by this process). No in-app recovery UI:
+  an ordinary user with an unconfirmed persisted attempt is intentionally locked
+  out until a trusted caller clears the barrier or app data is reset; a new boot
+  count is not proof of safety. Mock tests cover both acknowledgement states,
+  failed persistence and same-process refusal.
+- [x] R3.6.3 Honest wording (`ResultMessages.java`, `ResultMessagesTest.java`):
+  generic success `DFRoot: run completed — verify root status yourself`,
+  already-hooked `DFRoot: already attempted/hooked; root status unverified`.
+  Exact new wording pinned; typed codes/types, already-hooked SUCCESS code and
+  no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no root probe
+  strictly unchanged.
+- [x] R3.6.4 Docs: README/CHANGELOG/PORTING §17/plan/todo describe recovery
+  truth, intentional lockout and honest wording; stale R2 hashes remapped by
+  subject after the PR #1 rebase (`6686973`, `639a9d8`, `12a633b`, `ce781f8`,
+  `7b5397c`, `7c1f39a`, `54cb000`, `a8003c2`); R3 hashes left as current.
+- [x] R3.6.5 Verification: `:app:testDebugUnitTest` **554 tests / 45 suites,
+  0 failures / 0 errors / 0 skipped**; `:app:lintDebug` **0 errors / 15 warnings**;
+  host CTest unchanged **135/135**; `git diff --check` clean. No device/hardware/
+  ADB/payload/privileged-container/APK-assembly validation and no commit/push;
+  CI green remains a POST-PUSH gate.
 
 ## Final Comprehensive Review
 

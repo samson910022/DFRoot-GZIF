@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): specify pure user-facing messages for every typed run outcome. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): pin the honest already-attempted wording without changing result semantics. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin exact success wording with no bare SUCCESS claim; codes/types/detail unchanged. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -17,8 +18,10 @@ import java.util.List;
 
 @RunWith(Parameterized.class)
 public class ResultMessagesTest {
+    static final String GENERIC_SUCCESS_MESSAGE =
+            "DFRoot: run completed — verify root status yourself";
     static final String ALREADY_HOOKED_MESSAGE =
-            "DFRoot: SUCCESS (already attempted/hooked; root status unverified)";
+            "DFRoot: already attempted/hooked; root status unverified";
 
     private final RunResult.Type type;
     private final RunResult.Detail detail;
@@ -37,7 +40,7 @@ public class ResultMessagesTest {
     public static Collection<Object[]> messages() {
         List<Object[]> cases = new ArrayList<>();
         cases.add(new Object[] {RunResult.Type.SUCCESS, RunResult.Detail.LATE_LOAD_COMPLETED,
-                null, "DFRoot: SUCCESS"});
+                null, GENERIC_SUCCESS_MESSAGE});
         cases.add(new Object[] {RunResult.Type.SUCCESS, RunResult.Detail.ALREADY_HOOKED,
                 null, ALREADY_HOOKED_MESSAGE});
         cases.add(new Object[] {RunResult.Type.BOOTSTRAP_ERROR, RunResult.Detail.NATIVE_EXIT,
@@ -79,8 +82,9 @@ public class ResultMessagesTest {
 
         if (type == RunResult.Type.SUCCESS) {
             assertFalse(message.startsWith("DFRoot: Error"));
+            assertFalse("no final message may claim bare SUCCESS", message.contains("SUCCESS"));
         } else {
-            assertNotEquals("DFRoot: SUCCESS", message);
+            assertNotEquals(GENERIC_SUCCESS_MESSAGE, message);
             assertNotEquals(ALREADY_HOOKED_MESSAGE, message);
         }
     }
@@ -97,6 +101,24 @@ public class ResultMessagesTest {
         assertTrue(ResultMessages.message(result).contains("unverified"));
         assertFalse("must not claim root was verified",
                 ResultMessages.message(result).contains("root verified"));
+        assertFalse("must not claim bare SUCCESS",
+                ResultMessages.message(result).contains("SUCCESS"));
+    }
+
+    @Test
+    public void genericSuccessMessageDoesNotVerifyRootAndKeepsTypedResult() {
+        RunResult result = NativeResultMapper.map(0);
+
+        assertEquals(ExploitRunner.RESULT_OK, result.getCode());
+        assertEquals(RunResult.Type.SUCCESS, result.getType());
+        assertEquals(RunResult.Detail.LATE_LOAD_COMPLETED, result.getDetail());
+        assertTrue(result.isSuccess());
+        assertEquals(GENERIC_SUCCESS_MESSAGE, ResultMessages.message(result));
+        assertTrue(ResultMessages.message(result).contains("verify root status yourself"));
+        assertFalse("must not claim root was verified",
+                ResultMessages.message(result).contains("root verified"));
+        assertFalse("must not claim bare SUCCESS",
+                ResultMessages.message(result).contains("SUCCESS"));
     }
 
     private static int codeFor(RunResult.Type type) {

@@ -1,6 +1,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): prove the durable attempt barrier survives process death and gates every admission. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover idempotent clears and bounded, non-dropping initialization. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): every unverified outcome holds the barrier; only confirmed codes clear it. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin post-process-death-only persisted recovery and checked clears. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -22,6 +23,7 @@ import org.robolectric.annotation.Config;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -332,6 +334,35 @@ public class RunCoordinatorAttemptTest {
         assertTrue(restarted.submit(context(), RunConfig.ExecutionMode.MANUAL,
                 new FakeLease()).isAccepted());
         assertEquals(1, engine.calls.get());
+    }
+
+    /**
+     * The acknowledged persisted-attempt API is post-process-death only. A
+     * coordinator that published its own barrier in this process must not use
+     * it to escape that barrier; there is no in-app recovery UI for a user.
+     */
+    @Test
+    public void persistedRecoveryRefusesABarrierPublishedByThisProcess() throws Exception {
+        String priorId = "prior-process-run";
+        store.seed(new OperationAttempt(priorId, RunConfig.ExecutionMode.MANUAL,
+                BOOT_COUNT, true, "unconfirmed before process death"));
+        RunCoordinator restarted = initializedCoordinator();
+
+        Field published = RunCoordinator.class.getDeclaredField("attemptPublishedInThisProcess");
+        published.setAccessible(true);
+        assertFalse(published.getBoolean(restarted));
+        published.setBoolean(restarted, true);
+
+        assertFalse(restarted.recoverPersistedAttempt(priorId, true));
+        assertNotNull(store.load());
+        assertEquals(0, engine.calls.get());
+        assertFalse(restarted.getSnapshot().getLog().stream().anyMatch(entry ->
+                entry.getMessage().contains("cleared by trusted-caller")));
+
+        published.setBoolean(restarted, false);
+        assertTrue(restarted.recoverPersistedAttempt(priorId, true));
+        assertNull(store.load());
+        assertEquals(0, engine.calls.get());
     }
 
     @Test

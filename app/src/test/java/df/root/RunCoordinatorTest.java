@@ -2,6 +2,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): cover the admitted operation ID passed to the production engine. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove an Error from lease close cannot strand cleanup or later submits. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): prove native rc7 keeps ownership until an explicit recovery. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): pin recovery to real engine completion and single-claim concurrency. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -805,6 +806,92 @@ public class RunCoordinatorTest {
         assertFalse(repository.isFrozen());
         assertFalse(coordinator.recoverIndeterminate(unverified.getOperationId()));
         assertEquals(1, lease.closeCount.get());
+    }
+
+    /** INDETERMINATE from a supervisor timeout is not proof that work stopped. */
+    @Test
+    public void supervisedTimeoutWhileEngineIsBlockedRefusesRecoveryUntilEngineReturns()
+            throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        RunCoordinator coordinator = coordinator(repository, worker, Runnable::run);
+        FakeEngine.Plan plan = engine.blockingPlan();
+        FakeLease lease = new FakeLease();
+        AtomicReference<ConfigurationRepository.RunAdmission> admitted = new AtomicReference<>();
+        plan.action = call -> admitted.set(call.admission);
+        CountDownLatch indeterminate = stateLatch(coordinator, RunCoordinator.State.INDETERMINATE);
+
+        try {
+            assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                    lease).isAccepted());
+            assertTrue(plan.entered.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+            plan.call.events.onTimeout();
+            await(indeterminate);
+
+            String id = coordinator.getSnapshot().getOperationId();
+            RunCoordinator.Snapshot held = coordinator.getSnapshot();
+            assertEquals(RunCoordinator.State.INDETERMINATE, held.getState());
+            assertFalse("a blocked engine is still active work",
+                    coordinator.recoverIndeterminate(id));
+            assertEquals(0, lease.closeCount.get());
+            assertTrue(admitted.get().isActive());
+            assertTrue(repository.isFrozen());
+            assertSame(held, coordinator.getSnapshot());
+
+            // Only after engine.run() actually returns does recovery become legal.
+            plan.finish(NativeResultMapper.map(7));
+            worker.submit(() -> {}).get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            assertTrue(coordinator.recoverIndeterminate(id));
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(admitted.get().isActive());
+            assertFalse(repository.isFrozen());
+            assertFalse(coordinator.recoverIndeterminate(id));
+            assertEquals(1, lease.closeCount.get());
+        } finally {
+            plan.finish(NativeResultMapper.map(7));
+        }
+    }
+
+    @Test
+    public void concurrentCorrectIdRecoveriesClaimOnceAndCloseExactlyOnce() throws Exception {
+        ConfigurationRepository repository = verifiedRepository();
+        QueueExecutor queuedWorker = new QueueExecutor();
+        QueueExecutor main = new QueueExecutor();
+        RunCoordinator coordinator = coordinator(repository, queuedWorker, main);
+        FakeEngine.Plan plan = engine.immediatePlan(NativeResultMapper.map(7));
+        FakeLease lease = new FakeLease();
+
+        assertTrue(coordinator.submit(context(), RunConfig.ExecutionMode.MANUAL,
+                lease).isAccepted());
+        queuedWorker.runAll();
+        main.runAll();
+        String id = coordinator.getSnapshot().getOperationId();
+        assertEquals(RunCoordinator.State.INDETERMINATE, coordinator.getSnapshot().getState());
+
+        ExecutorService callers = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<Boolean> first = callers.submit(() -> {
+                await(start);
+                return coordinator.recoverIndeterminate(id);
+            });
+            Future<Boolean> second = callers.submit(() -> {
+                await(start);
+                return coordinator.recoverIndeterminate(id);
+            });
+            start.countDown();
+
+            boolean firstWon = first.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            boolean secondWon = second.get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            assertTrue("exactly one correct-ID caller wins", firstWon ^ secondWon);
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(plan.call.admission.isActive());
+            assertFalse(repository.isFrozen());
+            assertFalse(coordinator.recoverIndeterminate(id));
+            assertEquals(1, lease.closeCount.get());
+        } finally {
+            callers.shutdownNow();
+            assertTrue(callers.awaitTermination(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        }
     }
 
     @Test

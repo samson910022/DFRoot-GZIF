@@ -1,5 +1,6 @@
 // Modified 2026-11-24 (DFRoot GZIF): extract pure typed-result user messages from the Activity. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): relabel already-hooked success with unverified root status. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): remove ambiguous bare SUCCESS from final user messages; typed contract unchanged. See NOTICE.
 package df.root;
 
 /** Pure user-facing mapping for typed run outcomes. */
@@ -9,9 +10,11 @@ final class ResultMessages {
     static String message(RunResult result) {
         switch (result.getType()) {
             case SUCCESS:
+                // The typed SUCCESS code is preserved, but the user message never
+                // claims root was verified: /dev/df markers are progress only.
                 return result.getDetail() == RunResult.Detail.ALREADY_HOOKED
-                        ? "DFRoot: SUCCESS (already attempted/hooked; root status unverified)"
-                        : "DFRoot: SUCCESS";
+                        ? "DFRoot: already attempted/hooked; root status unverified"
+                        : "DFRoot: run completed — verify root status yourself";
             case BOOTSTRAP_ERROR:          return "DFRoot: Error - bootstrap/late-load failed";
             case PRECHECK_FAILED:          return "DFRoot: Error - precheck failed (see output)";
             case PATCH_FAILED:             return "DFRoot: Error - failed to patch files";

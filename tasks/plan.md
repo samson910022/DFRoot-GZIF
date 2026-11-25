@@ -51,13 +51,15 @@ The final branch must be buildable, testable without privileged execution, lifec
 | R2-07 rc=4 absent / rc=1 too narrow | integrated native terminal protocol and complete result mapping | 1, 4 |
 | R2-08 legacy soft reboot / consent | versioned safe-off migration and modal durable acknowledgement | 2 |
 | R2-09 loader precheck / fallback | exact selection-aware asset preflight; no implicit fallback | 1 |
-| R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`d8b7d30`) |
-| R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`c3c9854`) |
-| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; pre-link failure leaves no final marker, and the brief post-link/pre-rc7 observation window is documented honestly rather than claimed unobservable | Re-review 3 (`caf8c9e`) |
-| R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`3aaefdf`) |
-| R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`f0cc8e5`) |
-| R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`42ba1d5`, `83d93b5`) |
-| R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | Re-review 8 (`543c431`) |
+| R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`6686973`) |
+| R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`639a9d8`) |
+| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; pre-link failure leaves no final marker, and the brief post-link/pre-rc7 observation window is documented honestly rather than claimed unobservable | Re-review 3 (`12a633b`) |
+| R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`ce781f8`) |
+| R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`7b5397c`) |
+| R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`7c1f39a`, `54cb000`) |
+| R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | Re-review 8 (`a8003c2`) |
+| R2-19 recovery truth | engine-finished evidence before in-process recovery; post-process-death-only trusted-caller persisted clear; no UI, no retry, no boot-count proof | R3.6 (`d32006e`) |
+| R2-04 caveat (ambiguous final `SUCCESS` wording) | "run completed — verify root status yourself" / "already attempted/hooked; root status unverified"; typed codes/types and no-reentry guard unchanged | R3.6 (`d32006e`) |
 | Duplicate boot broadcasts | durable BOOT_COUNT claim before service start | 5 |
 | WakeLock released before bootstrap completes | terminal completion marker; service owns lock for full session | 3, 4 |
 | Shell-writable root staging race | sticky-bit + exclusive nofollow descriptor staging; restore mode | 4 |
@@ -203,8 +205,8 @@ For every phase:
 
 ## Re-review 1 repair round — release gates (2026-11-25)
 
-Second repair round on `fix/app-correctness-safety`, commits `d8b7d30`..`543c431`
-(HEAD `543c431`), closing R2-10..R2-16 and the remaining parts of
+Second repair round on `fix/app-correctness-safety`, commits `6686973`..`a8003c2`
+(HEAD `a8003c2`), closing R2-10..R2-16 and the remaining parts of
 R2-02/03/04/07/09. Documentation/notices/hygiene only for the final commit set;
 no runtime behavior change is introduced by the documentation work itself.
 
@@ -251,6 +253,36 @@ Remaining release gates (not satisfied locally, not claimed as done):
   acknowledgement/validation.
 - [ ] APK assembly remains blocked by the gitignored, absent `ko/*.ko` and would
   require a privileged DDK container; no device/ADB/payload validation in this round.
+
+## Re-review 3.6 repair round — release gates (2026-11-25)
+
+Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), fixing
+**R2-19** (recovery truth) and the remaining **R2-04** caveat. Java-only,
+uncommitted: no native code, boot gate, attempt-store format, dependency, UI
+threading, CI, device/ADB, payload, privileged container, or APK assembly.
+
+- [x] R2-19 in-process recovery requires evidence: `engineStarted` before
+  `engine.run()` and `engineFinished` only after that call returns/throws, in
+  addition to exact ID, single claim and checked compare-and-clear. A supervisor
+  timeout while the engine is blocked is refused; exactly-once cleanup and the
+  checked clear are preserved. Deterministic tests: blocked engine refused,
+  post-return success, failed persistence refused, concurrent correct-ID callers
+  (one wins).
+- [x] R2-19 persisted recovery is post-process-death only: acknowledgement +
+  exact ID + checked clear + a record loaded at initialization (never one
+  published by this process). No in-app recovery UI: an ordinary user is
+  intentionally locked out until a trusted caller clears the barrier or app data
+  is reset; a new boot count is not proof of safety. Mock tests: with/without
+  acknowledgement, failed persistence, same-process refusal.
+- [x] R2-04 caveat: bare `SUCCESS` removed from final user messages
+  (`DFRoot: run completed — verify root status yourself` /
+  `DFRoot: already attempted/hooked; root status unverified`). Typed codes/types,
+  already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6`
+  progress strings, and no root probe strictly unchanged.
+- [x] Host verification: `:app:testDebugUnitTest` 554 tests / 45 suites,
+  0 failures/errors/skips; `:app:lintDebug` 0 errors / 15 warnings; host CTest
+  unchanged 135/135; `git diff --check` clean. No hardware/device/ADB/payload/
+  privileged-container/APK-assembly validation is claimed; CI is POST-PUSH.
 
 ## Final Gate
 

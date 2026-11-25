@@ -63,9 +63,10 @@ never a definitive failure. A global marker alone can no longer end a run.
 
 A late-load timeout, an unobserved child exit, an unconfirmed publication, and a
 reader deadline expiry are all rc=7 indeterminate: privileged children may still
-be running, so the app keeps ownership until explicit owner recovery. **No root
-probe is added**: the app does not run `su` or inspect root state to decide a
-result. Verify root yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
+be running, so the app keeps ownership until a trusted caller clears the barrier
+(no in-app recovery UI; see the R3.6 section below). **No root probe is added**:
+the app does not run `su` or inspect root state to decide a result. Verify root
+yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
 
 **Publication window (precise guarantee).** A **pre-link** failure leaves no
 final marker at all. Once the rc=7 indeterminate channel is published it
@@ -83,7 +84,7 @@ precedence and indeterminate ownership still apply.
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death.
 - **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state, so a queued boot request cannot contradict OFF. Foreground-service start eligibility from boot still requires hardware validation.
 - **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. Turning it ON still requires verified configuration, an idle coordinator, and consent; a rejected component change is surfaced in the UI with the state actually applied.
-- **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until explicit owner recovery, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API.
+- **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until the barrier is cleared or app data is reset.
 - **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
 
 ## FAQ
@@ -247,27 +248,27 @@ gitignored — do **not** commit it. Local `make` requires explicit `SIGN_PASS`/
 ## Re-review 1 repair (2026-11-25)
 
 This section records the **new repair round** on top of the first 2026-11-25
-repair (commits `d8b7d30` → `543c431` on `fix/app-correctness-safety`). It closes
+repair (commits `6686973` → `a8003c2` on `fix/app-correctness-safety`). It closes
 tracking findings **R2-10 through R2-16** and the still-open parts of
 **R2-02/03/04/07/09**. The earlier "Validation status" section below remains the
 record of the first repair round; the counts in this section are the current
 ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
 
-- **Gradle pin gate restored (`d8b7d30`).** Loader-pin verification moved from
+- **Gradle pin gate restored (`6686973`).** Loader-pin verification moved from
   the build script into Gradle-supported `buildSrc` tasks, fixing the
   non-static-inner-class failure that broke `:app:tasks --all`. The strict
   two-pin, one-APK, packaged-entry SHA-256 checks are retained, and a
   deterministic harmless synthetic-fixture guard now proves that a clean APK
   passes while a one-byte-tampered `libksud.so` is rejected; it is wired into
   CI (`loader-pin-fixtures`). No real APK path or device is touched.
-- **Conservative descriptor-based staging cleanup (`c3c9854`).** The created
+- **Conservative descriptor-based staging cleanup (`639a9d8`).** The created
   staged inode is pinned by a descriptor and verified with `fstat`/`lstat`
   before any unlink. If the path no longer names that inode, cleanup never
   unlinks the replacement, still restores the directory mode, and reports a
   diagnostic. The `O_WRONLY` pin is converted through `/proc/self/fd` to a
   non-writing pin before `install()` returns, so the loader can be exec'd
   without `ETXTBSY`; an unavailable conversion fails closed.
-- **Atomic terminal marker publication (`caf8c9e`).** The full marker payload is
+- **Atomic terminal marker publication (`12a633b`).** The full marker payload is
   written to an unpredictable same-directory temp file (`O_EXCL|O_NOFOLLOW`,
   full write, `fsync`, `fchmod 0644`, checked close) and only then atomically
   linked to the run-scoped final name, with temp unlink and directory fsync.
@@ -282,8 +283,8 @@ ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
   not claim a failed publication is never observable as confirmed; we claim only
   that any result the app acts on **after publication completes** is
   indeterminate (writer exits rc=7, reader's steady-state marker is rc=7).
-- **rc=7 indeterminate contract for missing confirmation (`caf8c9e`, `3aaefdf`,
-  `42ba1d5`).** Bounded, non-killing native waits map timeouts and unobserved
+- **rc=7 indeterminate contract for missing confirmation (`12a633b`, `ce781f8`,
+  `7c1f39a`).** Bounded, non-killing native waits map timeouts and unobserved
   exits to rc=7 (late-load and soft-reboot); the reader's own deadline expiry
   is rc=7 ("privileged child may still be running"); a failed/unconfirmed
   publication cannot report success as the app's acted-on result (the observable
@@ -293,26 +294,28 @@ ones. `versionCode`/`versionName` are unchanged (408 / `4.8-gzif`).
   an explicit "completion unverified" diagnostic. Current-operation markers
   stay authoritative, foreign/stale markers never become success, and rc=2 is
   only a pre-operation `setup()` failure.
-- **Durable unconfirmed-attempt barrier (`f0cc8e5`).** The operation attempt is
+- **Durable unconfirmed-attempt barrier (`7b5397c`).** The operation attempt is
   persisted in device-protected storage before privileged work or `run_config`
-  publication; a new process rejects manual and boot requests until explicit
-  owner recovery, regardless of boot count. Boot claims are suppressed while an
-  attempt is unconfirmed, clearing is compare-and-clear by operation ID, and
-  the coordinator keeps ownership on indeterminate results.
-- **Independent Start-at-Boot OFF (`83d93b5`).** OFF is reachable from ERROR
+  publication; a new process rejects manual and boot requests until a trusted
+  caller clears the barrier, regardless of boot count. Boot claims are suppressed
+  while an attempt is unconfirmed, clearing is compare-and-clear by operation ID,
+  and the coordinator keeps ownership on indeterminate results. There is no
+  in-app recovery UI (see the R3.6 section below).
+- **Independent Start-at-Boot OFF (`54cb000`).** OFF is reachable from ERROR
   configuration and active/indeterminate operations without disturbing the
   current run; ON keeps the verified-config, idle-coordinator, and consent
   gates. The claim re-checks the component state and fails closed when it is
   unreadable.
-- **Honest already-hooked wording (`543c431`).** The result message is now
-  `DFRoot: SUCCESS (already attempted/hooked; root status unverified)`; the
-  SUCCESS code and the one-shot no-reentry guard are unchanged.
-- **Read-only availability diagnostic (`543c431`).** The UI shows the
+- **Honest already-hooked wording (`a8003c2`; refined in R3.6 below).** The
+  R2 round removed the root-verification claim; R3.6 additionally removes the
+  ambiguous bare `SUCCESS` text from the user message. The SUCCESS code and the
+  one-shot no-reentry guard are unchanged.
+- **Read-only availability diagnostic (`a8003c2`).** The UI shows the
   authoritative `RunPreflight` reason in its own view, from the same environment
   source the runner uses. It never starts work, stages files, or substitutes a
   manager/loader, and unreadable observations are never reported as available.
 
-**Validation status (current round, non-privileged host only):** **484 JVM unit
+**Validation status (HISTORICAL — first repair round, non-privileged host only; superseded above):** **484 JVM unit
 tests across 44 suites**, **135 host CTest cases**, lint **0 errors / 21
 warnings**, `git diff --check` clean, loader SHA-256 pins match `app/build.gradle.kts`
 and the bundled `jniLibs` binaries, and no generated/build/secret files are
@@ -322,6 +325,48 @@ revision** (the KO is gitignored/absent). A fresh GitHub CI green run — includ
 the negative pin fixture — is a **POST-PUSH gate** that cannot be executed
 locally; it is not claimed here. The 2026-11-17 hardware runs remain historical
 evidence only.
+
+## Re-review 3.6 repair (2026-11-25) — recovery truth and honest success wording
+
+Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), fixing
+**R2-19** (recovery truth) and the remaining **R2-04** caveat (ambiguous
+`SUCCESS` wording). No device/ADB, payload execution, privileged container,
+dependency, APK assembly, native code, boot gate, attempt-store format, UI
+threading or CI change was made. Uncommitted.
+
+- **Recovery requires proof that supervised work has finished.**
+  `recoverIndeterminate(operationId)` still needs the exact in-process ID, the
+  single claim and a successful checked compare-and-clear, but it additionally
+  refuses while the engine call is still executing. An `engineStarted` flag is
+  set immediately before `engine.run()`; an `engineFinished` flag is set only in
+  a `finally` after that call returns (or escapes by throwing). A supervision
+  timeout/interruption callback publishes INDETERMINATE **without** setting
+  `engineFinished`, so a trusted caller with the correct ID is refused until the
+  engine actually returns. A proven pre-effect rejection (engine never started)
+  remains recoverable; no path retries, kills or starts work. Cleanup stays
+  exactly once and the checked clear still precedes any lease/freeze release.
+- **Persisted-attempt recovery is a post-process-death escape hatch, not an
+  owner feature.** `recoverPersistedAttempt(operationId, ownerAcknowledged)`
+  requires an affirmative acknowledgement, the exact ID, an unconfirmed record
+  loaded at initialization (never one published by this process), and a checked
+  clear. It cannot prove that external effects from a dead process stopped.
+  There is **NO in-app recovery UI**: an ordinary user with an unconfirmed
+  persisted attempt is intentionally locked out — manual and boot admission are
+  rejected — until a trusted caller clears the barrier or app data is reset. A
+  new `BOOT_COUNT` is diagnostic only and is **not** proof of safety.
+- **Final-result user messages no longer claim bare `SUCCESS`.** Generic success
+  now reads `DFRoot: run completed — verify root status yourself`; already-hooked
+  reads `DFRoot: already attempted/hooked; root status unverified`. The typed
+  result codes/types, the already-hooked SUCCESS code, the no-reentry guard, the
+  `/dev/df` and `/dev/dfm6` progress strings, and the absence of a root probe are
+  all unchanged. Nothing in the message claims root status was verified.
+
+**Validation (host only):** `:app:testDebugUnitTest` **554 tests across 45
+suites, 0 failures / 0 errors / 0 skipped**; `:app:lintDebug` **0 errors / 15
+warnings**; host CTest unchanged at **135/135**, `git diff --check` clean. No
+device, hardware, ADB, payload, privileged-container, cold-boot, soft-reboot or
+APK-assembly validation was performed. A fresh GitHub CI green run remains a
+POST-PUSH gate and is not claimed here.
 
 ## Validation status (2026-11-25 — first repair round; counts superseded above)
 

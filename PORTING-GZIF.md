@@ -427,10 +427,10 @@ already attempted on **this** boot: `RunOrchestrator.run()` short-circuits to
 `RunResult.alreadyHooked()` before preflight (`RunOrchestrator.java:17-23`, via
 `ExploitRunner.RunSeams.isHookPresent()` at `ExploitRunner.java:222-224`). `/dev`
 is devtmpfs and is wiped at every boot, so this cannot be residue from a previous
-one. Reboot to re-arm. Since the re-review repair, the message reads
-`DFRoot: SUCCESS (already attempted/hooked; root status unverified)`: the
-SUCCESS code and no-reentry guard are unchanged, but the wording no longer
-implies that root was verified. A separate read-only availability view now
+one. Reboot to re-arm. Since R3.6 the message reads
+`DFRoot: already attempted/hooked; root status unverified`: the SUCCESS code
+and no-reentry guard are unchanged, and the wording neither claims `SUCCESS`
+nor implies that root was verified. A separate read-only availability view now
 surfaces the authoritative preflight reason ("Run unavailable: …") without
 starting, staging, or substituting anything.
 
@@ -441,7 +441,8 @@ markers — including `dfme2` and `dfm6` — are **progress only**; the authorit
 outcome is the run-scoped terminal marker mapped to rc=0/1/4/6/7. Plain
 bootstrap failures publish rc=1, but a late-load wait timeout, an unobserved
 child exit, an unconfirmed publication, or reader deadline expiry is **rc=7
-indeterminate** (owner recovery required), never a definitive success/failure.
+indeterminate** (trusted-caller recovery required; no in-app UI, §17), never a
+definitive success/failure.
 This section's
 causes are retained from the historical hardware runs and have **not** been
 re-validated against the current architecture. Causes seen in the field, in
@@ -485,8 +486,8 @@ The classic manager therefore cannot manage root on this firmware **even on a fu
   claims abort, and the foreground service returns `START_NOT_STICKY` so a
   process death never replays indeterminate work. An unconfirmed attempt is a
   separate durable barrier: it blocks manual **and** boot admission in a new
-  process until explicit owner recovery, regardless of boot count; boot claims
-  are suppressed while it is unconfirmed. **OFF is reachable in every state**
+  process until a trusted caller clears the barrier (§17), regardless of boot
+  count; boot claims are suppressed while it is unconfirmed. **OFF is reachable in every state**
   (including configuration ERROR and active/indeterminate operations) without
   touching the current operation; turning **ON** still requires verified
   configuration, an idle coordinator, and consent. The claim re-checks the
@@ -630,7 +631,7 @@ Confidence rollup: **the chain works on this firmware today; it has survived exa
 10. Patch 2 (historical) used `cp` to stage `/data/local/tmp/.ksud-stage`; **current code** uses hardened in-process staging (sticky bit, `O_EXCL|O_NOFOLLOW`, descriptor copy/fsync, mode restoration) and publishes run-scoped terminal markers.
 11. Load-bearing artifacts: `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (aab76943…/679504dd…), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle wrapper **9.9.2** with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease`, `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
-13. Troubleshooting (historical markers, §9): `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dfme2` ⇒ legacy ksud failure; Not installed ⇒ module never resident. **Current code:** all `/dev/dfm*` markers are progress only, including `/dev/dfm6` → `ksud start: SUCCESS`; the authoritative result is the run-scoped terminal marker (`0`/`1`/`4`/`6`/`7`), where `7` is indeterminate and requires owner recovery. Dual-tag logcat capture is mandatory: `KernelSU` **and** `KernelSU Next`.
+13. Troubleshooting (historical markers, §9): `/dev/df` ⇒ button disabled; Permissive ⇒ exploit ran, KSU missing; `/dev/dfme2` ⇒ legacy ksud failure; Not installed ⇒ module never resident. **Current code:** all `/dev/dfm*` markers are progress only, including `/dev/dfm6` → `ksud start: SUCCESS`; the authoritative result is the run-scoped terminal marker (`0`/`1`/`4`/`6`/`7`), where `7` is indeterminate and requires trusted-caller recovery (§17). Dual-tag logcat capture is mandatory: `KernelSU` **and** `KernelSU Next`.
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
 
@@ -748,7 +749,7 @@ privileged-container, or APK-assembly validation was performed for this revision
 ## 16. Re-review 1 repair round (2026-11-25) — architecture and open gates
 
 This section covers the **new** repair round on `fix/app-correctness-safety`,
-commits `d8b7d30` → `543c431` (HEAD `543c431`), closing tracking findings
+commits `6686973` → `a8003c2` (HEAD `a8003c2`), closing tracking findings
 **R2-10..R2-16** plus the remaining parts of R2-02/03/04/07/09. It is
 documentation analysis only: no device, payload, ADB, privileged container, or
 APK assembly was performed. Host verification for this round: **484 JVM tests
@@ -760,20 +761,20 @@ round's contracts, §16 supersedes them as noted below.
 
 ### 16.1 Architecture changes in this round
 
-- **Packaged-loader pin gate (R2-10, `d8b7d30`).** Verification moved from a
+- **Packaged-loader pin gate (R2-10, `6686973`).** Verification moved from a
   Gradle build script into supported `buildSrc` tasks so task configuration no
   longer fails on a non-static inner class; strict two-pin/one-APK checks remain
   and a deterministic clean/tampered synthetic ZIP fixture proves the check
   itself (a one-byte-tampered `libksud.so` must be rejected). CI gained the
   fixture job and a `:app:tasks --all` regression step.
-- **Staged-entry identity (R2-11, `c3c9854`).** The created staged inode is
+- **Staged-entry identity (R2-11, `639a9d8`).** The created staged inode is
   pinned by a descriptor; cleanup verifies `fstat`/`lstat` identity before
   unlink and is conservative if the path was replaced: it never unlinks a
   replacement, still restores the directory mode, and reports a diagnostic.
   The write pin is converted through `/proc/self/fd/<n>` to a non-writing pin
   before `install()` returns so the loader is exec-able without `ETXTBSY`;
   failure to convert fails closed.
-- **Atomic terminal publication (R2-14, `caf8c9e`).** A complete marker payload
+- **Atomic terminal publication (R2-14, `12a633b`).** A complete marker payload
   is written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`, full
   EINTR-safe write, fsync, fchmod 0644, checked close) and atomically linked to
   the run-scoped final path, then the temp is unlinked and the directory
@@ -789,31 +790,30 @@ round's contracts, §16 supersedes them as noted below.
   confirmed; we claim only that any result acted on after publication completes
   is indeterminate (writer rc=7, reader rc=7). rc=7 precedence and indeterminate
   ownership are unchanged.
-- **Bounded, non-killing waits (R2-12 / partial R2-03, `3aaefdf`).** Late-load
+- **Bounded, non-killing waits (R2-12 / partial R2-03, `ce781f8`).** Late-load
   and soft-reboot command waits share one 60 s late-load budget and never signal
   or kill a child. Observed exits map to rc=0/1 and rc=4/6; timeouts and
   unobserved exits map to rc=7. The reader's 100 000 ms budget covers writer
   worst case; its expiry is rc=7, not a definitive failure.
-- **Durable attempt barrier (R2-13 / partial R2-02, `f0cc8e5`).** An
+- **Durable attempt barrier (R2-13 / partial R2-02, `7b5397c`).** An
   `OperationAttempt` is persisted in device-protected storage before privileged
   work or `run_config` publication. A new process rejects manual and boot
-  requests fail-closed until explicit owner recovery, regardless of
-  `BOOT_COUNT`; boot claims are suppressed while unconfirmed; clearing is
-  compare-and-clear by operation ID.
-- **Pre-admission uncertainty (R2-15 / partial R2-07, `42ba1d5`).** A pure
+  requests fail-closed until a trusted caller clears the barrier (§17),
+  regardless of `BOOT_COUNT`; boot claims are suppressed while unconfirmed;
+  clearing is compare-and-clear by operation ID.
+- **Pre-admission uncertainty (R2-15 / partial R2-07, `7c1f39a`).** A pure
   decision helper plus a narrowly scoped reserved-identity scan turns a valid
   pre-admission rc=1 marker into rc=7 "completion unverified" **only** when no
   terminal marker exists for the admitted operation. Admitted markers (rc=0
   included) remain authoritative; stale/foreign markers can never become
   success.
-- **Independent boot toggle and honesty (R2-15/16, `83d93b5`, `543c431`).**
+- **Independent boot toggle and honesty (R2-15/16, `54cb000`, `a8003c2`).**
   Start-at-Boot OFF is reachable in ERROR and active/indeterminate states
   without touching the current operation; ON keeps its gates; the receiver
   component is re-checked at claim time and unreadable state fails closed.
-  The already-hooked message is now
-  `SUCCESS (already attempted/hooked; root status unverified)`, and a read-only
-  availability diagnostic reuses the authoritative preflight plan in its own
-  view.
+  The already-hooked message dropped its root-verification claim (refined again
+  in §17 to remove the bare `SUCCESS` wording), and a read-only availability
+  diagnostic reuses the authoritative preflight plan in its own view.
 
 ### 16.2 Indeterminate / recovery policy (supersedes §15.4)
 
@@ -824,8 +824,11 @@ uncertainty with no admitted marker, and reader deadline expiry while
 privileged children may still be alive. Java maps rc=7 only to
 `RESULT_INDETERMINATE`; never to SUCCESS. `RunCoordinator` retains the resource
 lease, frozen configuration, and single-flight rejection, and features are
-locked while indeterminate. The **only** exit is an explicit single-claim
-owner-caller recovery that also clears the durable barrier. rc=2 is now only a
+locked while indeterminate. The **only** in-process exit is an explicit
+single-claim trusted-caller recovery that also clears the durable barrier; as
+of R3.6 (§17) it additionally refuses while `engine.run()` is still executing.
+Persisted-attempt recovery is a post-process-death escape hatch, not an owner
+feature, and there is no in-app recovery UI (§17). rc=2 is now only a
 pre-operation `setup()` failure; a late-load timeout is **not** rc=1 anymore.
 
 ### 16.3 Hardware and release gates that remain open
@@ -864,8 +867,64 @@ architecture, and no new device run was performed for either 2026-11-25 round.
 
 ---
 
+## 17. Re-review 3.6 repair (2026-11-25) — recovery truth and honest success wording
+
+Third repair round on `fix/app-correctness-safety` (HEAD `d32006e`), closing
+**R2-19** and the remaining **R2-04** caveat. Java-only, uncommitted: no native
+code, boot gate, attempt-store format, dependency, device/ADB, payload,
+privileged container, UI threading, CI change, or APK assembly.
+
+### 17.1 Recovery truth
+
+- `recoverIndeterminate(operationId)` remains a narrow trusted-caller API: no
+  blind retry, no UI/intent/broadcast path, and no barrier clear based only on
+  ID/state/acknowledgement. It still requires the exact in-process ID, a single
+  claim, and a successful checked compare-and-clear before any lease/freeze
+  release. Cleanup is exactly once (the attempt is marked cleared before
+  `finish()` so no second clear strands it).
+- INDETERMINATE is not proof that supervised work stopped. The coordinator now
+  tracks `engineStarted` (set immediately before `engine.run()`) and
+  `engineFinished` (set only in a `finally` after that call returns or throws).
+  A supervision timeout/interruption callback publishes INDETERMINATE **without**
+  setting `engineFinished`; a trusted caller with the correct ID is therefore
+  **refused** while the engine is still blocked. A proven pre-effect rejection
+  (engine never started) is still recoverable. Deterministic tests cover the
+  blocked engine, post-return success, failed persistence, and two concurrent
+  correct-ID callers where exactly one wins.
+- `recoverPersistedAttempt(operationId, ownerAcknowledged)` is strictly
+  post-process-death: it clears only an unconfirmed record loaded at
+  initialization and never one published by this process. It keeps the
+  acknowledgement, exact-ID and checked-clear gates, and cannot prove that
+  external effects from a dead process actually stopped. It is a trusted-caller
+  escape hatch, **not** an owner feature.
+- **There is NO in-app recovery UI.** An ordinary user with an unconfirmed
+  persisted attempt is intentionally locked out: manual and boot admission stay
+  rejected until a trusted caller clears the barrier or app data is reset. A new
+  `BOOT_COUNT` is diagnostic only, **not** proof of safety, and never authorizes
+  clearing on its own.
+
+### 17.2 Final-result wording
+
+Bare `SUCCESS` is removed from final-result user messages: generic success is
+`DFRoot: run completed — verify root status yourself` and already-hooked is
+`DFRoot: already attempted/hooked; root status unverified`. Typed result
+codes/types, the already-hooked SUCCESS code and no-reentry guard, the
+`/dev/df` and `/dev/dfm6` progress strings, and the no-root-probe policy are
+unchanged. Nothing in these messages claims root status was verified.
+
+### 17.3 Host verification
+
+`:app:testDebugUnitTest`: **554 tests / 45 suites, 0 failures / 0 errors /
+0 skipped**. `:app:lintDebug`: **0 errors / 15 warnings**. Host CTest unchanged:
+**135/135**. `git diff --check` clean. No hardware, device, ADB, payload,
+privileged-container, cold-boot, soft-reboot or APK-assembly validation was
+performed; a fresh GitHub CI green run is a POST-PUSH gate and is not claimed.
+
+---
+
 *Original document produced read-only for the 2026-11-17 GZIF port (no adb or
 git operations). The 2026-11-25 updates above (status note, §4/§6/§8/§9/§10/§14,
-§15 and §16) were documentation/hygiene only; no device, payload, ADB, privileged,
-or APK operation was performed. Log contents are referenced by line range only.
+§15, §16 and the Java-only §17) were documentation/hygiene or host Java changes
+only; no device, payload, ADB, privileged, or APK operation was performed. Log
+contents are referenced by line range only.
 **Do not commit host logs or this device's raw dumps anywhere public.***

@@ -7,6 +7,8 @@
 // Modified 2026-11-25 (DFRoot GZIF): persist an unconfirmed admission barrier across process death. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): make durable attempt clearing idempotent and await init without dropping requests. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): every unverified outcome keeps the barrier; only proven outcomes clear it. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): recovery needs proof the supervised engine call has actually finished. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): persisted-attempt recovery is a post-process-death, trusted-caller-only boundary. See NOTICE.
 package df.root;
 
 import android.content.Context;
@@ -96,6 +98,8 @@ public final class RunCoordinator {
     private boolean initializationSucceeded;
     private String initializationFailure;
     private OperationAttempt persistedAttempt;
+    /** True once THIS process published a barrier; blocks post-death recovery here. */
+    private boolean attemptPublishedInThisProcess;
     private volatile Snapshot snapshot;
 
     /**
@@ -382,6 +386,7 @@ public final class RunCoordinator {
             operation = new Operation(id, requestedMode, lease, operationContext,
                     expectedGeneration);
             persistedAttempt = attempt;
+            attemptPublishedInThisProcess = true;
             activeOperation = operation;
             operationId = operation.id;
             mode = requestedMode;
@@ -402,8 +407,11 @@ public final class RunCoordinator {
             workerExecutor.execute(() -> start(operation));
         } catch (RuntimeException e) {
             // Dispatch itself failed: the engine was never started, so this is
-            // a proven pre-effect rejection with no unverified work to retain.
-            // Engine results and engine exceptions are routed by complete().
+            // a proven PRE-EFFECT failure. It is represented as an exception-
+            // shaped unverified result (INDETERMINATE/EXCEPTION), though, so
+            // finish() skips the durable clear and the barrier is retained
+            // fail-closed until trusted recovery. Engine results and engine
+            // exceptions are routed by complete().
             RunResult failure = RunResult.exception(e);
             finish(operation, failure, failure.getReason());
         }
@@ -506,8 +514,22 @@ public final class RunCoordinator {
                 }
             };
             IReporter reporter = message -> appendOperationLog(operation, message);
-            RunResult completed = engine.run(operation.context, admission, operation.mode,
-                    operation.id, events, reporter);
+            synchronized (lock) {
+                operation.engineStarted = true;
+            }
+            RunResult completed;
+            try {
+                completed = engine.run(operation.context, admission, operation.mode,
+                        operation.id, events, reporter);
+            } finally {
+                synchronized (lock) {
+                    // Evidence that supervised work is no longer executing. Set
+                    // only when engine.run() actually returns (or escapes); a
+                    // supervision timeout/interruption callback while the engine
+                    // is still blocked must NOT set it.
+                    operation.engineFinished = true;
+                }
+            }
             if (completed == null) {
                 throw new IllegalStateException("engine returned null");
             }
@@ -602,14 +624,21 @@ public final class RunCoordinator {
      * operation ID. The checked attempt-store clear must succeed before any
      * lease/freeze release or new admission is possible.</p>
      *
+     * <p>INDETERMINATE alone is not evidence that supervised work stopped: a
+     * supervisor timeout or interruption can publish it while engine.run() is
+     * still blocked. Recovery therefore also requires proof that the engine
+     * call has finished (or that it was never started, i.e. a proven
+     * pre-effect rejection). A still-running engine is refused until it
+     * returns, so cleanup cannot race a worker that may still be acting.</p>
+     *
      * <p>Trusted-caller boundary: this method has no exported component, intent
-     * action, broadcast, or binder path. It is a direct in-process API for a
-     * trusted caller (tests exercise it here); the service/UI never wire it.</p>
+     * action, broadcast, or binder path, and there is NO in-app recovery UI.
+     * It is a direct in-process API for a trusted caller (tests exercise it
+     * here); the service/UI never wire it.</p>
      *
      * @return {@code true} only for the caller that actually claims this
-     *         recovery and durably cleared the attempt; {@code false} if no
-     *         such operation was current, another caller claimed it, or the
-     *         checked clear failed.
+     *         recovery, has proof no supervised work is still executing, and
+     *         durably cleared the attempt; {@code false} otherwise.
      */
     public boolean recoverIndeterminate(String operationId) {
         Operation operation;
@@ -618,7 +647,11 @@ public final class RunCoordinator {
         synchronized (lock) {
             if (state != State.INDETERMINATE || cleanupPending || activeOperation == null
                     || activeOperation.recoveryClaimed
-                    || !Objects.equals(operationId, this.operationId)) {
+                    || !Objects.equals(operationId, this.operationId)
+                    // A timeout/interruption observation can be published while
+                    // the engine is still blocked. Releasing the lease, freeze
+                    // or barrier then would race live privileged work.
+                    || (activeOperation.engineStarted && !activeOperation.engineFinished)) {
                 return false;
             }
             // Claim under the same lock as the check: concurrent callers with
@@ -663,19 +696,28 @@ public final class RunCoordinator {
     }
 
     /**
-     * Explicit recovery of a persisted unconfirmed attempt after process death.
+     * Explicit recovery of a persisted unconfirmed attempt AFTER process death.
      *
      * <p>Requires an affirmative owner acknowledgement and a checked store
      * clear. It only removes the barrier: it never retries, starts a service,
      * acquires resources, or admits an operation. A subsequent operation needs
-     * its own explicit submission after initialization.</p>
+     * its own explicit submission after initialization. This call cannot prove
+     * that external effects from the dead process actually stopped; it is a
+     * trusted-caller escape hatch, NOT an owner feature.</p>
+     *
+     * <p>There is NO in-app recovery UI. An ordinary user whose attempt is
+     * unconfirmed is intentionally locked out — every manual and boot admission
+     * is rejected — until a trusted caller clears the barrier here or the user
+     * resets the app data. A new {@code BOOT_COUNT} is diagnostic only; it is
+     * NOT proof of safety and never authorizes clearing on its own.</p>
      *
      * <p>Trusted-caller boundary: there is no exported component, intent action,
      * broadcast, or binder path in this phase. This is a direct in-process API
-     * for a trusted caller; no UI or recovery intent is wired to it.</p>
+     * for a trusted caller; no UI or recovery intent is wired to it. The barrier
+     * must be one loaded at initialization, not one published by this process.</p>
      *
      * @return {@code true} only when the acknowledged, matching, unconfirmed
-     *         attempt was durably cleared.
+     *         attempt loaded after process death was durably cleared.
      */
     public boolean recoverPersistedAttempt(String operationId, boolean ownerAcknowledged) {
         if (!ownerAcknowledged || operationId == null || operationId.isEmpty()) {
@@ -689,7 +731,10 @@ public final class RunCoordinator {
         }
         synchronized (lock) {
             if (!isInitializedLocked() || cleanupPending || isActiveStateLocked()
+                    || attemptPublishedInThisProcess
+                    || persistedAttempt == null || !persistedAttempt.isUnconfirmed()
                     || loaded == null || !loaded.isUnconfirmed()
+                    || !loaded.getOperationId().equals(persistedAttempt.getOperationId())
                     || !loaded.getOperationId().equals(operationId)) {
                 return false;
             }
@@ -710,7 +755,8 @@ public final class RunCoordinator {
                 persistedAttempt = null;
             }
             appendLogLocked("persisted attempt " + operationId
-                    + " recovered by explicit owner acknowledgement; no work started");
+                    + " cleared by trusted-caller acknowledgement after process death; "
+                    + "external effects remain unproven; no work started");
             Snapshot changed = buildSnapshotLocked();
             snapshot = changed;
             return true;
@@ -1042,6 +1088,10 @@ public final class RunCoordinator {
         boolean leaseClosed;
         boolean recoveryClaimed;
         boolean attemptCleared;
+        /** Set immediately before engine.run(); never by timeout/interruption callbacks. */
+        boolean engineStarted;
+        /** Set only when engine.run() has actually returned (or escaped by throwing). */
+        boolean engineFinished;
 
         Operation(String id, RunConfig.ExecutionMode mode, ResourceLease lease, Context context,
                   Long expectedGeneration) {

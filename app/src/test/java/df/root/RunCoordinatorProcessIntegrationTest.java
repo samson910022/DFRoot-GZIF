@@ -2,6 +2,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): verify operation-ID binding survives the full supervised process lifecycle. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): cover rc7 ownership retention only with connected fakes; live-child proof is native. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): a timeout observation plus rc7 keeps the barrier and never publishes TERMINAL. See NOTICE.
+// Modified 2026-11-25 (DFRoot GZIF): recovery is refused while the supervised child/engine is still active. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -206,6 +207,61 @@ public class RunCoordinatorProcessIntegrationTest {
         assertEquals(1, lease.closeCount.get());
         assertFalse(admitted.get().isActive());
         assertFalse(repository.isFrozen());
+    }
+
+    /**
+     * A supervisor timeout publishes INDETERMINATE while the child — and therefore
+     * engine.run() — is still alive. Recovery must refuse until the engine really
+     * returns; then the same ID may close everything exactly once.
+     */
+    @Test
+    public void timedOutChildStillAliveRefusesRecoveryUntilEngineReturns() throws Exception {
+        ConfigurationRepository repository = repository();
+        FakeProcess process = new FakeProcess();
+        process.scriptedTimedWaits.add(false);
+        try {
+            AtomicReference<ConfigurationRepository.RunAdmission> admitted = new AtomicReference<>();
+            RunCoordinator.Engine engine = (context, admission, mode, operationId, events, reporter) -> {
+                admitted.set(admission);
+                ChildProcessSupervisor.Result result = new ChildProcessSupervisor(
+                        ignored -> process, TEST_TIMEOUT_MS,
+                        ExploitRunner.childListener(reporter, events))
+                        .awaitExit(Collections.singletonList("fake-child"));
+                return ExploitRunner.mapProcessResult(result);
+            };
+            RunCoordinator coordinator = new RunCoordinator(repository, worker, Runnable::run,
+                    engine, TEST_TIMEOUT_MS);
+            FakeLease lease = new FakeLease();
+            CountDownLatch indeterminate = new CountDownLatch(1);
+            coordinator.addListener(snapshot -> {
+                if (snapshot.getState() == RunCoordinator.State.INDETERMINATE) {
+                    indeterminate.countDown();
+                }
+            });
+
+            assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
+                    RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
+            assertTrue(indeterminate.await(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+            String id = coordinator.getSnapshot().getOperationId();
+            assertTrue(process.isAlive());
+            assertFalse("engine.run() has not returned", coordinator.recoverIndeterminate(id));
+            assertEquals(0, lease.closeCount.get());
+            assertTrue(admitted.get().isActive());
+            assertTrue(repository.isFrozen());
+
+            process.exit(7);
+            worker.submit(() -> {}).get(TEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            assertEquals(RunCoordinator.State.INDETERMINATE,
+                    coordinator.getSnapshot().getState());
+            assertTrue(coordinator.recoverIndeterminate(id));
+            assertEquals(1, lease.closeCount.get());
+            assertFalse(admitted.get().isActive());
+            assertFalse(repository.isFrozen());
+            assertEquals(0, process.destroyCount.get());
+            assertEquals(0, process.destroyForciblyCount.get());
+        } finally {
+            process.exit(7);
+        }
     }
 
     @Test
