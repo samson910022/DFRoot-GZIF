@@ -42,26 +42,35 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 > asserted at a single pre-upload choke point before `publish` can run.
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
-> Host suites: 49 status + 13 proc-scan + 26 ELF + 16/14/10 device-version
-> cases, CMake 23/15/3 cases, JVM **28 tests** (4/5/8/11 in LaunchGate /
+> Host suites: **61** status + 13 proc-scan + 26 ELF + 16/14/10 device-version
+> cases, CMake **23/25/3/3/6** cases (KO policy / packaged-KO / APK packaging /
+> APK content / target graph), JVM **36 tests** (4/7/12/13 in LaunchGate /
 > ListenerLifecycle / PreferenceIntegrity / PreferencePersister) with a strict
-> XML assertion, and **7/7** suite markers.
+> **36/0/0/0** XML assertion, and **7/7** suite markers plus **3/3** publishing
+> gates on the tag path.
 > **KO pins:** the byte gate rejects unknown bytes but still accepts the two
-> known obsolete pins. Release is withheld by **policy** — a reviewed re-pin,
-> the OPEN P1-08 staging gate and device validation — not by the hash gate
-> alone; passing the gate is not device validation. Gradle passes the Android
-> variant (`release` / `debug`) as the authoritative native policy signal, and
-> the KO is linked into a dedicated `.dfroot_ko` section whose final bytes in
-> `libdfroot.so` are SHA-256-checked against the same pins.
+> known obsolete pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). Release is
+> withheld by **policy** — a reviewed re-pin, the OPEN P1-08 staging gate and
+> device validation — not by the hash gate alone; passing the gate is not device
+> validation. Gradle passes the Android variant (`release` / `debug`) as the
+> authoritative native policy signal, and the KO is linked into a dedicated
+> `.dfroot_ko` section whose final bytes in `libdfroot.so` are SHA-256-checked
+> against the same pins.
 > The app uses a single atomically published nonce-bound `/dev/dffinal` outcome
-> (truthful rc 0–9 plus the additive 64 recovery bit), separate app-owned
-> `dfbootfail` / `dfrecover` channels, a write-ahead durable preference marker,
-> lifecycle-scoped listeners and a component-state-authoritative boot switch —
-> all host-proven only. Auto Soft Reboot and Start on Boot remain disabled by
-> default and unvalidated. **P1-08 remains OPEN:** `/data/local/tmp/.ksud-stage`
-> can be swapped by a `shell`-uid process and needs a loader rebuild;
-> documenting it is not a fix. See `CHANGELOG.md` round-4 (2026-11-25) and
-> `PORTING-GZIF.md` §16–17 for the test/lifecycle/failure-path detail.
+> (truthful rc 0–9 plus the additive 64 recovery bit), exactly-once cleanup on
+> every exit, and separate app-owned `dfbootfail` / `dfrecover` channels:
+> `dfrecover` is bound to the current run nonce, so a stale or foreign `ok` is
+> rejected and token syntax is not invocation proof. Preference transactions
+> use a durable write-ahead marker, a sticky fail-closed `WILDCARD`, launch
+> tokens and a whole-transaction lock; no success is reported for a failed
+> integrity transaction. Boot component state is tri-state: `UNKNOWN` is never
+> shown as verified `OFF` and never used to accept `OFF`, and nothing
+> auto-enables. All host-proven only. Auto Soft Reboot and Start on Boot remain
+> disabled by default and unvalidated. **P1-08 remains OPEN:**
+> `/data/local/tmp/.ksud-stage` can be swapped by a `shell`-uid process and
+> needs a loader rebuild; documenting it is not a fix. See `CHANGELOG.md`
+> round-5 (2026-11-25) and `PORTING-GZIF.md` §17–18 for the
+> test/lifecycle/failure-path detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into

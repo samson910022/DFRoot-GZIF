@@ -133,9 +133,10 @@ The run6/run8 hardware results recorded in `PORTING-GZIF.md` and `CHANGELOG.md`
 implementation only**: the old multi-marker status protocol, the then-current
 `dfroot.ko` pins and the old preference-write path. They predate the rebase
 onto the merged PR #1 head. No hardware run validates the current head of
-`fix/native-exploit-robustness` (round-4 repair, 2026-11-25); that head is
+`fix/native-exploit-robustness` (round-5 repair, 2026-11-25); that head is
 **host-tested only and UNVALIDATED on device**, and a successful build does not
-certify safe privileged execution.
+certify safe privileged execution. run6/run8 and all earlier CI runs, including
+45523079469, validate only historical implementations or pre-rebase heads.
 
 - **PR/branch/manual CI artifacts are UNVERIFIED.** Green CI runs execute the
   native/CMake/JVM host suites as required gates and upload a
@@ -146,8 +147,8 @@ certify safe privileged execution.
   7/7 suite markers (`marker-native`, `marker-ko-policy`, `marker-packaged-ko`,
   `marker-apk-packaging-fixture`, `marker-ko-ci-policy`, `marker-jvm`,
   `marker-junit`), and the strict JUnit XML assertion requires exactly
-  **28 tests**, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 5,
-  PreferenceIntegrity 8, PreferencePersister 11).
+  **36 tests**, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 7,
+  PreferenceIntegrity 12, PreferencePersister 13).
 - **Publishing gates run before any signed upload or publish.** On the
   protected `v*` tag path only, every distributable APK is packaged-byte-verified
   with a per-APK manifest and `so_sha256` binding; every provenance record gets
@@ -178,13 +179,18 @@ certify safe privileged execution.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
-- **All CI suites are asserted.** Every native/CMake/JVM suite writes a marker
-  that CI checks (7/7 on every non-tag CI event), the JUnit XML must report **28 tests** with
+- **All CI suites are asserted.** The host suites are **61** status cases plus
+  the `final_publish` canonical/permission/atomicity/reader/bootfail/bound+unbound
+  recovery checks, 13 proc-scan, 26 ELF and 16+14+10 device-version cases;
+  CMake runs 23 KO-policy, 25 packaged-KO, 3 APK-packaging, 3 APK-content and 6
+  target-graph cases. Every suite writes a marker that CI checks (7/7 on every
+  non-tag CI event), the JUnit XML must report **36 tests** with
   0 failures/errors/skips, and a release-evidence step cross-checks git SHA,
   skip OFF in every CMakeCache, the complete set of verified KO and packaged
-  manifests with matching hashes, and every staged APK hash. The informational
-  provenance upload uses `if-no-files-found: error`; no required gate uses
-  `continue-on-error`.
+  manifests with matching hashes, and every staged APK hash. The publishing
+  path adds 3/3 distributable-evidence gates before a single upload choke point.
+  The informational provenance upload uses `if-no-files-found: error`; no
+  required gate uses `continue-on-error`.
 
 - **PR #1 build/signing baseline (integrated).** Toolchain: Gradle wrapper
   **9.9.2** (distribution SHA-256 pinned), AGP **9.5.0** declared once in
@@ -203,16 +209,26 @@ certify safe privileged execution.
 - **App-owned channels and durable preference transaction (host-proven).**
   Bootstrap failures before a run identity exists publish a reserved-nonce
   `BOOTSTRAP_FAILED` token on the separate `dfbootfail` channel (observable
-  rc=1, never rc=2); `dfrecover` is a strict app-owned recovery status (`ok\n`
-  only) with a 5 s bounded poll clamped to the remaining deadline, and a
-  NULL/failed gate or timeout yields `REBOOT_SKIPPED`. `PreferenceIntegrity`
-  publishes a durable write-ahead `PENDING` marker before commit (full write,
-  read-back, fsync), permits recovery only for a fully validated PENDING→commit
-  cycle of the SAME key, and latches a sticky fail-closed `WILDCARD` on
-  unattributable faults; the boot component is disabled synchronously at the
-  failure boundary. `ExploitRunner` returns rc 9 for `/dev/df` and rc 8 for
-  uncertain preferences; `StatusRc` maps rc 0–9 plus the additive 64 recovery
-  bit truthfully. Real PackageManager/fsync and device timing behavior are
+  rc=1, never rc=2); token syntax is not invocation proof. `dfrecover` is a
+  strict app-owned recovery status bound to the current run nonce: a stale or
+  foreign `ok` is rejected, so syntax alone is not proof of a current cleanup.
+  Its poll is bounded to 5 s and clamped to the remaining deadline, and a
+  NULL/failed gate or timeout yields `REBOOT_SKIPPED`. The deadline is enforced
+  before and after any positive recovery result and after cleanup before a
+  terminal outcome; late/uncertain evidence is always `REBOOT_SKIPPED`.
+  `status_flow_run()` runs cleanup exactly once on every exit (an `ERR` path
+  uses unbound cleanup, the recovery-failed bit and `DF_RC_UNKNOWN`).
+  `PreferenceIntegrity` publishes a durable write-ahead `PENDING` marker before
+  commit (full write, read-back, fsync), permits recovery only for a fully
+  validated PENDING→commit cycle of the SAME key, and latches a sticky
+  fail-closed `WILDCARD` on unattributable faults; launch tokens and a
+  whole-transaction lock ensure no success is reported for a failed integrity
+  transaction, and the boot component is disabled synchronously at the failure
+  boundary. Boot component state is tri-state: `UNKNOWN` is never shown as
+  verified `OFF` and never used to accept `OFF`, and nothing auto-enables.
+  `ExploitRunner` returns rc 9 for `/dev/df` and rc 8 for uncertain preferences;
+  `StatusRc` maps rc 0–9 plus the additive 64 recovery bit truthfully. Real
+  PackageManager/fsync, asynchronous quiescence and device timing behavior are
   UNVALIDATED; none of this is a substitute for on-device validation.
 - **Auto Soft Reboot / Start on Boot remain disabled by default and
   unvalidated** on S9180ZHU8GZIF.

@@ -880,7 +880,7 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '{\n'
         '  echo "## CI artifact scope"\n'
         '  echo "The DFRoot-UNVERIFIED-CI artifact is a debug-keystore-signed Debug APK with its GPLv3 licence/notices bundle. It is published only as a downloadable Actions artifact for development and is explicitly UNVERIFIED: no release signing, no signing secrets, no GitHub Release and no release claim."\n'
-        '  echo "Host suites (49 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 28 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
+        '  echo "Host suites (61 status, 23/25/3 CMake plus 6 target-graph and 3 APK-content cases, 36 JVM tests, 7/7 markers) ran as required gates. The real packaged-KO, provenance-identity and release-evidence gates belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }

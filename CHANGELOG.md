@@ -1,5 +1,86 @@
 # Changelog — DFRoot GZIF
 
+## Round-5 repair (2026-11-25) — authoritative for the current rebased head
+
+This section is authoritative for the current head of
+`fix/native-exploit-robustness` (rebased onto merged PR #1). **All sections
+below are kept as history**; their test counts and dispositions describe
+earlier heads, not this one. Everything here is **host-only**: no hardware run
+validates this head, and a successful build is not a safety certificate. No tag
+was created and no release was published.
+
+### Stable-ID disposition (round-5, 9 findings carried forward)
+
+| ID | Round-5 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing UNVALIDATED** | `dfrecover` is now bound to the current run nonce: a stale or foreign `ok` is rejected, so syntax alone is not invocation proof. The reserved-nonce `BOOTSTRAP_FAILED` token on the app-owned `dfbootfail` channel is observable rc=1; token syntax is not proof that bootstrapping succeeded. Real-file and mock tests cover stale/foreign evidence; Android publication/access and device timing remain unproven. |
+| P1-07 | **Addressed in host-tested scope; asynchronous quiescence UNVALIDATED** | The absolute deadline is enforced before consulting a positive recovery result, again after it, and after cleanup before any terminal outcome. Late or uncertain evidence yields `REBOOT_SKIPPED` (never an authorization); recovery polling is bounded/clamped. Mocks prove ordering, count and fail-closed branches, not device quiescence or that asynchronous privileged activity has finished. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing it requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not claim fixed. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | Staged-link → verified-copy chain; AGP targets `dfroot_packaged` **and** `bootstrap`; APK-content and target-graph harnesses (named target, `ALL`, raw bypass, cached, poisoned); CI gathers evidence over **every** `app/.cxx` packaged manifest before upload. The byte gate rejects unknown bytes but **accepts the two known obsolete pins**; release is withheld by policy — a reviewed re-pin, OPEN P1-08 and device validation — not by the hash gate alone. Passing the gate is not device validation. |
+| P2-06 | **Resolved in the stated narrow scope; not re-litigated** | Required identity check on every `dfroot-build-provenance.txt` (git HEAD, release variant, reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler identity) plus complete-set evidence with one row per uploaded APK. Records are audit evidence, not an attestation or independent reproducible-build proof. |
+| P2-07 | **Resolved in the stated narrow scope; not re-litigated** | Exact CI shape, markers, counts and validation boundary are recorded here, in the README/NOTICE/PORTING docs and in the PR #3 description; historical run6/run8 remain attached only to the historical implementation. |
+| P2-08 | **Addressed in host-tested scope; real PackageManager/fsync UNVALIDATED** | Boolean transaction result, sticky `WILDCARD` restored, launch tokens plus a whole-transaction lock, and no success reported on a failed integrity transaction. The write-ahead `PENDING` marker still requires a validated same-key PENDING→commit cycle. Device-protected storage and real PackageManager/fsync behavior are untested. |
+| P2-09 | **Addressed; verified by host fixtures** | Stale packaged evidence is invalidated before required-argument validation, not only afterwards; same-path failure fixtures (success→failure, failure→success, poisoned dump) prove a reused path cannot carry stale success forward. |
+| P2-10 | **Addressed in host-tested scope; real UI lifecycle UNVALIDATED** | Boot component state is tri-state; `UNKNOWN` is never shown as verified `OFF` and is never used to accept an `OFF` setting, and nothing auto-enables. The user can always turn boot OFF; a framework write is accepted only on a real state match. Real Activity/Fragment recreation and PackageManager behavior are unvalidated. |
+
+Newly closed in round 5: **P1-10** — `status_flow_run()` performs exactly-once
+cleanup on **every** exit path; an `ERR` path uses unbound cleanup, sets the
+recovery-failed bit and returns `DF_RC_UNKNOWN`; fault-injection tests cover
+these paths. **P2-11** — `objcopy` runs only on an isolated copy, with original
+artifact immutability proven on both success and failure; no hash or size pin
+was relaxed (pins `94f8be…` / `9dfb8b…`, sizes 13504 / 13384 B, unchanged).
+
+### Post-PR-#1 rebase integration
+
+PR #1 is merged into the base and PR #3 was rebased onto that head. PR #1's
+CI/signing/GPLv3-conveyance, Gradle 9.9.2 + AGP 9.5.0 version catalog, NDK/DKK
+digest pinning and Make/contract tests are integrated. Kept from PR #1: the
+version catalog, release-environment signing writer / `apksigner` / checksum /
+conveyance and the `publish` job. Non-tag events upload a Debug-only
+`DFRoot-UNVERIFIED-CI` artifact with PR #1's licence/notice bundle and **no
+release claim**; signed release remains tag-only and gated. run6/run8 and every
+older CI run (including 45523079469) validate only historical implementations
+or pre-rebase heads, never this head. No tag was created by us.
+
+### Authoritative final host test shape (current head)
+
+- **Native** (`make -C tests/native test`): **61** `status_protocol` cases;
+  `final_publish` (canonical token / permission / atomicity / reader / bootfail
+  / bound + unbound recovery); **13** `proc_scan_policy` cases; **26** ELF
+  fixtures; **16 + 14 + 10** kernel / token / release device-version cases.
+  Host tests never execute privileged payloads.
+- **CMake** (`cmake -P`, host-only): `ko_hash_policy_test.cmake` **23** cases
+  (clean environment and simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`);
+  `packaged_ko_test.cmake` **25** cases (same-path arg failures, mutating
+  `objcopy`, input immutability); `apk_packaging_gate_test.cmake` **3** cases;
+  `apk_content_gate_test.cmake` **3** cases (`libbootstrap.so` present / wrong
+  ABI / missing); `packaging_target_graph_test.cmake` **6** cases (named target
+  `dfroot_packaged` + `bootstrap`, `ALL`, raw bypass, cached, poisoned).
+- **JVM** (`:app:testDebugUnitTest`): **36 tests, 0 failures, 0 errors, 0 skips**
+  — LaunchGate 4, ListenerLifecycle 7, PreferenceIntegrity 12,
+  PreferencePersister 13. CI parses the JUnit XML and asserts exactly 36/0/0/0;
+  a green Gradle exit code alone is not accepted.
+- **Suite markers on every non-tag CI event (7/7)**: `marker-native`,
+  `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`,
+  `marker-ko-ci-policy`, `marker-jvm`, `marker-junit`. **Publishing-only gates
+  (3/3)**: `marker-apk-gate`, `marker-provenance-identity`,
+  `marker-release-evidence`, plus the nonempty gate index and a single upload
+  choke point. No required gate uses `continue-on-error`.
+
+### Validation boundary
+
+All current verification is host-only. P1-02/P1-07 are proven with host mocks
+and real-file adapters; device timing, quiescence, Android publication/access
+and privileged-state safety are UNVALIDATED. P2-04/P2-06/P2-09/P2-11 are proven
+with host fixtures and CI-shaped checks; the byte gate accepts the two known
+obsolete pins, and release is withheld by policy (reviewed re-pin, P1-08 and
+device validation), not by the hash gate alone. P2-08/P2-10 are proven with host
+JVM tests; real PackageManager/fsync and UI lifecycle are UNVALIDATED. P1-08
+remains OPEN. Auto Soft Reboot and Start on Boot remain disabled by default and
+unvalidated. run6/run8 and all earlier CI runs — including 45523079469 —
+validate only historical implementations and pre-rebase heads. A successful
+build is not a safety certificate.
+
 ## Unreleased — PR #1 hardening (CI build reliability), integrated into this rebased head
 
 Hardening pass over the build, signing and release pipeline; no change to the
@@ -74,15 +155,20 @@ distribution SHA-256; AGP **9.5.0** effective through
 ### Post-rebase integration
 
 PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
-head. Host-suite counts, the round-4 stable-ID disposition table and the
-validation boundary below remain authoritative for the rebased head. run6/run8
-and every prior CI run predate the rebase: they are historical and do not
-validate this head. No tag was created by us. Where PR #1's unsigned Release CI
+head. The round-5 section above is authoritative for the current head; the
+host-suite counts, stable-ID disposition table and validation boundary in the
+round-4 section below are historical. run6/run8 and every prior CI run predate
+the rebase: they are historical and do not validate this head. No tag was
+created by us. Where PR #1's unsigned Release CI
 APK met PR #3's fail-closed release variant, the rebased CI path builds Debug
 only and labels the artifact UNVERIFIED; signed releases are exclusively on
 the gated `v*` tag path.
 
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
+
+> **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
+> describe the round-4 implementation, not the current head. The round-5
+> section above is authoritative for the current head.
 
 **All evidence in this section is host-only.** No hardware run validates the
 current head of `fix/native-exploit-robustness`; a green build does not certify
@@ -111,7 +197,7 @@ P1-04, P1-05, P1-06, P2-01, P2-02, P2-03, P2-05 and P1-09 (newly resolved in
 round 4 through the CI-policy environment isolation). Their earlier evidence is
 unchanged; none of them constitutes device validation.
 
-### Final host test shape (current head)
+### Final host test shape (round-4 head; historical — see round-5 above)
 
 - **Native** (`make -C tests/native test`): **49** `status_protocol` cases;
   `final_publish_test` against real temp files (0644 under a hostile umask,
@@ -159,9 +245,10 @@ build does not certify safe privileged execution.
 
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
 
-> Historical section. The round-4 section above is authoritative for current
-> counts, cleanup timing and the reserved bootfail channel; this section and
-> the two phase sections below are kept for provenance only.
+> Historical section. The round-5 section at the top of this file is
+> authoritative for current counts, cleanup timing and the recovery channel;
+> this section, the round-4 section above it and the phase sections below are
+> kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**
 No hardware run has exercised the quarantine latch, the new rc gates or the
