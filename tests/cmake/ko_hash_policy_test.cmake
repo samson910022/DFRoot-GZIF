@@ -21,7 +21,7 @@ cmake_minimum_required(VERSION 3.22)
 
 get_filename_component(TEST_DIR "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
 get_filename_component(VERIFY_SCRIPT "${TEST_DIR}/../../app/src/main/jni/verify_ko_sha256.cmake" ABSOLUTE)
-get_filename_component(WORK "${TEST_DIR}/.work" ABSOLUTE)
+get_filename_component(WORK "${TEST_DIR}/.work/ko-policy" ABSOLUTE)
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
 

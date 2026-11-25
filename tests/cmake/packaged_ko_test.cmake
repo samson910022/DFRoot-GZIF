@@ -3,7 +3,7 @@
 # Run from anywhere:
 #   cmake -P tests/cmake/packaged_ko_test.cmake
 #
-# Cases (12):
+# Cases (15, including subcases 10a/10b and 12a/12b):
 #   1  valid pin verifies and writes a complete manifest
 #   2  ANY pin: a two-pin list verifies when the second pin matches
 #   3  mismatch against a different pin fails (SHA-256 MISMATCH reason)

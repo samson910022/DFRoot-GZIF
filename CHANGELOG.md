@@ -5,8 +5,9 @@
 **All evidence in this section is host-only.** No hardware run validates the
 current head of `fix/native-exploit-robustness`; a green build does not certify
 safe privileged execution. No tag was created and no release artifact was
-published. This repair updates documentation (and the PR description) only; it
-does not change code, tests, CMake or CI. Historical run6/run8 results stay
+published. This round-4 repair also changes code, tests, CMake and CI in the
+preceding commits; the final documentation commit updates only docs and the PR
+description. Historical run6/run8 results stay
 attached to the historical implementation described in §4.8-gzif below.
 
 ### Stable-ID disposition (consolidated review comment 7126155178, round 4)
@@ -191,8 +192,9 @@ not be published.
   CMake / JVM suite (the round-4 final shape asserts 7/7 markers) and parses the
   JUnit XML for **28 tests, 0 failures/errors/skips** across four JVM classes, so
   one failure cannot hide another. Required gates
-  have no `continue-on-error`; only the informational provenance uploads stay
-  best-effort. A release-evidence step checks the git SHA, skip OFF in every
+  have no `continue-on-error`; the informational provenance uploads are also
+  required in the round-4 shape (`if-no-files-found: error`), not best-effort.
+  A release-evidence step checks the git SHA, skip OFF in every
   CMakeCache, a verified KO manifest whose hash is in the pins, a verified
   packaged manifest with the same hash, and the APK hash.
 - **Unchanged gates / boundary.** P1-08 (`/data/local/tmp/.ksud-stage`
