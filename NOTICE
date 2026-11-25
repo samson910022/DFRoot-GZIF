@@ -53,10 +53,28 @@ for this round: 484 JVM tests (44 suites), 135 host CTest cases, lint 0 errors /
 21 warnings, `git diff --check` clean. A fresh GitHub CI green run (including the
 negative fixture) is a POST-PUSH gate, not a local result.
 
-Loader-pin verification (2026-11-25; re-verified again for the re-review round):
+Modified 2026-11-25 (DFRoot GZIF, third repair round / R3, final local HEAD
+`1252b3d`): this round re-based the branch onto merged PR #1 (`origin/master`
+`9f60e16`) and kept/extended its CI policy (`f6faf75`, `770d07c`), then repaired
+**R2-12** (`6ebf9e3`), **R2-13** (`2a74dd0`), **R2-14** (`6012c21`),
+**R2-16/17** (`b87318f`), **R2-18** (`d32006e`) and **R2-19 plus the R2-04
+caveat** (`1252b3d`). It changed **only this repository's own GPL-2.0-only
+application, native and test sources plus documentation**; per-file dated
+2026-11-25 notices were added where missing and **no existing notice was
+removed**. **No bundled loader binary, upstream component, third-party
+artifact or dependency was modified or added by this round.** The loader pins
+below were re-checked against `app/build.gradle.kts` and the on-disk `jniLibs`
+and still match byte-for-byte. Host verification: 554 JVM tests / 45 suites (0
+failures/errors/skips), 137 host CTest cases, lint 0 errors / 15 warnings,
+workflow policy 67/67, signing 40/40, make 36/36, `git diff --check` clean. No
+device, payload, ADB, privileged-container or APK-assembly validation was done;
+a fresh remote GitHub CI green run after push is a POST-PUSH gate, not a local
+result.
+
+Loader-pin verification (2026-11-25; re-verified again for the re-review round and the third repair round):
 the SHA-256 pins in `app/build.gradle.kts` were checked against the on-disk
 bundled binaries and both still match byte-for-byte (the bundled binaries were
-not rewritten by either 2026-11-25 round):
+not rewritten by any of the 2026-11-25 rounds):
 
 - `libksud.so` → `aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`
 - `libksudnext.so` → `679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`

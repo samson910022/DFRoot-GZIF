@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified 2026-11-25 (DFRoot GZIF): add the fail-closed unit-test report check to the rebased PR #1 CI policy without a forbidden heredoc. See NOTICE.
 """Fail closed when JVM unit-test reports are absent, empty, failing or skipped."""
 import sys
 import xml.etree.ElementTree as ET

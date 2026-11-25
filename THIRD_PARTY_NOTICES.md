@@ -24,6 +24,21 @@ Host verification only (484 JVM tests / 44 suites, 135 host CTest cases, lint 0
 errors / 21 warnings); no hardware/device/privileged/APK validation, and a fresh
 GitHub CI green run including the negative pin fixture remains a POST-PUSH gate.
 
+Modified 2026-11-25 (DFRoot GZIF, third repair round / R3, final local HEAD
+`1252b3d`): the dependency inventory is **unchanged** — no dependency was added
+or removed by the PR #1 rebase (`origin/master` `9f60e16`), the CI integration
+commits (`f6faf75`, `770d07c`) restored only the existing JUnit/Robolectric
+test-only declarations, and the R3 repairs touched only this repository's own
+application/native/test sources and documentation. Loader provenance and
+SHA-256 pins were re-checked against `app/build.gradle.kts` and
+`app/src/main/jniLibs/arm64-v8a/*.so` and still match (`aab76943…fc940` /
+`679504dd…dca1d`). **No bundled loader binary or other third-party component
+was modified by this round**, and no new component is introduced. Host
+verification: 554 JVM tests / 45 suites (0 failures/errors/skips), 137 host
+CTest cases, lint 0 errors / 15 warnings, workflow policy 67/67, signing 40/40,
+make 36/36. No hardware/device/ADB/payload/privileged/APK validation; a fresh
+GitHub CI green run after push remains a POST-PUSH gate.
+
 | Component | Role | Licence | Source |
 |---|---|---|---|
 | diabl0w/DFRoot @ `7a6513a` | upstream baseline | GPL-2.0-only | https://github.com/diabl0w/DFRoot |

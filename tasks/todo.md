@@ -1,3 +1,4 @@
+<!-- Modified 2026-11-25 (DFRoot GZIF): record the third repair round (R3.1–R3.7), PR #1 rebase/CI integration and final host verification; Checkpoint R3 complete, Final Comprehensive Review left unchecked for the main agent. See NOTICE. -->
 <!-- Modified 2026-11-24 (DFRoot GZIF): record the Phase 3 review-fix round and verification; Checkpoint 3 remains open pending independent review and commit. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): Task 4.1 (Slice 4A) is in progress; Checkpoint 4 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Slice 4A review-fix round, the native-argv scope deviation, and mutation kill evidence. See NOTICE. -->
@@ -639,15 +640,76 @@ assembly.
   ADB/payload/privileged-container/APK-assembly validation and no commit/push;
   CI green remains a POST-PUSH gate.
 
+## Third repair round (R3, 2026-11-25) — consolidated phases R3.1–R3.7
+
+Authoritative record of the third repair round on `fix/app-correctness-safety`
+(final local HEAD `1252b3d`), after a mid-round rebase onto merged PR #1
+(`origin/master` `9f60e16`). Earlier phase records above remain historical.
+Findings closed: **R2-12, R2-13, R2-14, R2-16, R2-17, R2-18, R2-19 and the
+R2-04 caveat**. All R3 work was host-verified only; no device/ADB/payload/
+privileged-container/APK validation, dependency change or binary change.
+
+- [x] R3.1 (`6ebf9e3`, R2-12): map terminal classifier failures to rc=7, add one
+  authoritative unverified-outcome predicate, and stop timeout/interruption
+  flags masking an unconfirmed/unknown native exit. `RunCoordinator` routes
+  every unverified result and engine exception through ownership retention and
+  clears the durable attempt only for proven pre-effect rejection or confirmed
+  completion. At this commit: **505 JVM tests, 136 host CTest, lint 0 errors**.
+- [x] R3.2 (`2a74dd0`, R2-13): treat any incomplete/corrupt persisted attempt as
+  blocked, not absent; poison a store after a failed checked commit so its
+  process-local cache cannot prove durable absence (only a post-restart store
+  re-reads durable state). At this commit: **524 JVM tests, 136 host CTest
+  unchanged, lint 0 errors**.
+- [x] R3.3 (`6012c21`, R2-14): deterministic concurrent-reader host test covers
+  the whole post-link failure window and proves an early confirmed observation
+  is possible but unrevocable; README/PORTING/CHANGELOG aligned with the
+  provable guarantee (pre-link leaves no marker, rc=7 wins once published, only
+  post-publication results are indeterminate). Host CTest becomes **137**.
+- [x] R3.4 (`b87318f`, R2-16 / R2-17): re-read the Start-at-Boot component
+  setting for queued unattended requests before coordinator submission, fail
+  closed on OFF/unreadable, never touch an admitted operation, and publish a
+  fresh rejection snapshot for every rejected submission. At this commit:
+  **534 JVM tests, 137 host CTest, lint 0 errors**.
+- [x] R3.5 (`d32006e`, R2-18): move checked attempt-store work to a bounded
+  single-thread admission executor (claim-once/close-once request ownership)
+  and compute the read-only availability diagnostic on a separate worker with
+  sequence/generation guards; no safety check bypassed. At this commit:
+  **540 JVM tests, 137 host CTest, lint 0 errors**.
+- [x] R3.6 (`1252b3d`, R2-19 + R2-04 caveat): confirmed engine completion before
+  in-process recovery, trusted post-process-death persisted recovery, honest
+  final-result wording; no retry/UI/boot-count proof (details in the R3.6
+  record above). At this commit: **554 JVM tests / 45 suites, 137 host CTest,
+  lint 0 errors / 15 warnings**.
+- [x] R3.7 — rebase / CI integration and documentation-notices-hygiene final:
+  preserved PR #1 policy in `f6faf75` (closed allowlists for app-checks,
+  loader-pin fixtures and packaged-pin verification; pinned actions; report
+  check out of heredoc; fail-closed uploads) and restored PR #2 test-only deps
+  plus the hermetic `buildSrc` signing fixture in `770d07c`. Added the
+  consolidated R3 sections to README/CHANGELOG/PORTING, dated notes to NOTICE /
+  THIRD_PARTY_NOTICES, coverage/gate updates to plan/todo, and 2026-11-25
+  per-file notices where missing (none removed). Final host verification:
+  **554 JVM tests / 45 suites, 0 failures / 0 errors / 0 skipped; 137 host CTest;
+  lint 0 errors / 15 warnings; workflow policy 67/67; signing 40/40; make 36/36;
+  `:app:tasks --all` and the negative pin fixture green**; pins match
+  `app/build.gradle.kts` and `jniLibs`, no generated/secret files tracked,
+  secret scan benign-only, `git diff --check` clean.
+- [x] Checkpoint R3: all R3 phases complete with closure evidence and final
+  host verification recorded above. No CI green result is claimed locally; a
+  fresh remote GitHub Actions run after push is the POST-PUSH gate. Open gates:
+  Direct Boot FGS eligibility, real soft-reboot safety, `/dev` marker-root
+  trust, sticky-bit owner (`shell`) limitation, AES-key argv out of scope,
+  recovery UI out of scope (users locked out behind the durable barrier), and
+  `BOOT_COUNT` as diagnostic only — not proof of safe recovery.
+
 ## Final Comprehensive Review
 
-All four comprehensive reviews APPROVED and final verification is green. Final
-commit and push are performed by the main agent.
+Pending the main agent's approval after the final comprehensive review; the
+items below are intentionally left UNCHECKED for the main agent to update.
 
-- [x] Final 6.1: Correctness/lifecycle independent review.
-- [x] Final 6.2: Security/staging/environment independent review.
-- [x] Final 6.3: Test/build/CI independent review.
-- [x] Final 6.4: Architecture/native integration independent review.
-- [x] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
-- [x] Final 6.6: Final verification complete; approved commit series is committed
+- [ ] Final 6.1: Correctness/lifecycle independent review.
+- [ ] Final 6.2: Security/staging/environment independent review.
+- [ ] Final 6.3: Test/build/CI independent review.
+- [ ] Final 6.4: Architecture/native integration independent review.
+- [ ] Final 6.5: Resolve all Required/Critical findings through fix → review loops.
+- [ ] Final 6.6: Final verification complete; approved commit series is committed
   and pushed by the main agent.

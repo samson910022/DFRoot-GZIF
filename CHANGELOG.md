@@ -1,5 +1,54 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-25 — Third repair round (R3) consolidated summary — PR #1 rebase, CI integration, R2-12/13/14/16/17/18/19 + R2-04 caveat
+
+Authoritative record of the third repair round on `fix/app-correctness-safety`
+(final local HEAD `1252b3d`). The branch was rebased mid-round onto merged
+**PR #1** (`origin/master` `9f60e16`) and then repaired in six phase commits;
+all earlier sections below are historical.
+
+**Rebase / CI integration (PR #1 contract retained):**
+
+- `f6faf75` — integrated PR #2 app verification with the merged PR #1 CI
+  policy: preserved the release/signing/policy jobs, extended the **closed**
+  allowlists for app-checks, loader-pin-fixtures and packaged-pin verification,
+  pinned every action, moved the unit-test report check out of the forbidden
+  heredoc, and kept fail-closed upload settings.
+- `770d07c` — restored the JUnit/Robolectric test-only dependencies dropped by
+  the PR #1 app build script and added `buildSrc` to the hermetic signing
+  fixture so packaged-loader task definitions resolve.
+
+**Phase commits and finding closure (host evidence only):**
+
+| Finding | Commit | Closure |
+|---|---|---|
+| R2-12 | `6ebf9e3` | Terminal classifier failures map to rc=7; a single authoritative unverified-outcome predicate stops timeout/interruption flags masking an unknown exit; `RunCoordinator` retains lease/freeze/attempt on every unverified result or engine exception. |
+| R2-13 | `2a74dd0` | Incomplete/corrupt persisted attempts fail closed; a store poisoned by a failed checked commit cannot prove durable absence until a post-restart store re-reads durable state. |
+| R2-14 | `6012c21` | Post-link publication window stated as provable: pre-link failure leaves no final marker; rc=7 wins once published; only results acted on after publication completes are indeterminate. Deterministic concurrent-reader host test proves an early, unrevocable confirmed observation is possible. |
+| R2-16 / R2-17 | `b87318f` | Boot-OFF is re-read at admission for queued unattended requests (OFF/unreadable fails closed, admitted work untouched); every rejection publishes a fresh snapshot so the Activity shows the real barrier reason and leaves its pending state. |
+| R2-18 | `d32006e` | Checked attempt-store work moved to a bounded single-thread admission executor (claim-once/close-once); read-only availability diagnostic computed on a separate worker with sequence/generation guards. Boot OFF, durable barrier, single-flight and fail-closed diagnostics remain authoritative. |
+| R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion, not just timeout publication; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear and no UI/retry/boot-count proof; final-result messages drop bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no-root-probe policy unchanged. |
+
+**Final local verification (non-privileged host only):** **554 JVM tests / 45
+suites, 0 failures / 0 errors / 0 skipped**; **137 host CTest cases, 0
+failures**; lint **0 errors / 15 warnings**; workflow policy **67/67**; signing
+**40/40**; make **36/36**; `:app:tasks --all` resolves and the clean/tampered
+negative loader-pin fixture is green. Pins still match `app/build.gradle.kts`
+and `app/src/main/jniLibs`; `git diff --check` clean. No dependency was added or
+removed and no bundled loader/binary changed; the documentation, notices and
+hygiene edits introduce no runtime behavior change.
+
+**Open release/hardware gates (not claims):** Direct Boot FGS eligibility from
+boot; real soft-reboot safety (historical full hard reboot still stands); `/dev`
+marker-root trust; sticky-bit `/data/local/tmp` owner (`shell`) limitation; AES
+key in argv out of scope; owner-facing recovery UI out of scope (ordinary users
+stay locked out behind an unconfirmed persisted attempt); a new `BOOT_COUNT` is
+diagnostic only, **not** proof of safe recovery. No device, hardware, ADB,
+payload, privileged-container, cold-boot, soft-reboot or APK-assembly validation
+was performed. A fresh remote GitHub Actions run after push, with all PR #1
+policy jobs plus restored app checks, loader-pin fixtures and packaged-pin
+verification green, is the **POST-PUSH gate**; CI green is not claimed locally.
+
 ## Unreleased — PR #1 hardening (CI build reliability)
 
 Hardening pass over the build, signing and release pipeline; no change to the
@@ -125,7 +174,8 @@ attempt-store format, UI threading or CI change; no commit/push.
 
 Fresh local verification: **554 JVM unit tests across 45 suites** (`:app:testDebugUnitTest`,
 0 failures/errors/skips), `:app:lintDebug` **0 errors / 15 warnings**, host CTest
-unchanged at **135/135**, and `git diff --check` clean. No hardware/device/ADB/
+recorded then at **135/135** (superseded by the consolidated R3 section above:
+final **137/137**), and `git diff --check` clean. No hardware/device/ADB/
 payload/privileged-container/APK-assembly validation was performed; CI remains a
 POST-PUSH gate. All changes are left uncommitted.
 

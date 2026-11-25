@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified 2026-11-25 (DFRoot GZIF): extend the closed PR #1 CI allowlists for app-checks, loader-pin fixtures and packaged-pin verification after rebase. See NOTICE.
 """Fast, dependency-free contract tests for .github/workflows/build.yml.
 
 The parser in this module is a deliberately strict *allowlist* for the small

@@ -20,8 +20,11 @@
 > match the current code. §4/§6/§8.4/§9/§10 have been updated to match the
 > current code, **§15** documents the first 2026-11-25 repair architecture and
 > residual risks, and **§16** documents the re-review 1 repair round and the
-> hardware gates that remain open. No device or privileged validation was done
-> for either 2026-11-25 revision.
+> hardware gates that remain open. **§17** records the R2-19/R2-04 recovery and
+> wording phase; **§18** is the authoritative consolidated record of the third
+> repair round (rebase onto PR #1, CI integration, R2-12/13/14/16/17/18/19 and
+> the R2-04 caveat, with current counts and gates). No device or privileged
+> validation was done for any 2026-11-25 revision.
 
 ---
 
@@ -915,10 +918,77 @@ unchanged. Nothing in these messages claims root status was verified.
 ### 17.3 Host verification
 
 `:app:testDebugUnitTest`: **554 tests / 45 suites, 0 failures / 0 errors /
-0 skipped**. `:app:lintDebug`: **0 errors / 15 warnings**. Host CTest unchanged:
-**135/135**. `git diff --check` clean. No hardware, device, ADB, payload,
+0 skipped**. `:app:lintDebug`: **0 errors / 15 warnings**. Host CTest recorded
+then at **135/135** (superseded by §18: final **137/137**). `git diff --check`
+clean. No hardware, device, ADB, payload,
 privileged-container, cold-boot, soft-reboot or APK-assembly validation was
 performed; a fresh GitHub CI green run is a POST-PUSH gate and is not claimed.
+
+---
+
+## 18. Third repair round (R3, 2026-11-25) — consolidated findings, verification and gates
+
+This is the authoritative current record of the third repair round on
+`fix/app-correctness-safety` (final local HEAD `1252b3d`). **§5/§11/§12/§14
+remain the 2026-11-17 historical hardware ledger; §15–§17 remain historical
+repair-phase records.** The branch was rebased mid-round onto merged **PR #1**
+(`origin/master` `9f60e16`) and the PR #1 release/signing/policy CI contract was
+retained and extended:
+
+- `f6faf75` — preserved the PR #1 release/signing/policy jobs, extended the
+  **closed** workflow allowlists for app-checks, loader-pin fixtures and
+  packaged-pin verification, pinned all actions, moved the report check out of
+  a forbidden heredoc and kept fail-closed uploads.
+- `770d07c` — restored the JUnit/Robolectric test-only dependencies dropped by
+  the PR #1 app build script and included `buildSrc` in the hermetic signing
+  fixture so packaged-loader task definitions resolve.
+
+### 18.1 Findings closed in this round (host evidence only)
+
+| Finding | Commit | Resolution |
+|---|---|---|
+| R2-12 | `6ebf9e3` | Terminal classifier failures map to rc=7; one authoritative unverified-outcome predicate prevents timeout/interruption flags from hiding an unobserved exit; `RunCoordinator` retains ownership, frozen config, lease and the durable attempt on every unverified result or engine exception. |
+| R2-13 | `2a74dd0` | Incomplete or corrupt persisted attempts are a barrier, not absence; a store poisoned by a failed checked commit cannot prove durable absence until a post-restart store re-reads durable state. |
+| R2-14 | `6012c21` | The post-link publication window is documented honestly: a pre-link failure leaves no final marker, rc=7 outranks success/conflicts once published, and only results acted on after publication completes are indeterminate. A deterministic concurrent-reader host test proves an early confirmed observation is possible and cannot be revoked. |
+| R2-16 / R2-17 | `b87318f` | Queued unattended requests re-read the Start-at-Boot component setting at admission and fail closed on OFF/unreadable without disturbing admitted work; each rejection publishes a fresh snapshot so the Activity shows the real barrier reason. |
+| R2-18 | `d32006e` | Checked attempt-store work runs on a bounded single-thread admission executor (claim-once/close-once); availability diagnostics run on a separate worker with sequence/generation guards. Boot OFF, durable barrier, single-flight and fail-closed diagnostics remain authoritative. |
+| R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear; final-result messages drop bare `SUCCESS`. Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev` progress strings and the no-root-probe policy are unchanged. |
+
+### 18.2 Final local verification (non-privileged host only)
+
+`:app:testDebugUnitTest` **554 tests / 45 suites, 0 failures / 0 errors /
+0 skipped**; **137 host CTest cases, 0 failures**; `:app:lintDebug` **0 errors /
+15 warnings**; workflow policy contract **67/67**; signing contract **40/40**;
+make contract **36/36**; `:app:tasks --all` resolves and the clean/tampered
+negative loader-pin fixture is green. Loader SHA-256 pins still match
+`app/build.gradle.kts` and `app/src/main/jniLibs`; `git diff --check` clean.
+No dependency was added or removed, no bundled loader/binary changed, and the
+documentation/notices/hygiene edits introduce no runtime behavior change.
+
+### 18.3 Hardware and release gates — still open, not claims
+
+1. **Direct Boot FGS eligibility.** The `specialUse` boot-start service and
+   notification path are covered by JVM tests only; no cold boot was performed.
+2. **Real soft-reboot safety.** The historical full hard reboot on this model
+   still stands; rc=4/6/7 are code-level facts, not device evidence. Unattended
+   soft reboot stays disabled.
+3. **`/dev` marker-root trust.** Marker files live under `/dev` and the reader
+   trusts that root for admitted IDs; host tests inject harmless roots only.
+4. **Sticky-bit owner limitation.** The sticky bit on `/data/local/tmp` does not
+   defend against its owner (`shell`); descriptor identity checks mitigate but
+   do not remove that trust assumption.
+5. **AES key in argv — out of scope.** Parsing is hardened/range-checked, but
+   the key's presence in the payload argv was not redesigned.
+6. **Recovery UI — out of scope.** There is no in-app recovery control; an
+   ordinary user with an unconfirmed persisted attempt is intentionally locked
+   out until a trusted caller clears the barrier or app data is reset.
+7. **`BOOT_COUNT` is not proof.** A new boot count is diagnostic only and never
+   authorizes a clear or a retry by itself.
+8. **Fresh remote CI run after push.** A green GitHub Actions run with all PR #1
+   policy jobs plus restored app checks, loader-pin fixtures and packaged-pin
+   verification is a **POST-PUSH gate**; CI green is not claimed locally. No
+   device, hardware, ADB, payload, privileged-container, cold-boot, soft-reboot
+   or APK-assembly validation was performed for this round.
 
 ---
 

@@ -1,3 +1,4 @@
+<!-- Modified 2026-11-25 (DFRoot GZIF): add R3.1–R3.7 coverage (R2-12/13/14/16/17/18/19 + R2-04 caveat), the PR #1 rebase/CI contract and current release gates. See NOTICE. -->
 # Implementation Plan: PR #2 Complete Correctness and Safety Repair
 
 ## Overview
@@ -53,13 +54,16 @@ The final branch must be buildable, testable without privileged execution, lifec
 | R2-09 loader precheck / fallback | exact selection-aware asset preflight; no implicit fallback | 1 |
 | R2-10 packaged loader pin gate broken / no negative fixture | buildSrc pin tasks + deterministic clean/tampered synthetic fixture in CI | Re-review 1 (`6686973`) |
 | R2-11 staged-entry cleanup identity / exec pin | descriptor-pinned fstat/lstat identity, conservative no-unlink of replacements, non-writing pin via `/proc/self/fd` | Re-review 2 (`639a9d8`) |
-| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; pre-link failure leaves no final marker, and the brief post-link/pre-rc7 observation window is documented honestly rather than claimed unobservable | Re-review 3 (`12a633b`) |
-| R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | Re-review 4 (`ce781f8`) |
-| R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | Re-review 5 (`7b5397c`) |
-| R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | Re-review 6/7 (`7c1f39a`, `54cb000`) |
-| R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | Re-review 8 (`a8003c2`) |
-| R2-19 recovery truth | engine-finished evidence before in-process recovery; post-process-death-only trusted-caller persisted clear; no UI, no retry, no boot-count proof | R3.6 (`d32006e`) |
-| R2-04 caveat (ambiguous final `SUCCESS` wording) | "run completed — verify root status yourself" / "already attempted/hooked; root status unverified"; typed codes/types and no-reentry guard unchanged | R3.6 (`d32006e`) |
+| R2-14 atomic terminal publication | temp + fsync + `link()` publication; rc=7 indeterminate channel; pre-link failure leaves no final marker, and the brief post-link/pre-rc7 observation window is documented honestly rather than claimed unobservable | R1 (`12a633b`); re-reviewed R3 (`6012c21`) — deterministic post-link concurrent-reader proof |
+| R2-12 indeterminate completion keeps ownership (partial R2-03) | bounded non-killing waits, reader rc=7, single-claim recovery API, lease/config freeze retained | R1 (`ce781f8`); re-reviewed R3 (`6ebf9e3`) — unverified-outcome predicate, no flag masking unknown exits |
+| R2-13 unconfirmed attempt not durable (partial R2-02) | DE-persisted operation attempt before work; process-restart barrier; boot claims suppressed until recovery | R1 (`7b5397c`); re-reviewed R3 (`2a74dd0`) — corrupt/uncertain records and poisoned stores fail closed |
+| R2-15 pre-admission uncertainty + independent boot OFF (partial R2-07/09) | pure reader decision + reserved diagnostic; OFF reachable in every state; claim-time component recheck | R1 (`7c1f39a`, `54cb000`); boot-OFF re-checked at admission in R3 (`b87318f`) |
+| R2-16 honest hook result and availability (partial R2-04) | "already attempted/hooked; root status unverified"; read-only availability diagnostic from the authoritative preflight plan | R1 (`a8003c2`); wording refined in R3 (`1252b3d`) |
+| R2-17 queued boot request must re-check OFF and show rejections | admission-time component re-read (OFF/unreadable fails closed, admitted work untouched); fresh rejection snapshot so the Activity leaves its pending state | R3.4 (`b87318f`) |
+| R2-18 blocking admission/diagnostics off the main thread | bounded single-thread admission executor with claim-once/close-once ownership; separate worker for the read-only availability diagnostic with sequence/generation guards; no safety check bypassed | R3.5 (`d32006e`) |
+| R2-19 recovery truth | engine-finished evidence before in-process recovery; post-process-death-only trusted-caller persisted clear; no UI, no retry, no boot-count proof | R3.6 (`1252b3d`) |
+| R2-04 caveat (ambiguous final `SUCCESS` wording) | "run completed — verify root status yourself" / "already attempted/hooked; root status unverified"; typed codes/types and no-reentry guard unchanged | R3.6 (`1252b3d`) |
+| Post-rebase CI contract (PR #1 merge) | preserve PR #1 release/signing/policy jobs and closed allowlists; restore JUnit/Robolectric test-only deps and hermetic `buildSrc` signing fixture; app-checks, loader-pin fixtures and packaged-pin verification green | R3.7 (`f6faf75`, `770d07c`) |
 | Duplicate boot broadcasts | durable BOOT_COUNT claim before service start | 5 |
 | WakeLock released before bootstrap completes | terminal completion marker; service owns lock for full session | 3, 4 |
 | Shell-writable root staging race | sticky-bit + exclusive nofollow descriptor staging; restore mode | 4 |
@@ -279,10 +283,75 @@ threading, CI, device/ADB, payload, privileged container, or APK assembly.
   `DFRoot: already attempted/hooked; root status unverified`). Typed codes/types,
   already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6`
   progress strings, and no root probe strictly unchanged.
-- [x] Host verification: `:app:testDebugUnitTest` 554 tests / 45 suites,
-  0 failures/errors/skips; `:app:lintDebug` 0 errors / 15 warnings; host CTest
-  unchanged 135/135; `git diff --check` clean. No hardware/device/ADB/payload/
+- [x] Host verification at that phase: `:app:testDebugUnitTest` 554 tests / 45
+  suites, 0 failures/errors/skips; `:app:lintDebug` 0 errors / 15 warnings;
+  host CTest 135/135 as recorded then. **Superseded by the R3 consolidated
+  section below: final host CTest is 137/137** (post-link fixture added in
+  `6012c21`); `git diff --check` clean. No hardware/device/ADB/payload/
   privileged-container/APK-assembly validation is claimed; CI is POST-PUSH.
+
+## Third repair round (R3) — coverage and release gates (2026-11-25)
+
+Authoritative current gate record for `fix/app-correctness-safety` (final local
+HEAD `1252b3d`). Earlier round sections above remain historical. The branch was
+rebased onto merged PR #1 (`origin/master` `9f60e16`); the PR #1 release/signing/
+policy CI contract is preserved and extended by `f6faf75` (closed allowlists for
+app-checks, loader-pin fixtures and packaged-pin verification; all actions
+pinned; report check moved out of the forbidden heredoc; fail-closed uploads)
+and `770d07c` (JUnit/Robolectric test-only deps restored; `buildSrc` included in
+the hermetic signing fixture).
+
+Completed local gates (host only):
+
+- [x] R2-12 (`6ebf9e3`): classifier-failure rc=7, one unverified-outcome
+  predicate, ownership retained on every unverified result/exception.
+- [x] R2-13 (`2a74dd0`): uncertain/corrupt attempt records fail closed; poisoned
+  store cache cannot assert durable absence before restart.
+- [x] R2-14 (`6012c21`): post-link observation window proven and documented;
+  pre-link leaves no marker, rc=7 wins after publication, only post-publication
+  results are indeterminate; host CTest now 137.
+- [x] R2-16 / R2-17 (`b87318f`): Boot OFF re-checked at admission for queued
+  requests with a fresh rejection snapshot; admitted operations untouched.
+- [x] R2-18 (`d32006e`): bounded single-thread admission executor and separate
+  diagnostic worker; Boot OFF, durable barrier, single-flight and fail-closed
+  diagnostics still authoritative.
+- [x] R2-19 / R2-04 caveat (`1252b3d`): recovery requires confirmed engine
+  completion; persisted recovery is trusted post-process-death only; final
+  messages drop bare `SUCCESS`; no UI/retry/boot-count proof.
+- [x] Post-rebase CI contract (`f6faf75`, `770d07c`): workflow policy 67/67,
+  signing 40/40, make 36/36, `:app:tasks --all` resolves and the negative
+  loader-pin fixture is green.
+- [x] Final verification: **554 JVM tests / 45 suites, 0 failures / 0 errors /
+  0 skipped**; **137 host CTest cases**; lint **0 errors / 15 warnings**;
+  loader pins match `app/build.gradle.kts` and `app/src/main/jniLibs`; no
+  generated/secret files tracked; secret scan benign-only; `git diff --check`
+  clean. No dependency or binary change; documentation edits add no runtime
+  behavior.
+
+Remaining release gates (not satisfied locally, not claimed as done):
+
+- [ ] **POST-PUSH CI gate:** a fresh remote GitHub Actions run after push with
+  all PR #1 policy jobs plus app-checks, loader-pin fixtures and packaged-pin
+  verification green. Local contract suites are not a CI run.
+- [ ] **Hardware gate — Direct Boot FGS eligibility:** boot-start foreground
+  service/notification behavior on a real locked device.
+- [ ] **Hardware gate — real soft-reboot safety:** historical full hard reboot
+  on this model is unresolved; rc=4/6/7 are code-level only, unattended soft
+  reboot stays disabled.
+- [ ] **Security gate — `/dev` marker-root trust:** admitted-ID marker root and
+  SELinux trust need on-device validation; host tests inject harmless roots.
+- [ ] **Security gate — sticky-bit owner limitation:** `/data/local/tmp` owner
+  (`shell`) can rename/delete entries; descriptor identity checks mitigate,
+  not remove, this assumption.
+- [ ] **Residual risk — AES key in argv:** out of scope for redesign; owner
+  acknowledgement required.
+- [ ] **Out of scope — recovery UI delivery:** no in-app recovery control; an
+  ordinary user with an unconfirmed persisted attempt stays locked out until a
+  trusted caller clears the barrier or app data is reset.
+- [ ] **Owner acknowledgement — `BOOT_COUNT`:** diagnostic only, not proof that
+  prior privileged effects stopped or that a retry is safe.
+- [ ] APK assembly remains blocked by the gitignored, absent `ko/*.ko` and would
+  require a privileged DDK container; no device/ADB/payload validation in R3.
 
 ## Final Gate
 

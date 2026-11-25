@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified 2026-11-25 (DFRoot GZIF): include buildSrc in the hermetic signing Gradle fixture so packaged-loader task definitions resolve after the PR #1 rebase. See NOTICE.
 """Regression tests for signing-material serialization, publication, and configuration."""
 
 from __future__ import annotations
