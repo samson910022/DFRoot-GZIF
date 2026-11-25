@@ -321,6 +321,47 @@ static void test_recovery_status(void)
     free(buf);
 }
 
+/* Authoritative recovery gate round-trip through the REAL file reader: only
+ * the exact "<current nonce>\n" bytes are bound evidence. A plain "ok\n" is
+ * strict-but-UNBOUND and can never open the producer's reboot gate. Host tests
+ * prove parser strictness, NOT the Android trust boundary or device freshness. */
+static void test_bound_recovery_status(void)
+{
+    char *buf = guarded_buf();
+    size_t len = 12345;
+    char bound[DF_RECOVERY_STATUS_CHARS + 1];
+    const char *foreign = "fedcba9876543210fedcba9876543210";
+    const char *upper = "0123456789ABCDEF0123456789abcdef\n";
+    int n = snprintf(bound, sizeof(bound), "%s\n", NONCE);
+
+    assert(n == DF_RECOVERY_STATUS_CHARS);
+
+    write_read_file(bound, (size_t)n);
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(len == (size_t)n);
+    assert(memcmp(buf, bound, len) == 0);
+    assert(df_recovery_status_is_bound_ok(buf, len, NONCE) == 1);
+    assert(df_recovery_status_is_bound_ok(buf, len, foreign) == 0);
+    assert(df_recovery_status_is_bound_ok(buf, len, NULL) == 0);
+    assert(df_recovery_status_is_ok(buf, len) == 0); /* bound != plain "ok\n" */
+    assert_guard_intact(buf);
+
+    write_read_file(RECOVERY_OK, strlen(RECOVERY_OK));
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(df_recovery_status_is_ok(buf, len) == 1);
+    assert(df_recovery_status_is_bound_ok(buf, len, NONCE) == 0);
+    assert_guard_intact(buf);
+
+    write_read_file(upper, strlen(upper));
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(df_recovery_status_is_bound_ok(buf, len, NONCE) == 0);
+    write_read_file(bound, (size_t)n - 1); /* truncated newline */
+    assert(df_read_final_file(g_read, buf, DF_FINAL_READ_CAP, &len) == 0);
+    assert(df_recovery_status_is_bound_ok(buf, len, NONCE) == 0);
+    assert_guard_intact(buf);
+    free(buf);
+}
+
 int main(void)
 {
     mode_t old_umask;
@@ -391,10 +432,12 @@ int main(void)
 
     /* 6. Reserved bootfail token publication/reader (host-only, no /dev). */
     test_bootfail_channel();
-    /* 7. Strict recovery-status bytes (host-only, no /dev). */
+    /* 7. Strict UNBOUND recovery-status bytes (host-only, no /dev). */
     test_recovery_status();
+    /* 8. Bound recovery-status round-trip: stale "ok\n" is rejected. */
+    test_bound_recovery_status();
 
     cleanup_files();
-    puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / recovery checks passed");
+    puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / unbound+bound recovery checks passed");
     return 0;
 }

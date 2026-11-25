@@ -13,11 +13,18 @@
  * by bootstrap; only then does a token bound to it identify this invocation.
  * A nonce read from shared persistent state alone does NOT establish identity:
  * exp.c refuses to arm when an existing /dev/dffinal token or an app-private
- * state file is stale, tampered or otherwise ambiguous. */
+ * state file is stale, tampered or otherwise ambiguous. Clearing shared state
+ * at entry (dfinv/dfrecover/dfbootfail) is ONLY hygiene, NEVER proof that a
+ * later publication belongs to this invocation: every auxiliary observation
+ * must be byte-bound to the current nonce before it can carry authority. */
 #define DF_NONCE_BYTES 16
 #define DF_NONCE_CHARS 32
+/* Exact byte length of a bound recovery-status token: 32 hex + '\n'. */
+#define DF_RECOVERY_STATUS_CHARS (DF_NONCE_CHARS + 1)
 /* Dedicated reserved identity for bootstrap failures that happen before a run
- * nonce can be established. Never used for a normal /dev/dffinal publication. */
+ * nonce can be established. Never used for a normal /dev/dffinal publication.
+ * The reserved token's SYNTAX is not invocation proof: it identifies a
+ * bootstrap failure channel, never the current run's final outcome. */
 #define DF_RESERVED_BOOTSTRAP_NONCE "00000000000000000000000000000000"
 /* Bounded wait for the app-side recovery gate to flip from its startup
  * "fail\n" to a verified "ok\n". Always clamped to the producer's remaining
@@ -75,10 +82,15 @@ enum df_wait_result { DONE, TIMEOUT, ERR };
  * read_bootstrap_failure() is a SEPARATE app-owned channel for a token bound to
  * DF_RESERVED_BOOTSTRAP_NONCE; it is polled only when no normal final token was
  * parsed in that iteration (strict parse failure or read unavailable). A NULL
- * callback means "channel unavailable" (fail closed). recovery_ok() is the
- * cleanup/restore verification gate: a NULL
- * pointer or a result <= 0 MUST disable the reboot path; it can never enable
- * one.
+ * callback means "channel unavailable" (fail closed). Reserved-nonce syntax is
+ * NOT proof of this invocation's identity, so a bootfail observation must never
+ * claim a bound final token.
+ * recovery_ok(ctx, nonce) is the cleanup/restore verification gate. It receives
+ * the SAME run nonce used to bind final tokens, and MUST return >0 only for a
+ * status bound to that nonce. A NULL pointer, a stale/unbound "ok\n" or a
+ * result <= 0 MUST disable the reboot path; it can never enable one. The
+ * callback must be checked against the deadline immediately before AND after a
+ * positive result: late or uncertain evidence never authorizes a reboot.
  *
  * Observed output: consumer_await() writes the outcome it finally accepted
  * into `observed_outcome`; status_flow_run() copies it to its `out` argument
@@ -94,7 +106,8 @@ struct status_io {
                                       size_t *out_len); /* reserved channel */
     int     (*publish_final)(void *ctx, const char *nonce, enum df_outcome outcome);
     int     (*late_load_state)(void *ctx);     /* >0 running, 0 confirmed absent, <0 unknown */
-    int     (*recovery_ok)(void *ctx);         /* >0 verified restore, <=0/NULL: no reboot */
+    int     (*recovery_ok)(void *ctx, const char *nonce); /* >0 nonce-bound restore,
+                                                           * <=0/NULL: no reboot */
     int     (*wait_child)(void *ctx, int timeout_ms); /* 0=exit0, >0=exit code, <0=error/timeout */
     void    (*report)(void *ctx, const char *msg);    /* informational only, never an oracle */
     const char *nonce;                         /* expected run nonce (32 lowercase hex chars) */
@@ -129,21 +142,35 @@ int df_is_reserved_bootstrap_nonce(const char *nonce);
 int df_parse_bootstrap_failure_token(const char *buf, size_t len,
                                      enum df_outcome *out);
 
-/* Strict validation of the app-private recovery-status bytes ("ok\n" only).
- * Empty, "fail\n", extra bytes and embedded NULs are all rejected. */
+/* Strict validation of the legacy, UNBOUND recovery-status bytes ("ok\n"
+ * only). Empty, "fail\n", extra bytes and embedded NULs are all rejected, but
+ * accepting "ok\n" here is NOT sufficient authorization: the byte sequence has
+ * no invocation identity and may be stale or foreign. Production gates MUST use
+ * df_recovery_status_is_bound_ok() below. These pure validators only prove
+ * parser strictness on the HOST; they do not validate the Android trust
+ * boundary or on-device freshness. */
 int df_recovery_status_is_ok(const char *buf, size_t len);
+
+/* Authoritative recovery gate: EXACTLY 32 lowercase hex characters (byte-equal
+ * to `nonce`) followed by a single '\n'. A plain "ok\n", a foreign/stale nonce,
+ * uppercase hex, extra bytes or an invalid nonce all fail closed. Only a token
+ * produced by this invocation's verified cleanup can satisfy this check. */
+int df_recovery_status_is_bound_ok(const char *buf, size_t len,
+                                    const char *nonce);
 
 /* App result codes: 0/1/2/3/4/5/6/7/9 plus the 64 recovery-failed bit. */
 int df_outcome_to_rc(enum df_outcome outcome);
 
 /* Producer (runs in bootstrap). Decides and atomically publishes the final
  * outcome. Never authorizes a reboot unless a confirmed-absent late-load, a
- * successful REBOOT_PENDING preflight and a POSITIVE recovery_ok() gate were
- * observed. recovery_ok() is checked only AFTER the pending preflight and
- * BEFORE wait_child: a NULL/failed gate publishes REBOOT_SKIPPED and can only
- * disable the reboot. A clock failure before any deadline can be enforced
- * publishes BOOTSTRAP_FAILED under the real nonce. Returns the outcome it
- * believes it published. */
+ * successful REBOOT_PENDING preflight and a POSITIVE, NONCE-BOUND recovery_ok()
+ * gate were observed INSIDE the deadline. recovery_ok() is checked only AFTER
+ * the pending preflight and BEFORE wait_child, with the deadline enforced both
+ * immediately before the call and immediately after a positive result: a
+ * NULL/failed/unbound/late gate publishes REBOOT_SKIPPED with ZERO child calls
+ * and can only disable the reboot. A clock failure before any deadline can be
+ * enforced publishes BOOTSTRAP_FAILED under the real nonce. Returns the outcome
+ * it believes it published. */
 enum df_outcome producer_decide_and_publish(struct status_io *io, void *ctx,
                                               int late_load_rc, int soft_reboot,
                                               int late_load_wait_ms,
@@ -160,17 +187,24 @@ enum df_outcome producer_decide_and_publish(struct status_io *io, void *ctx,
 enum df_wait_result consumer_await(struct status_io *io, void *ctx,
                                     int budget_ms, int grace_ms, int overall_ms);
 
-/* Consumer entry point. cleanup_cb runs EXACTLY ONCE, after the first valid
- * bound status observation (or at the end of the wait if none arrives: the
- * budget deadline, or the overall deadline after a pending preflight), on the
- * SAME absolute deadline used by the poll loop. It returns 0 when restore
- * verification succeeded and <0 on failure; any failure is reported through
- * `*cleanup_failed` and also closes the producer's recovery gate. Time spent
- * in cleanup is charged to the shared deadline and the clock is rechecked
- * after it. The observed outcome is written to *out. */
+/* Consumer entry point. cleanup_cb runs EXACTLY ONCE ON EVERY EXIT (guard
+ * failure, clock failure, ERR, TIMEOUT and DONE), after the first valid
+ * nonce-bound final token (or at the end of the wait if none arrives, or in the
+ * fail-closed epilogue for ERR). Its `bound_observation` argument is 1 ONLY for
+ * a normal bound final token; it is 0 for a reserved-channel bootfail, a
+ * deadline with no observation, and every ERR/fallback path. A 0 observation
+ * MUST keep the producer's recovery gate closed. cleanup_cb returns 0 when
+ * restore verification succeeded and <0 on failure; any failure is reported
+ * through `*cleanup_failed`. Every ERR exit sets `*cleanup_failed` (recovery is
+ * UNKNOWN, never a normal completion) and leaves `*out` as DF_OUTCOME_NONE.
+ * Cleanup runs on the SAME absolute deadline as the poll loop, its time is
+ * charged to that deadline, and the clock is rechecked before any terminal
+ * DONE: a cleanup that overruns the deadline routes to TIMEOUT /
+ * REBOOT_ATTEMPT_UNKNOWN instead. */
 enum df_wait_result status_flow_run(struct status_io *io, void *ctx,
                                      int budget_ms, int grace_ms, int overall_ms,
-                                     int (*cleanup_cb)(void *ctx),
+                                     int (*cleanup_cb)(void *ctx,
+                                                       int bound_observation),
                                      enum df_outcome *out,
                                      int *cleanup_failed);
 

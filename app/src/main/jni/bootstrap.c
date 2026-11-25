@@ -531,13 +531,17 @@ static int read_nonce(char out[DF_NONCE_CHARS + 1])
 }
 
 /* Strict read of the app-private recovery status written by exp.c. ONLY the
- * exact three bytes "ok\n" in a regular file count as verified restore; an
- * absent file, "fail\n", a partial/oversize file or a symlink all fail closed
- * and disable the reboot path. */
-static int read_recovery_ok(void *ctx)
+ * exact bytes "<nonce>\n" in a regular file count as verified restore for
+ * THIS invocation: the nonce is the one strictly read from dfinv and bound to
+ * every final token. A plain stale/foreign "ok\n" is UNBOUND and insufficient
+ * authorization; so are an absent file, "fail\n", a partial/oversize file, a
+ * symlink or any malformed nonce. All of them fail closed and disable the
+ * reboot path. Shared-state clearing and channel syntax are NOT invocation
+ * proof; only the byte-equal nonce binding is. */
+static int read_recovery_ok(void *ctx, const char *nonce)
 {
     struct stat st;
-    char buf[3];
+    char buf[DF_RECOVERY_STATUS_CHARS];
     size_t off = 0;
     int fd;
 
@@ -545,7 +549,8 @@ static int read_recovery_ok(void *ctx)
     fd = open(DF_RECOVER_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return -1;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 3) {
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size != (off_t)sizeof(buf)) {
         close(fd);
         return -1;
     }
@@ -560,7 +565,7 @@ static int read_recovery_ok(void *ctx)
         off += (size_t)n;
     }
     close(fd);
-    return df_recovery_status_is_ok(buf, sizeof(buf)) ? 1 : -1;
+    return df_recovery_status_is_bound_ok(buf, sizeof(buf), nonce) ? 1 : -1;
 }
 
 /* Publish a bootstrap failure that occurred before a run nonce could be
@@ -599,8 +604,9 @@ static int publish_bootstrap_failure_bounded(void)
 }
 
 /* Build the injected IO and let the pure protocol decide + publish the one
- * final outcome. All progress markers are informational; nothing here reads
- * a marker to derive a result. */
+ * final outcome. The strictly-read nonce is passed to the recovery gate, so a
+ * stale "ok\n" cannot satisfy it. All progress markers are informational;
+ * nothing here reads a marker to derive a result. */
 static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot,
                                           const char *nonce)
 {

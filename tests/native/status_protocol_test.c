@@ -46,21 +46,25 @@ struct mock {
     int child_timeout;
 
     int cleanup_calls;
+    int bound_arg;              /* bound_observation passed to the last cleanup */
     int cleanup_at_read;        /* read count when cleanup ran */
     int cleanup_at_ms;          /* mock clock when cleanup ran */
     int cleanup_consumes_ms;    /* simulated restore/verification time */
     int cleanup_result;         /* 0 verified, <0 failed */
     int cleanup_failed_out;     /* status_flow_run out-param */
-    int allow_cleanup_without_status; /* deadline cleanup when no status arrived */
+    int allow_cleanup_without_status; /* deadline/ERR cleanup with no status */
 
     int recovery_ok;            /* 1 = verified restore, 0/-1 = gate closed */
     int recovery_null;          /* when set, io.recovery_ok is NULL */
     int recovery_calls;
+    int recovery_at_call;       /* 1-based call at which the gate flips positive */
+    int recovery_advance_ms;    /* simulated callback latency on a positive read */
+    int recovery_clock_fail;    /* positive result makes the NEXT now_ms fail */
 
     /* Integration handoff: the only positive writer of recovery_ok is the
      * consumer cleanup step, which cannot run until PENDING was observed. */
     int handoff_mode;           /* simulate the producer/consumer file handoff */
-    int (*registered_cleanup)(void *c);
+    int (*registered_cleanup)(void *c, int bound_observation);
     void (*sleep_hook)(void *c, int ms); /* concurrent step during producer wait */
     int sleep_calls;
     int handoff_cleanup_calls;
@@ -134,10 +138,10 @@ static int m_read(void *c, char *buf, size_t cap, size_t *out_len);
 static int m_bootfail(void *c, char *buf, size_t cap, size_t *out_len);
 static int m_publish(void *c, const char *nonce, enum df_outcome outcome);
 static int m_late_state(void *c);
-static int m_recovery_ok(void *c);
+static int m_recovery_ok(void *c, const char *nonce);
 static int m_child(void *c, int timeout_ms);
 static void m_report(void *c, const char *msg);
-static int m_cleanup(void *c);
+static int m_cleanup(void *c, int bound_observation);
 
 static struct status_io make_io(struct mock *m)
 {
@@ -271,11 +275,25 @@ static int m_late_state(void *c)
     return v;
 }
 
-static int m_recovery_ok(void *c)
+/* The real gate is nonce-bound; the mock asserts the producer passes the run
+ * nonce. `recovery_at_call` simulates a synchronous callback that turns
+ * positive late, optionally consuming enough time to overrun its deadline. */
+static int m_recovery_ok(void *c, const char *nonce)
 {
     struct mock *m = c;
+    int positive;
+
+    assert(nonce && strcmp(nonce, m->nonce) == 0);
     m->recovery_calls++;
-    return m->recovery_ok;
+    positive = m->recovery_ok;
+    if (m->recovery_at_call && m->recovery_calls >= m->recovery_at_call)
+        positive = 1;
+    if (positive) {
+        if (m->recovery_advance_ms) m->now += m->recovery_advance_ms;
+        if (m->recovery_clock_fail)
+            m->now_fail_from = m->now_calls + 1;
+    }
+    return positive;
 }
 
 static int m_child(void *c, int timeout_ms)
@@ -306,14 +324,19 @@ static void m_report(void *c, const char *msg)
     strncat(m->report, "\n", sizeof(m->report) - used - 1);
 }
 
-static int m_cleanup(void *c)
+static int m_cleanup(void *c, int bound_observation)
 {
     struct mock *m = c;
-    /* Cleanup is never allowed before a bound status; the only exception is
-     * the deadline path, where no status ever arrived. It must also not run
-     * while the modeled reboot command is still in flight. */
+    m->bound_arg = bound_observation;
+    /* bound=1 is reserved for a NORMAL bound final token; it must never run
+     * before that observation or while a reboot command is in flight. A
+     * bootfail/deadline/ERR cleanup passes bound=0: no invocation proof and no
+     * claim that asynchronous work has quiesced. */
     assert(m->first_status_seen || m->allow_cleanup_without_status);
-    assert(m->async_in_flight == 0);
+    if (bound_observation) {
+        assert(m->first_status_seen);
+        assert(m->async_in_flight == 0);
+    }
     m->cleanup_calls++;
     if (m->cleanup_calls == 1) {
         m->cleanup_at_read = m->read_calls;
@@ -335,8 +358,9 @@ static void handoff_sleep_hook(void *c, int ms)
         return;
     m->handoff_cleanup_calls++;
     assert(m->registered_cleanup != NULL);
-    assert(m->registered_cleanup(c) == 0);
-    m->recovery_ok = 1; /* dfrecover now contains exactly "ok\n" */
+    /* The simulated consumer HAS seen the bound PENDING token: bound=1. */
+    assert(m->registered_cleanup(c, 1) == 0);
+    m->recovery_ok = 1; /* dfrecover now contains exactly "<nonce>\n" */
 }
 
 static enum df_outcome last_published(struct mock *m)
@@ -778,6 +802,7 @@ int main(void)
         assert(m.first_status_seen);
         assert(m.cleanup_at_read == 1); /* AFTER the first read, never before */
         assert(m.read_calls == 1);
+        assert(m.bound_arg == 1); /* normal bound token only */
 
         mock_init(&n); /* no final file: poll until timeout */
         n.allow_cleanup_without_status = 1; /* deadline path, no observation */
@@ -786,6 +811,7 @@ int main(void)
         assert(n.cleanup_calls == 1);
         assert(n.cleanup_at_read == n.read_calls);
         assert(n.read_calls > 0);
+        assert(n.bound_arg == 0); /* deadline is NOT invocation proof */
     }
 
     /* 28. clock failure at producer start: no deadline can be enforced, so no
@@ -1132,6 +1158,200 @@ int main(void)
         assert(strstr(m.report, "restore verification not confirmed") != NULL);
     }
 
-    puts("status_protocol_test: all 49 cases passed");
+    /* 50. Recovery gate binding: ONLY "<current nonce>\n" is authorization.
+     * The legacy "ok\n" validator stays strict but is explicitly UNBOUND: a
+     * stale or foreign writer can produce those bytes exactly. */
+    {
+        const char *nonce = "0123456789abcdef0123456789abcdef";
+        const char *foreign = "fedcba9876543210fedcba9876543210";
+        char bound[DF_RECOVERY_STATUS_CHARS + 1];
+        char bad[DF_RECOVERY_STATUS_CHARS + 3];
+        int n = snprintf(bound, sizeof(bound), "%s\n", nonce);
+
+        assert(n == DF_RECOVERY_STATUS_CHARS);
+        assert(df_recovery_status_is_bound_ok(bound, (size_t)n, nonce) == 1);
+        assert(df_recovery_status_is_bound_ok(bound, (size_t)n, foreign) == 0);
+        assert(df_recovery_status_is_bound_ok(bound, (size_t)n, NULL) == 0);
+        assert(df_recovery_status_is_bound_ok(bound, (size_t)n,
+               "0123456789ABCDEF0123456789abcdef") == 0);
+        assert(df_recovery_status_is_ok(bound, (size_t)n) == 0);
+
+        /* Plain stale "ok\n" is parser-valid but has NO invocation proof. */
+        assert(df_recovery_status_is_ok("ok\n", 3) == 1);
+        assert(df_recovery_status_is_bound_ok("ok\n", 3, nonce) == 0);
+        assert(df_recovery_status_is_bound_ok("fail\n", 5, nonce) == 0);
+        assert(df_recovery_status_is_bound_ok(bound, (size_t)n - 1, nonce) == 0);
+        memcpy(bad, bound, sizeof(bound));
+        bad[4] = '\0'; /* embedded NUL inside the nonce */
+        assert(df_recovery_status_is_bound_ok(bad, (size_t)n, nonce) == 0);
+        bad[4] = nonce[4];
+        bad[n] = 'x'; /* extra byte after the newline */
+        assert(df_recovery_status_is_bound_ok(bad, (size_t)n + 1, nonce) == 0);
+    }
+
+    /* 51. Reserved-channel bootfail syntax is NOT invocation proof: cleanup
+     * runs exactly once with bound=0 and the recovery gate stays closed. */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        m.allow_cleanup_without_status = 1;
+        set_bootfail(&m, BOOTSTRAP_FAILED);
+        assert(run_flow(&m, 1000, 100, 2000, &o) == DONE);
+        assert(o == BOOTSTRAP_FAILED);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 0);
+    }
+
+    /* 52. Producer boundary: a positive bound gate at deadline-1 is current. */
+    {
+        struct mock m; enum df_outcome o;
+        mock_init(&m);
+        m.recovery_ok = 1;
+        m.recovery_at_call = 1;
+        m.recovery_advance_ms = 199; /* now == 1199, deadline == 1200 */
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_REQUESTED);
+        assert(m.child_calls == 1);
+        assert(m.recovery_calls == 1);
+    }
+
+    /* 53. At the deadline exactly, the same result is late: REBOOT_SKIPPED,
+     *     zero child calls. This does not depend on elapsed counters. */
+    {
+        struct mock m; enum df_outcome o;
+        mock_init(&m);
+        m.recovery_ok = 1;
+        m.recovery_at_call = 1;
+        m.recovery_advance_ms = 200; /* now == 1200 == deadline */
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_SKIPPED);
+        assert(last_published(&m) == REBOOT_SKIPPED);
+        assert(m.child_calls == 0 && m.wait_child_calls == 0);
+        assert(strstr(m.report, "too late") != NULL);
+    }
+
+    /* 54. Positive gate observed only at the second poll, but its own latency
+     * pushes the clock past the deadline: re-read after the callback rejects
+     * it with zero child calls. */
+    {
+        struct mock m; enum df_outcome o;
+        mock_init(&m);
+        m.recovery_ok = 0;        /* startup "fail\n" */
+        m.recovery_at_call = 2;   /* flips positive on the second call */
+        m.recovery_advance_ms = 300;
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_SKIPPED);
+        assert(last_published(&m) == REBOOT_SKIPPED);
+        assert(m.recovery_calls == 2);
+        assert(m.child_calls == 0 && m.wait_child_calls == 0);
+        assert(strstr(m.report, "too late") != NULL);
+    }
+
+    /* 55. Clock failure after a positive gate: uncertain evidence, no reboot. */
+    {
+        struct mock m; enum df_outcome o;
+        mock_init(&m);
+        m.recovery_ok = 1;
+        m.recovery_at_call = 1;
+        m.recovery_clock_fail = 1;
+        o = run_producer(&m, 0, 1);
+        assert(o == REBOOT_SKIPPED);
+        assert(last_published(&m) == REBOOT_SKIPPED);
+        assert(m.child_calls == 0 && m.wait_child_calls == 0);
+        assert(strstr(m.report, "clock failed after restore verification") != NULL);
+    }
+
+    /* 56. Consumer: a terminal token parsed before cleanup, but whose
+     * synchronous cleanup overruns the overall deadline, is NOT a fresh DONE.
+     * It routes to the deadline result (timeout / unknown attempt). */
+    {
+        struct mock m; enum df_outcome o = DF_OUTCOME_NONE;
+        mock_init(&m);
+        set_token(&m, ROOT_ONLY);
+        m.cleanup_consumes_ms = 1500;
+        assert(run_flow(&m, 1000, 200, 1100, &o) == TIMEOUT);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 1); /* the token was bound, but it arrived late */
+        assert(strstr(m.report, "no reboot requested") == NULL);
+    }
+
+    /* 57. status_flow_run entry clock fault: one UNBOUND cleanup, recovery
+     * marked failed, no observed outcome (unknown is not normal completion). */
+    {
+        struct mock m; enum df_outcome o = ROOT_ONLY;
+        mock_init(&m);
+        set_token(&m, ROOT_ONLY);
+        m.now_fail_from = 1;
+        m.allow_cleanup_without_status = 1;
+        assert(run_flow(&m, 1000, 100, 2000, &o) == ERR);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.read_calls == 0);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 1);
+    }
+
+    /* 58. Clock failure inside the poll loop (before any observation). */
+    {
+        struct mock m; enum df_outcome o = ROOT_ONLY;
+        mock_init(&m);
+        m.token_valid = 0;
+        m.now_fail_from = 2;
+        m.allow_cleanup_without_status = 1;
+        assert(run_flow(&m, 1000, 100, 2000, &o) == ERR);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 1);
+    }
+
+    /* 59. Guard fault (invalid nonce) still restores exactly once unbound. */
+    {
+        struct mock m; enum df_outcome o = ROOT_ONLY;
+        mock_init(&m);
+        strcpy(m.nonce, "bad");
+        m.allow_cleanup_without_status = 1;
+        assert(run_flow(&m, 1000, 100, 2000, &o) == ERR);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 1);
+    }
+
+    /* 60. NULL io guard: no clock dependency, still exactly-once cleanup. */
+    {
+        struct mock m; enum df_outcome o = ROOT_ONLY;
+        enum df_wait_result r;
+        mock_init(&m);
+        m.allow_cleanup_without_status = 1;
+        r = status_flow_run(NULL, &m, 1000, 100, 2000, m_cleanup, &o,
+                            &m.cleanup_failed_out);
+        assert(r == ERR);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 1);
+    }
+
+    /* 61. Cleanup callback <0 with no final token: timeout, recovery failure
+     * visible, no bound claim and NO assertion that async work quiesced. */
+    {
+        struct mock m; enum df_outcome o = ROOT_ONLY;
+        mock_init(&m);
+        m.token_valid = 0;
+        m.allow_cleanup_without_status = 1;
+        m.async_in_flight = 1; /* never quiesced: a timeout proves nothing */
+        m.cleanup_result = -1;
+        assert(run_flow(&m, 50, 20, 100, &o) == TIMEOUT);
+        assert(o == DF_OUTCOME_NONE);
+        assert(m.cleanup_calls == 1);
+        assert(m.bound_arg == 0);
+        assert(m.cleanup_failed_out == 1);
+        assert(m.async_in_flight == 1);
+    }
+
+    puts("status_protocol_test: all 61 cases passed");
     return 0;
 }
