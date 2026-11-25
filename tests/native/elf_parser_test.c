@@ -21,8 +21,8 @@ static const struct test_case cases[] = {
     /* Positive controls: exec-segment-derived tail and unclaimed cave. */
     { "valid-exec-tail.elf",       16, ELF_PARSE_OK,          0x320, 0x400, 0 },
     { "valid-basic.elf",           16, ELF_PARSE_OK,          0x320, 0x340, 0 },
-    /* Legit AArch64 OS-specific section types must not be rejected. */
-    { "valid-arm-exidx.elf",       16, ELF_PARSE_OK,          0x320, 0x340, 0 },
+    /* A legit Android OS-specific section type must not be rejected. */
+    { "valid-android-relr.elf",    16, ELF_PARSE_OK,          0x320, 0x340, 0 },
     { "valid-tail-unclaimed.elf",  16, ELF_PARSE_OK,          0x320, 0x340, 0 },
     /* Section headers are on another page: no global-EOF tail placement. */
     { "shdrs-other-page.elf",      16, ELF_PARSE_OK,          0x320, 0x340, 0x1000 },

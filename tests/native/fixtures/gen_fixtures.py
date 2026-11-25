@@ -38,7 +38,7 @@ HOOK_VADDR = 0x100320
 
 PT_LOAD, PF_X, PF_W, PF_R = 1, 1, 2, 4
 SHT_PROGBITS, SHT_STRTAB, SHT_RELA, SHT_DYNAMIC, SHT_DYNSYM = 1, 3, 4, 6, 11
-SHT_ARM_EXIDX, SHT_ARM_ATTRIBUTES = 0x70000001, 0x70000003
+SHT_ANDROID_RELR = 0x6fffff00
 SHF_ALLOC, SHF_WRITE, SHF_EXECINSTR = 2, 1, 4
 STB_GLOBAL, STT_FUNC = 1, 2
 
@@ -246,28 +246,21 @@ def mutate(base, kind):
     return bytes(img)
 
 
-def with_arm_section_types(base):
-    """Add legitimate AArch64 OS-specific section types to the valid base.
+def with_android_relr(base):
+    """Set one ordinary section's type to SHT_ANDROID_RELR (0x6fffff00).
 
-    Device evidence: libc++.so on a clean S23 has SHT_ARM_EXIDX sections,
-    which the strict allowlist used to reject. Only sh_type (and the
-    RELA-specific link/info/entsize fields that no longer apply) change;
-    every offset, size, address, flag and section name stays byte-identical
-    to valid-basic, so the expected layout is unchanged.
+    Device evidence: libc++.so on a clean S23 has SHT_ANDROID_RELR sections
+    (logged on-device as decimal 1879047936), which the strict allowlist used
+    to reject. Only that section's sh_type changes; every offset, size,
+    address, flag, link, info, entsize and name stays byte-identical to
+    valid-basic, so the expected layout is unchanged.
     """
     img = bytearray(base)
     shoff = struct.unpack_from("<Q", img, 40)[0]
 
-    def shdr_at(i):
-        return shoff + i * SHDR_SIZE
-
-    # shdr[5] was .rela.dyn: turn it into an ARM attributes section.
-    struct.pack_into("<I", img, shdr_at(5) + 4, SHT_ARM_ATTRIBUTES)
-    struct.pack_into("<II", img, shdr_at(5) + 40, 0, 0)      # sh_link, sh_info
-    struct.pack_into("<Q", img, shdr_at(5) + 56, 0)          # sh_entsize
-
-    # shdr[6] was .data: turn it into an ARM unwind-index section.
-    struct.pack_into("<I", img, shdr_at(6) + 4, SHT_ARM_EXIDX)
+    # shdr[6] was .data (SHT_PROGBITS, no RELA-only fields): turn it into an
+    # Android RELR section. No sh_link/sh_info/sh_entsize cleanup is needed.
+    struct.pack_into("<I", img, shoff + 6 * SHDR_SIZE + 4, SHT_ANDROID_RELR)
     return bytes(img)
 
 
@@ -278,9 +271,9 @@ def main():
         # Base layout: the exec segment end is claimed by .dynamic, so a cave
         # in the executable PT_LOAD is selected.
         "valid-basic.elf": bytes(base),
-        # Same layout as valid-basic, but with SHT_ARM_EXIDX and
-        # SHT_ARM_ATTRIBUTES sections like the target device's libc++.so.
-        "valid-arm-exidx.elf": with_arm_section_types(base),
+        # Same layout as valid-basic, but with an SHT_ANDROID_RELR section
+        # (0x6fffff00 / decimal 1879047936) like the target device's libc++.so.
+        "valid-android-relr.elf": with_android_relr(base),
         # The exec segment end is unclaimed and on the exec page: exercises
         # the exec-segment-derived tail branch.
         "valid-exec-tail.elf": bytes(build_base(tail_free=True)[0]),

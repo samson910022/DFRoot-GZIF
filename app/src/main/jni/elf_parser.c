@@ -231,8 +231,7 @@ static int section_type_ok(uint32_t t) {
     case 18: /* SHT_SYMTAB_SHNDX */
     case 0x60000001: /* SHT_ANDROID_REL  */
     case 0x60000002: /* SHT_ANDROID_RELA */
-    case 0x70000001: /* SHT_ARM_EXIDX     */
-    case 0x70000003: /* SHT_ARM_ATTRIBUTES */
+    case 0x6fffff00: /* SHT_ANDROID_RELR */
     case 0x6ffffff5: /* SHT_GNU_ATTRIBUTES */
     case 0x6ffffff6: /* SHT_GNU_HASH      */
     case 0x6ffffffd: /* SHT_GNU_verdef    */
