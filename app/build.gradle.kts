@@ -189,6 +189,11 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+            // P2-14/P2-15: the final-APK loader gate hashes these exact bytes.
+            // AGP 9.5 strips debug symbols from bundled release JNI libs by
+            // default; exempt both so they stay byte-identical to their pins.
+            keepDebugSymbols += "**/libksud.so"
+            keepDebugSymbols += "**/libksudnext.so"
         }
     }
 }

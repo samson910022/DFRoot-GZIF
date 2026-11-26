@@ -117,6 +117,12 @@ RELEASE_GATE_MARKERS = (
 RELEASE_GATE_INDEX = "apk-gate-index.tsv"
 APK_LOADER_GATE_INDEX = "apk-loader-index.tsv"
 LOADER_PINS_FILE = "loader-pins.tsv"
+# P2-15: AGP strips release JNI libs unless exempted; the two reviewed loader
+# blobs must stay byte-identical for the P2-14 final-APK loader gate to pass.
+LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS = (
+    'keepDebugSymbols += "**/libksud.so"',
+    'keepDebugSymbols += "**/libksudnext.so"',
+)
 CI_EVIDENCE_ARTIFACT_NAME = "DFRoot-CI-evidence"
 RELEASE_ARTIFACT_NAME = "DFRoot-release"
 PROVENANCE_ARTIFACT_NAME = "DFRoot-provenance"
@@ -1976,6 +1982,32 @@ def assert_smoke_identity(gradle: str, smoke: str) -> None:
         raise AssertionError("smoke script still uses the production APK name")
 
 
+def assert_loader_keep_debug_symbols(gradle: str) -> None:
+    """Check the Gradle source contract for the two reviewed loader blobs.
+
+    Both keepDebugSymbols exemptions must appear exactly once in the whole
+    file and exactly once inside ``packaging { jniLibs { ... } }``, where the
+    exemption is variant-independent.  This is a source-contract check only;
+    it is not a substitute for the tag-time final-APK byte gate that hashes
+    the extracted loader libraries.
+    """
+    block = re.search(r"packaging\s*\{\s*jniLibs\s*\{(?P<body>[^{}]*)\}\s*\}", gradle)
+    if block is None:
+        raise AssertionError("gradle is missing a packaging { jniLibs { ... } } block")
+    body = block.group("body")
+    for fragment in LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS:
+        whole_count = gradle.count(fragment)
+        if whole_count != 1:
+            raise AssertionError(
+                f"{fragment!r} must appear exactly one time in gradle, got {whole_count}"
+            )
+        block_count = body.count(fragment)
+        if block_count != 1:
+            raise AssertionError(
+                f"{fragment!r} must appear exactly one time inside packaging.jniLibs, got {block_count}"
+            )
+
+
 def assert_pr3_gates(text: str) -> None:
     """Focused assertions for the integrated PR #3 gates.
 
@@ -2483,6 +2515,11 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, gradle)
         self.assertIn("SigningSmoke-4.8-gzif-signingsmoke.apk", smoke)
+
+    def test_gradle_exempts_both_reviewed_loader_blobs_from_jni_stripping(self) -> None:
+        """Both reviewed JNI loaders stay byte-identical to their CMake pins."""
+        gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        assert_loader_keep_debug_symbols(gradle)
 
     def test_top_level_triggers_are_an_exact_allowlist(self) -> None:
         assert_exact_triggers(self.raw)
@@ -3553,6 +3590,23 @@ class MutationDetectionTests(unittest.TestCase):
             with self.subTest(mutation=label):
                 with self.assertRaises(AssertionError):
                     assert_smoke_identity(g, s)
+
+    def test_loader_keep_debug_symbols_reverts_are_rejected(self) -> None:
+        gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
+        for fragment in LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS:
+            with self.subTest(mutation=f"drop {fragment}"):
+                mutated = gradle.replace(fragment, "", 1)
+                self.assertNotEqual(mutated, gradle)
+                with self.assertRaisesRegex(AssertionError, "exactly one"):
+                    assert_loader_keep_debug_symbols(mutated)
+        typo = gradle.replace(
+            'keepDebugSymbols += "**/libksudnext.so"',
+            'keepDebugSymbols += "**/libksudnextt.so"',
+            1,
+        )
+        self.assertNotEqual(typo, gradle)
+        with self.assertRaisesRegex(AssertionError, "exactly one"):
+            assert_loader_keep_debug_symbols(typo)
 
     def test_comment_stripping_is_block_scalar_aware(self) -> None:
         sample = (
