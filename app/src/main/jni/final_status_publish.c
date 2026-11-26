@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 int df_token_is_canonical(const char *token)
@@ -21,8 +22,21 @@ int df_token_is_canonical(const char *token)
                           &outcome) == 0;
 }
 
+int df_final_visibility_ok(int canonical_token, int labeling_required,
+                           int app_context_ok, int label_applied)
+{
+    return canonical_token &&
+           (!labeling_required || (app_context_ok && label_applied));
+}
+
 int df_publish_final(const char *tmp_path, const char *final_path,
                      const char *token)
+{
+    return df_publish_final_labeled(tmp_path, final_path, token, NULL);
+}
+
+int df_publish_final_labeled(const char *tmp_path, const char *final_path,
+                             const char *token, const char *label_ctx)
 {
     size_t len, off;
     int fd;
@@ -54,6 +68,37 @@ int df_publish_final(const char *tmp_path, const char *final_path,
         close(fd);
         unlink(tmp_path);
         return -1;
+    }
+
+    /* Pin the app-readable SELinux label on the temp inode BEFORE rename(2).
+     * A label that cannot be applied must never become an unobservable token. */
+    {
+        int labeling_required = (label_ctx && *label_ctx) ? 1 : 0;
+        int label_applied = 1;
+
+        /* An explicitly empty label is a caller error, not an unlabeled
+         * publish: degrading here would recreate the unreadable-token defect. */
+        if (label_ctx && !*label_ctx) {
+            close(fd);
+            unlink(tmp_path);
+            return -1;
+        }
+        if (labeling_required &&
+            fsetxattr(fd, DF_FINAL_LABEL_ATTR, label_ctx,
+                      strlen(label_ctx), 0) < 0) {
+            printf("bootstrap: fsetxattr(%s) failed: %s\n",
+                   tmp_path, strerror(errno));
+            close(fd);
+            unlink(tmp_path);
+            return -1;
+        }
+        if (!df_final_visibility_ok(df_token_is_canonical(token),
+                                    labeling_required, labeling_required,
+                                    label_applied)) {
+            close(fd);
+            unlink(tmp_path);
+            return -1; /* never publish a token the app cannot observe */
+        }
     }
 
     for (off = 0; off < len;) {

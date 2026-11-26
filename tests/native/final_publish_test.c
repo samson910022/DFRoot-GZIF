@@ -362,6 +362,26 @@ static void test_bound_recovery_status(void)
     free(buf);
 }
 
+/* Pure visibility route: no files, no xattrs, no privileges. The app can
+ * observe the token only when it is canonical AND, if labeling was required,
+ * both a valid app context and an applied label are present. */
+static void test_visibility_route(void)
+{
+    /* No labeling required: canonicality alone decides. */
+    assert(df_final_visibility_ok(1, 0, 0, 0) == 1);
+    assert(df_final_visibility_ok(1, 0, 1, 1) == 1);
+    assert(df_final_visibility_ok(0, 0, 1, 1) == 0);
+    assert(df_final_visibility_ok(0, 0, 0, 0) == 0);
+
+    /* Labeling required: canonical, app context and applied label must all
+     * hold; a missing label blocks the route even with canonical + context. */
+    assert(df_final_visibility_ok(1, 1, 1, 1) == 1);
+    assert(df_final_visibility_ok(0, 1, 1, 1) == 0);
+    assert(df_final_visibility_ok(1, 1, 0, 1) == 0);
+    assert(df_final_visibility_ok(1, 1, 1, 0) == 0);
+    assert(df_final_visibility_ok(0, 1, 0, 0) == 0);
+}
+
 int main(void)
 {
     mode_t old_umask;
@@ -436,8 +456,10 @@ int main(void)
     test_recovery_status();
     /* 8. Bound recovery-status round-trip: stale "ok\n" is rejected. */
     test_bound_recovery_status();
+    /* 9. Pure visibility route truth table (no files, no xattrs, no root). */
+    test_visibility_route();
 
     cleanup_files();
-    puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / unbound+bound recovery checks passed");
+    puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / unbound+bound recovery / visibility-route checks passed");
     return 0;
 }
