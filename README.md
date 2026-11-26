@@ -98,7 +98,8 @@ cancel, one-shot post-winner sweep, four-slot terminal replay drops, and rare
 short caller-side `startsLock` sections. Also unchanged: signed-release job
 packaged-pin gate inherited from PR #1 policy, no in-app recovery UI,
 `BOOT_COUNT` diagnostic only, `/dev` marker-root trust, and the OPEN
-abnormal-death publication window.
+abnormal-death publication window. R8's 2026-11-27 real-device observations are
+supporting only and do NOT change any listed gate state.
 
 **Final comprehensive reviews all APPROVE at the R7 final head `020175b`** (R7 code head `57df54c`):
 the main agent runs four fresh independent reviews after this consolidation.
@@ -156,6 +157,70 @@ ordinary Android lifecycle/ANR risks: the safety gate is retained, authorization
 is never weakened, and uncertainty about foreground ownership never leads to
 continued work. R2-14 and R2-16 remain **OPEN** safety gates; R2-24 is untouched.
 No device/ADB/payload/privileged work was done.
+
+## Eighth documentation round (R8) — supporting device evidence and honest limitations (2026-11-27)
+
+**Verdict unchanged: REQUEST CHANGES / keep PR #2 draft/open.** Re-review 8 is a
+status recheck of the identical reviewed head `be9201c`, not a fresh line-by-line
+review and not new verification or a freshly executed test suite. **19/24 findings
+addressed in the reviewed scope; five open/linked, corresponding to three
+substantive OPEN gates: R2-14, R2-16 and R2-18.** R2-02 and R2-07 remain linked
+to the relevant existing gates only; R2-17 and R2-24 remain closed in the
+previously reviewed scope. No new finding IDs were assigned. The reviewer's
+instruction stands: do not expand the implementation merely to generate more
+review iterations, and a re-review of an identical revision is not new
+verification.
+
+The non-blocking housekeeping item was applied on the GitHub side to the PR
+description: the stale `signing.properties` / "base CI fails" claim was removed
+and replaced with the actual outstanding limitations. No code, head change or
+repository file was involved in that correction.
+
+### Real-device observations (2026-11-27) — SUPPORTING ONLY
+
+Every item below is a real-device observation on the exact reviewed build and is
+explicitly **SUPPORTING ONLY**; none closes a gate, proves device safety, or
+endorses merge or release.
+
+- **SUPPORTING ONLY — baseline:** full exploit chain on S23 Ultra SM-S9180 /
+  `S9180ZHU8GZIF` at the exact reviewed build — preflight fallback, `hook armed
+  (/dev/df)`, module bootstrap/SU daemon, and verified restore of all four
+  patched files. `su -c id` → `uid=0(root)`, `su -v` → `3.4.2:KernelSU`; honest
+  final `ROOT_ONLY — no reboot requested; root not verified` with rc=0; no
+  FATAL, no ANR. **Non-claim:** this is not device safety and not release
+  approval.
+- **SUPPORTING ONLY — R2-14 abnormal death:** force-stop mid-run (during
+  patching) produced no fabricated success on relaunch — the output view was
+  empty and the button stayed disabled. **Non-claim:** the precise
+  rc7-publish↔acknowledgement race was not instrumented or proved; the gate
+  stays OPEN.
+- **SUPPORTING ONLY — R2-16 OFF authorization:** disabling the manager made the
+  `LAUNCH ROOT` button disabled; Start-at-Boot status read
+  `Status unavailable - not confirmed disabled` and failed closed.
+  **Non-claim:** the precise non-atomic OFF window during the final
+  authorization read was NOT hit; the gate stays OPEN.
+- **SUPPORTING ONLY — R2-18 duplicates/traffic:** three rapid taps produced one
+  `hook armed` (count 1) — no second admitted run — with no FATAL/ANR and the
+  device responsive. **Non-claim:** this is no ANR proof and no
+  foreground-service-deadline proof; the gate stays OPEN.
+- **SUPPORTING ONLY — soft reboot:** with Auto Soft Reboot enabled the native
+  result went `REBOOT_PENDING` → `REBOOT_SKIPPED (late-load not confirmed
+  absent)` at rc=5; uptime rose continuously and never reset, so no soft or
+  hard reboot occurred. **Non-claim:** the experimental hard-reboot risk is NOT
+  removed; one observed fail-closed skip is not exhaustive over every
+  interleaving.
+
+Also **SUPPORTING ONLY:** reboot after the interrupted run left `su` absent and
+`/dev/df` absent, confirming volatile root — not a claim about any gate state or
+device safety.
+
+**Narrow constraint.** Earlier rounds had no device/ADB work allowed; the owner
+explicitly authorized FULL device testing (including soft-reboot/crash) for
+evidence in R8 only. There was no payload rebuild, APK assembly, privileged
+container, or PCK/guard change; the installed APK was unchanged. This round is
+documentation only: no code changes and no gate closure. Green host CI run
+`45787525701` is host-only evidence and is not device evidence. Keep PR #2
+draft/open.
 
 ## Sixth repair round (R6.1–R6.4) — consolidated summary (2026-11-26)
 
