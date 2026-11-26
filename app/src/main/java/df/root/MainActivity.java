@@ -6,6 +6,9 @@
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): reconcile an owned request outcome from the replayable ledger on start; read-only, no replay or privileged effect. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.1): add a bounded, lifecycle-scoped read-only outcome watch so a visible Activity reconciles its own outcome without a best-effort notification; unconfirmed stays uncertified. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R7.2): take exactly ONE ledger observation per watch tick so reconciliation and the final-tick unconfirmed decision cannot disagree; host-only deterministic lookup seam, no replay or durable change. See NOTICE.
+// Modified 2026-11-25 (PR #3 phase 3): integrity listener is UI-only and
+// lifecycle-scoped; the recovery-failed warning is additive to honest messages.
+// See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -108,11 +111,18 @@ public class MainActivity extends Activity {
     private String mOutcomeWatchRequestId;
     private String mUnconfirmedReportedRequestId;
     private boolean mOutcomeWatchVisible;
+    // Master: application context and lifecycle-scoped integrity listener.
+    // UI-only: never an authorization oracle.
+    private Context mAppContext;
+    private PreferenceIntegrity.Listener mIntegrityListener;
+    private final Handler mMain = new Handler(Looper.getMainLooper());
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mAppContext = getApplicationContext();
         mDeCtx = createDeviceProtectedStorageContext();
+        PreferenceIntegrity.init(mDeCtx);
         setContentView(R.layout.activity_main);
 
         getActionBar().setSubtitle("@diabl0w github/xda");
@@ -166,6 +176,9 @@ public class MainActivity extends Activity {
                     return;
                 }
                 mConfiguration.setManagerPackage(e.packageName);
+        // Master: durable quarantine latch. PR #2's ConfigurationRepository
+        // remains the only writer; the latch can only block UI writes/launches.
+        PreferenceIntegrity.init(mDeCtx);
             }
 
             @Override
@@ -186,6 +199,12 @@ public class MainActivity extends Activity {
         super.onStart();
         mConfiguration.addListener(mConfigurationListener);
         mCoordinator.addListener(mCoordinatorListener);
+        if (mIntegrityListener == null) {
+            mIntegrityListener = () -> mMain.post(() -> {
+                if (!mDestroyed) updateRunButton();
+            });
+        }
+        PreferenceIntegrity.addListener(mIntegrityListener);
         renderConfirmedConfiguration();
         renderRunSnapshot(mCoordinator.getSnapshot());
         // The listener was removed in onStop(): an outcome delivered while this
@@ -329,6 +348,9 @@ public class MainActivity extends Activity {
         cancelOutcomeWatch();
         mConfiguration.removeListener(mConfigurationListener);
         mCoordinator.removeListener(mCoordinatorListener);
+        if (mIntegrityListener != null) {
+            PreferenceIntegrity.removeListener(mIntegrityListener);
+        }
         super.onStop();
     }
 
@@ -359,7 +381,8 @@ public class MainActivity extends Activity {
     }
 
     private void requestManualRun() {
-        if (mDestroyed || mManualStartPending || !areControlsWritable()) {
+        if (mDestroyed || mManualStartPending || !areControlsWritable()
+                || PreferenceIntegrity.isQuarantined()) {
             return;
         }
         // Read one immutable snapshot for both eligibility and the generation bind.
@@ -565,7 +588,13 @@ public class MainActivity extends Activity {
             return;
         }
         sLastResultToastOperationId = snapshot.getOperationId();
-        Toast.makeText(this, ResultMessages.message(snapshot.getResult()), Toast.LENGTH_LONG).show();
+        String message = ResultMessages.message(snapshot.getResult());
+        // Master: a failed restore must be visible for EVERY code. Additive only;
+        // the typed PR #2 message never claims root or reboot was verified.
+        if (StatusRc.recoveryFailed(snapshot.getResult().getCode())) {
+            message += " WARNING: restore/recovery verification failed - do not trust this result";
+        }
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private void updateRunButton() {

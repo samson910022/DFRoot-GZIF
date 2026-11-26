@@ -16,6 +16,20 @@
         android:title="Start at Boot"
         android:summary="Automatically run DFRoot on device boot" />
 
+    <!-- Round-6: persistent, non-selectable status row. Its summary is rewritten
+         from every fresh observation; "Status unavailable" is the honest default. -->
+    <Preference
+        android:key="boot_status"
+        android:title="Start at Boot status"
+        android:summary="Status unavailable"
+        android:selectable="false" />
+
+    <!-- Explicit, always-available safe OFF action. Never enables anything. -->
+    <Preference
+        android:key="boot_disable"
+        android:title="Disable automatic startup"
+        android:summary="Explicitly turn automatic startup OFF. Safe to use even when status cannot be read; nothing is ever turned ON by this action." />
+
     <SwitchPreference
         android:key="soft_reboot"
         android:title="Auto Soft Reboot"

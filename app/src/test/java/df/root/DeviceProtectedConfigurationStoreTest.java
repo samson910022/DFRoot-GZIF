@@ -18,6 +18,9 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 32)
 public class DeviceProtectedConfigurationStoreTest {
@@ -25,9 +28,14 @@ public class DeviceProtectedConfigurationStoreTest {
     private Context deContext;
     private SharedPreferences cePreferences;
     private SharedPreferences dePreferences;
+    private Path marker;
 
     @Before
-    public void clearPreferences() {
+    public void clearPreferences() throws Exception {
+        marker = Files.createTempFile("dfroot-device-integrity", ".marker");
+        Files.deleteIfExists(marker);
+        PreferenceIntegrity.resetForTest();
+        PreferenceIntegrity.init(marker.toFile());
         context = RuntimeEnvironment.getApplication();
         deContext = context.createDeviceProtectedStorageContext();
         cePreferences = context.getSharedPreferences(ConfigurationKeys.PREFS_NAME, Context.MODE_PRIVATE);
@@ -38,8 +46,10 @@ public class DeviceProtectedConfigurationStoreTest {
     }
 
     @After
-    public void resetRepository() {
+    public void resetRepository() throws Exception {
         ConfigurationRepository.resetForTesting();
+        PreferenceIntegrity.resetForTest();
+        Files.deleteIfExists(marker);
     }
 
     @Test

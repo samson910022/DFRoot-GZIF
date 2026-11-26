@@ -1,6 +1,611 @@
 # Changelog — DFRoot GZIF
 
-## 2026-11-27 — Eighth documentation round (R8) — PR description correction and supporting device evidence
+## Round 13 / P2-17 (2026-11-27) — final-status observability moved to Android property `dfroot.final` (device retest passed for the final-status-observability scope only)
+
+**Head model.** This section is authoritative for the **committed literal head `e823fb4`** on `fix/native-exploit-robustness` — commit `fix(native): publish final status via app-readable property`, which landed the D2 native property channel **and the round-13 documentation in ONE commit**. Its immediate parent is `d39a278` (historical); the earlier device retest recorded below was run on the **pre-commit working tree on `d39a278`**. PR #3 base is `9f60e16251f5856ee1ae720eaea84b41d7992920` and the CI merge SHA for the exact-head run is `69054f5be1a278d88c19164444a7590e3c5bc2c0`. The round-12 documentation head is `39a376f`; earlier code heads are `376f5e2` (P2-16), `7e18b13` (P2-15), `0ea022f` (Phase B / P2-14) and `36a11bc` (round-8 reviewed). `0f9bf69` is a reverted historical attempt (below); `d39a278` is its revert. All earlier sections are historical; round-10 totals (0 new / 0 P2 / 3 P1) and the round-11/round-12 totals are **not retroactively changed**. **Independent-review accounting (R11, comment 7126155178): 29 IDs, 23 closed, 4 open (3 P1 + 1 P2) and 2 author-reported addressed / pending independent validation.** The author changelog rounds 11–13 are **not** independent review rounds R1–R11; P2-15, P2-16 and P2-17 are **author-reported, not discovered by R10**, and remain pending independent validation.
+
+### Finding — final token published, but not observable by the app domain
+
+Evidence at `/mnt/240G_SSD/opencode_tmp/s23-final/` (`selinux-diag5.txt`, `poll-root-final5.txt`, `app-result6.txt`, `logcat6.txt`): a root shell could read `/dev/dffinal` on time with the correct nonce-bound token (`dfroot-v2:2f79eed61a9de68855bc189ed8f810a1:root_only`, mtime `2026-11-26 23:49:06.861999960 +0800`, 53 B), and the restore chain was healthy, but the app never observed it — every run ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed`. `selinux-diag5.txt` identifies the cause: `/dev/dffinal` was labeled `u:object_r:device:s0`, which the app domain cannot read. The token format, nonce binding and publication were correct; the **channel** was not app-observable.
+
+### Historical failed attempt 1 (`0f9bf69`, reverted at `d39a278`)
+
+The first attempt relabeled `/dev/dffinal` with `fsetxattr`, copying the `app_data_file` label of `dfinv` (`label-diag6.txt` shows `dfinv` = `u:object_r:app_data_file:s0:c100,c258,c512,c768`). The relabel was **denied**; `/dev/dffinal` was **never created**, and the bootfail fallback did not yield a readable token either (`faildiag6.txt`: empty app-owned `dfbootfail`, no `/dev/dffail`, no `/dev/dffinal`). That commit was reverted at `d39a278`. It is recorded **only as a historical failed attempt** — not the current design, and not claimed to work.
+
+### D1 pre-flight (eliminated; zero code)
+
+A root-side pre-flight probe (`p2-17-preflight/d1-probe.txt`) tried to create a file in the `/data` root as root and got `can't create /data/dfroot-preflight.tmp: Permission denied`; the follow-up app-uid probe could not rely on that path. The "publish to a file in the `/data` root" direction was therefore **eliminated without any code change**.
+
+### D2 design (committed at `e823fb4`; parent `d39a278` historical)
+
+The single authoritative final status is now a **non-persistent Android property `dfroot.final`**: root/bootstrap sets it and the app reads it. Its property context is `u:object_r:default_prop:s0` (`channel-probe7c.txt`); an unprivileged `setprop` was **denied** (`channel-probe7b.txt`: `setprop rc=1`, property empty) while an unprivileged shell could **read** a root-set property (`channel-probe7.txt`: `prop=[ROOTONLY]`). The canonical token, 128-bit run-nonce binding and strict parse are **unchanged**, and publication failure still fails closed. **`/dev/dffinal` is no longer produced** and is no longer the authoritative app-observable channel; device diagnostics for the final status now use `dfroot.final`. This design is **committed at the literal head `e823fb4`** (D2 native property channel + round-13 docs in ONE commit); its parent `d39a278` is historical. Independent review and full-chain device validation remain pending.
+
+### Earlier author-local device retest (pre-commit working tree on `d39a278`; PASSED for the final-status-observability scope only) — S23, 2026-11-27
+
+APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`, installed with a **disposable local test key** — no tag, no publish, no official signing claim. This run predates the `e823fb4` commit; its raw logs and APK were not independently inspected. Evidence: `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`).
+
+Decisive lines:
+
+- `app-result8b.txt`: `final: ROOT_ONLY - no reboot requested; root not verified`, then `status: final status observed (rc=0)`; no `unbound observation` and no rc=2 timeout.
+- `root-probes8b.txt`: `prop=[dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only]`, `3.4.2:KernelSU`, `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, `selinux=Enforcing`.
+- `app-result8b.txt`: all four restores `restore OK (verified)` — both `libbase.so` writes, `/vendor/lib64/AIAwbModel_v2.2.tflite` and `/apex/com.android.runtime/bin/crash_dump64` — with the helper patch re-established (verified) at cleanup, and **no recovery-failed bit (64)**. The P2-16 restore scope is therefore still green on this retest.
+
+`post-reboot8.txt` records `adb: device <device serial redacted> not found` after reboot: the S23 did **not** reconnect for a post-reboot state probe, so no post-reboot absence or cleanliness claim is made for this run.
+
+### Counts, scopes and disposition
+
+All counts are **unchanged**: workflow policy **92**, `status_protocol` **61**, helper-size **30**, six CMake suites **23 / 25 / 3 / 7 / 6 / 16**, native **61** status / **13** proc-scan / **28** ELF / **16+14+10** version / **40** loader-stage, JVM **39**, markers **7/7** host + **3/3** release. `final_publish` gains an **unnumbered pure truth-table test**; no numbered case count changes. The helper-size **30** figure is **author-reported**; exact-head CI is run **45864085866** (below).
+
+- The rc=0 is a **scoped confirmation of final-status observability only** (`dfroot.final` readable by the app, correct nonce-bound `root_only` token, rc=0); it is **not** a full-chain validation and is not proof of root usability, quiescence, loader correctness or release readiness.
+- **P1-02, P1-07 and P1-08 remain OPEN.** P1-02's invocation-identity concern is not closed by observing a final-status token.
+- **The PR as a whole is not device-verified, not independently merge-ready and not release-ready.** No tag was created, nothing was published, and no official signing claim is made; the APK used a disposable local test key. **Auto Soft Reboot and Start on Boot remain disabled by default and unvalidated.**
+- P2-13/P2-14/P2-15/P2-16 dispositions are unchanged from earlier rounds (addressed, pending final comprehensive review; the P2-16 restore scope was device-confirmed in round 12 and again here).
+
+### Exact-head CI (committed head `e823fb4`) — run 45864085866, host-only
+
+**Exact-head CI: run 45864085866** — `pull_request` event, head `e823fb4` (PR #3 base `9f60e16251f5856ee1ae720eaea84b41d7992920`, CI merge SHA `69054f5be1a278d88c19164444a7590e3c5bc2c0`), **completed** with conclusion **`success`**. All host gates passed: Fast CI (**92** workflow-policy, **36** Make, **40** signing), Host evidence gates (**61** `status_protocol`, **13** proc-scan, **28** ELF, **40** loader-stage, six CMake suites **23 / 25 / 3 / 7 / 6 / 16**, **7/7** markers), CI DFRoot evidence gates, LKM **1/1**, and JUnit **39/0/0/0**. The helper-size **30** case count is **author-reported** — CI prints `pass` for that suite, not a case count. **The signed release APK and Publish GitHub Release jobs were SKIPPED; no DFRoot APK was uploaded.** Earlier runs (**45708004129** @ `0ea022f`, **45710535038** @ `74b12df`, **45706111735**, **45702366070**, **45697296267**) remain **explicitly earlier heads**. **This CI is host-only and does NOT verify any device result.**
+
+### Second author-local full run at the committed head `e823fb4` (S23, 2026-11-27, after the R11 snapshot) — SCOPED AUTHOR-LOCAL EVIDENCE, NOT independent validation
+
+APK sha256 `f866b4388f9f4c9e365dbf2936a9b076eab14b6ad2f2b4e9ea3e642080758807`, built at the **committed head `e823fb4`** with a **disposable local test key** — no tag, no publish. Evidence: `/mnt/240G_SSD/opencode_tmp/s23-final/` (`pre9.txt`, `app-result9.txt`, `root-probes9.txt`, `root-stability9.txt`, `logcat9.txt`, `apk9-sha256.txt`).
+
+- `pre9.txt`: clean state **after reconnection** — SELinux **Enforcing**, no `su`, no `/dev/df`, no `/dev/dffinal`, no `ksud`, `dfroot.final` empty, vendor file **529568 B** / mtime **2022-01-01**.
+- `app-result9.txt`: helper patch re-established; all four restores `restore OK (verified)` (both `libbase.so` writes, `/vendor/lib64/AIAwbModel_v2.2.tflite`, `/apex/com.android.runtime/bin/crash_dump64`), **no bit 64**; `final: ROOT_ONLY - no reboot requested; root not verified` then `status: final status observed (rc=0)`.
+- `root-probes9.txt`: nonce `fdeb49b6704ae77bdd4648bbabfb9d69`, `su -v` = `3.4.2:KernelSU`, context `u:r:ksu:s0`, SELinux **Enforcing**.
+- `root-stability9.txt`: after **30 s** root and property unchanged, `ksud` = 0, pstore empty.
+
+**Limits:** this is **SCOPED AUTHOR-LOCAL EVIDENCE, NOT independent validation**; the raw logs and APK were not independently inspected. **No reboot was requested**, so there is **no post-reboot evidence** from this run; it **does not supersede** the `post-reboot8.txt` caveat above. Counts are unchanged (policy 92; helper-size 30 author-reported; six CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3). **P1-02 / P1-07 / P1-08 remain OPEN**; the PR as a whole is **not independently device-verified, not merge-ready and not release-ready**.
+
+## Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (device retest passed for the restore scope; rc=2 timeout separate and OPEN)
+
+> **Historical section.** The round-13 section above is authoritative for the committed head `e823fb4` and the current validation boundary; this section describes the round-12 documentation head `39a376f` and the P2-16 code head `376f5e2` only.
+
+This section is historical: it describes the round-12 documentation head
+`39a376f` and the P2-16 code head `376f5e2`; the round-13 section above is
+authoritative for the committed head `e823fb4` and the current validation
+boundary. The round-12 docs commit's immediate parent is
+`7a855c51c8c48e4882a0c715164898ad0bcfd272`, and the
+**code head** remains `376f5e277713c1008386624f85ef74f200f14f2c` (Phase 1 native
+fix `fix(native): re-arm crash_dump64 helper patch during cleanup`); that code
+head's own immediate parent is `0f0a2ad4b8546b07b8ec0e82a88e84449d03a7ed`, the
+**pre-fix device-run head**. The P2-15 fix code head is `7e18b13`, the Phase B /
+P2-14 code head is `0ea022f` and the round-8 reviewed head was `36a11bc`; none
+of these is the current literal head. The round-11 section below is historical
+for `7e18b13` and round 8 for the Phase B code head `0ea022f`; all earlier
+sections are historical. Round-10 totals (**0 new findings, 0 P2 open, 3 P1 open**) and
+round-11 totals are **not retroactively changed**.
+
+### Two S23 device attempts at the pre-fix head (`0f0a2ad`)
+
+Two runs on 2026-11-26 at the pre-fix head `0f0a2ad` reached a full root chain
+but **FAILED** the vendor-file restore. Evidence is archived at
+`/mnt/240G_SSD/opencode_tmp/s23-final/`; these are **attempts, not validations
+of any head**.
+
+| Observation | Run 1 (`logcat.txt`, `root-probes.txt`, `post-reboot.txt`, `vendor-before-reboot.txt`) | Run 2 (`logcat2.txt`, `app-result2.txt`, `root-probes2.txt`, `post-reboot2.txt`, `poll-crashdump.txt`) |
+|---|---|---|
+| Root chain | Full chain succeeded | Full chain succeeded |
+| Oracle | `su -v` = `3.4.2:KernelSU`; `su -c id` = `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`; SELinux **Enforcing**; KSU Next daemon + modules loaded | same root identity (`root-probes2.txt`; `logcat2.txt` `KernelSU Next` ksud + `/data/adb/modules/*/service.sh`); Enforcing observed post-reboot in `post-reboot2.txt` |
+| Panic evidence | none | none |
+| Vendor restore | `restore FAILED for /vendor/lib64/AIAwbModel_v2.2.tflite`; `read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0 (Success): short read` (`logcat.txt:4405-4406`) | identical (`app-result2.txt`; `logcat2.txt:13004`) |
+| App result | rc **66** = 2 (unknown) + 64 recovery-failed bit; `timeout waiting for final status` | same (`app-result2.txt`) |
+| Reboot | clean reboot, SELinux Enforcing, no `/dev/df`, no `/dev/dffinal`, no `ksud` (`post-reboot.txt`) | clean reboot, same absence checks; vendor file still 529568 B, mtime 2022-01-01 (`post-reboot2.txt`); `poll-crashdump.txt` (Run 2 only) shows only the ELF magic `7f 45 4c 46` in the first 16 bytes |
+
+### Decisive logcat and root-cause conclusion
+
+In `logcat2.txt`, `patch: crash_dump64 <- splicehelper (1408 bytes)` and
+`patched 1408 bytes to …/crash_dump64+0x0` at **19:58:38** (lines 2424–2425)
+show the splice writes and the capture path worked; the vendor write also
+succeeded at 19:58:39 (`patched 13504 bytes to
+/vendor/lib64/AIAwbModel_v2.2.tflite+0x0`, line 2532). At **19:58:40** bootstrap
+set partitions ro and started the SU daemon (lines 2611–2612). At **19:59:49**
+cleanup logged
+`F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected 6)`
+(line 12995) immediately before the 0-byte `read_vendor_splice` (line 13004)
+and `cleanup failure: setting recovery-failed bit (64) on rc 2` (line 13038).
+
+**Conclusion:** the page-cache-only splicehelper patch was gone by cleanup
+time, so the **original** `crash_dump64` ran during the vendor-backed restore
+(it received 3 arguments instead of the 6 the patched helper expects) and the
+vendor read returned 0 bytes. **The exact mechanism of that discard is NOT
+proven here** — do not claim a specific cause (page eviction, re-exec from
+disk, page invalidation, etc.). Run 1 shows the same 0-byte read and `wrong
+number of args` signature (`logcat.txt:4399,4405`), so the two attempts are
+consistent. The Phase 1 commit message states the discard causally; per the
+caveat above that phrasing is **provisional** and is not a proven mechanism.
+
+### Fix (Phase 1, `376f5e2`)
+
+- Added a pure `df_helper_block_matches()` predicate above the
+  `DF_HELPER_TEST_ONLY` boundary, with a host test for it.
+- `ensure_helper_patch()` is now called at the **start of `cleanup()`**, before
+  any helper-backed restore, re-applying the same patched helper with the same
+  verification as the initial patch. There is **no second restore record**.
+  On failure the outcome is still **fail-closed**: the remaining restores are
+  attempted and reported truthfully, but the recovery-failed bit (64) is set
+  on the final rc; the restore is not silently reported as successful.
+- Helper-size host suite goes **7 → 30 cases**. No pin, workflow,
+  `.github/workflows/build.yml`, CMake, marker-count or other native-source
+  change.
+
+### Counts (all other counts unchanged)
+
+Policy **92**; six CMake suites **23 / 25 / 3 / 7 / 6 / 16**; native **61**
+status cases plus `final_publish`, **13** proc-scan, **28** ELF, **16 + 14 +
+10** version, **40** loader-stage; helper-size **30** cases (was 7); JVM **39**;
+markers **7/7** host + **3/3** release. No new CI run number is claimed for
+`376f5e2`.
+
+### Device retest (pass for P2-16 scope) — S23, 2026-11-26
+
+A retest of an APK built from the **code head `376f5e2`** was run on the S23.
+The APK sha256 is
+`bd8a17836effcac027b719b61bff0abfea4b309289e47c4d6d9732947e0bcbd9`; it was
+installed with a **disposable local test key** — no tag, no publish and no
+official signing claim. Evidence is archived at
+`/mnt/240G_SSD/opencode_tmp/s23-final/` (`pre3.txt`, `logcat3.txt`,
+`logcat3-key.txt`, `root-probes3.txt`, `app-result3.txt`, `post-reboot3.txt`).
+
+**Preconditions (`pre3.txt`, clean):** SELinux **Enforcing**; no `su`; no
+`/dev/df`; no `/dev/dffinal`; no `ksud`; `persist.log.tag` empty; vendor file
+size **529568** B, mtime **2022-01-01**.
+
+**Run at 15:20:48Z (device-local 23:20:48):** full root chain — `su -v` =
+`3.4.2:KernelSU`, `su -c id` =
+`uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, SELinux
+**Enforcing** (`root-probes3.txt`, `logcat3.txt`). Decisive `logcat3` lines:
+
+- **23:21:59.947** `cleanup: crash_dump64 helper patch missing; re-applying`
+- **23:21:59.956** `cleanup: crash_dump64 helper patch re-established (verified)`
+- **23:21:59.958 / .959** `restore OK (verified) for /system/lib64/libbase.so` (both writes)
+- **23:22:01.570** `restore OK (verified) for /vendor/lib64/AIAwbModel_v2.2.tflite`
+- **23:22:01.578** `restore OK (verified) for /apex/com.android.runtime/bin/crash_dump64`
+
+Counts in `logcat3.txt`: `wrong number of args` **0**, `got 0 bytes` **0**,
+`restore FAILED` **0**, `recovery-failed bit` **0**, `helper patch
+re-established` **1**, vendor `restore OK` **1**. The final rc therefore has
+**no bit 64**. This closes the P2-16 restore defect **on device**: the pre-fix
+`got 0 bytes` / `wrong number of args` / rc **66** signature did not recur, and
+the vendor and crash_dump64 restores are verified OK.
+
+**Separate, pre-existing OPEN item.** The run **still** ended with
+`status: timeout waiting for final status (rc=2)` and
+`cleanup: unbound observation; recovery gate stays closed`; `/dev/dffinal`
+was absent. This same rc=2 / unbound-observation outcome was present in both
+pre-fix attempts, so it is **not caused by P2-16**. It remains a **separate
+OPEN item**. Consequently **P1-02** (actual invocation identity) remains OPEN;
+**P1-07** restore verification is now device-confirmed, but quiescence and
+failure-interruption remain unproven, so **P1-07 stays OPEN**; **P1-08 stays
+OPEN**.
+
+**Post-reboot (15:23:08Z, `post-reboot3.txt`):** SELinux Enforcing, uptime
+**62.73**, no `su`, all checked `/dev/df*` paths and `ksud` absent, vendor size/mtime
+unchanged (529568 B, 2022-01-01); the S23 remained connected. No panic evidence
+(pstore empty).
+
+**Counts and CI:** all counts are unchanged — policy **92**, helper-size **30**,
+six CMake suites **23 / 25 / 3 / 7 / 6 / 16**, native **61** status +
+`final_publish`, 13 proc-scan, 28 ELF, 16+14+10 version, 40 loader-stage, JVM
+**39**, markers **7/7** host + **3/3** release. **No new CI run number** is
+claimed for `376f5e2`. The APK used a disposable local test key; no tag was
+created, nothing was published and the release job remains unexecuted.
+
+### Limits and disposition
+
+- **Device retest passed for the P2-16 restore scope** (code head `376f5e2`,
+  S23, subsection above): the restore defect is **closed on device** — no bit
+  64, verified vendor/crash_dump64 restores. This is a **scoped** pass only.
+- **A separate rc=2 timeout / unbound-observation item remains OPEN** (also
+  present in the two pre-fix attempts, not caused by P2-16). No `/dev/dffinal`
+  final-status publication was observed.
+- **P1-02, P1-07 and P1-08 remain OPEN.** P1-07 restore verification is now
+  device-confirmed, but quiescence and failure-interruption remain unproven.
+  P2-13/P2-14/P2-15 are unchanged from the round-8/10/11 ledgers.
+- **The PR as a whole is not device-verified, not independently merge-ready
+  and not release-ready**; no device, merge or release claim for the whole PR.
+  No tag was created, nothing was published, and no completed-green CI
+  conclusion is claimed for `376f5e2`. **Auto Soft Reboot and Start on Boot
+  remain disabled by default and unvalidated.**
+
+## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
+
+This section is historical: it describes head
+`7e18b138090abfd6c0af5cc02cb031938e6ace2a` (Phase 1 fix
+`fix(app): preserve reviewed loader bytes in release APK`); the round-13
+section above is authoritative for the committed head `e823fb4` and the
+current validation boundary. Round 12 (`376f5e2`) is likewise historical. Its immediate
+parent is the docs commit `74b12df` (`docs: refresh round-8 validation ledger
+and evidence scope`). The **Phase B / P2-14 code head** remains `0ea022f`
+(`fix(ci): verify loader bytes inside every distributable APK`), and the
+round-8 reviewed head was `36a11bc`; neither is the current literal head. The round-8
+section below is historical for the Phase B code head `0ea022f`; all
+earlier sections are historical.
+
+**Round-10 scope (not retroactively changed).** The consolidated round-10
+review comment **7126155178** at head `74b12df` reported **0 new findings,
+0 P2 open and 3 P1 open (P1-02 / P1-07 / P1-08)**, left the head unchanged and
+completed CI run **45710535038** with `success`. **P2-15 was NOT found by that
+review**; it was found by an author-local release build. Non-tag CI builds run
+the Debug variant only, and the tagged release job remained unexecuted, so CI
+never exercised the affected packaging path. Round-10 totals above are not
+revised here. **P2-16 and P2-17 were likewise NOT found by that review** — both
+are author-reported and **pending independent validation** — and the author
+changelog rounds 11–13 are **not** independent review rounds R1–R11 (the R11
+review accounting at comment 7126155178 is 29 IDs, 23 closed, 4 open — 3 P1 +
+1 P2 — and 2 author-reported addressed / pending independent validation).
+
+### Defect — bundled loader bytes changed in the release APK
+
+| Artifact | Reviewed / pinned bytes (`jniLibs` and CMake pins) | Bundled in release APK built from `74b12df` (before fix) | Release rebuild at `7e18b13` after fix (local test key) |
+|---|---|---|---|
+| `libksud.so` | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` — 5,127,584 B | `ecac0d2b1e5930bf69d887eaf4d9fbdc630da524457cb3025d1166d9ac37b7f5` — 3,737,888 B | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` — 5,127,584 B |
+| `libksudnext.so` | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` — 4,728,320 B | `ea0505cd25692f83de17fe2c3a2fcab237050128f84dcd0b68cf9f3705284f40` — 4,728,320 B | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` — 4,728,320 B |
+
+The second loader is the trap: its defective size is **identical** to the
+reviewed size, so only the SHA-256 distinguishes it. **Cause:** AGP 9.5 strips
+debug symbols from bundled release JNI libraries by default. The committed
+inputs and their build-time loader gate stayed correct, but the bytes packaged
+into a release APK did not; only a local release build exposed this because
+non-tag CI is Debug-only and the release job was never run.
+
+### Fix (Phase 1, `7e18b13`) and host verification
+
+- `app/build.gradle.kts` `packaging.jniLibs` now sets
+  `keepDebugSymbols += "**/libksud.so"` and `keepDebugSymbols += "**/libksudnext.so"`
+  so packaged release bytes remain the reviewed bytes.
+- A regression helper plus positive and mutation tests were added in
+  `tests/workflow/test_policy.py`; the workflow policy suite count goes
+  **90 → 92** (it was 90 at rounds 8–10 and 85 earlier). No KO/loader pin,
+  `.github/workflows/build.yml`, CMake, native source or marker-count change:
+  native 61 status + `final_publish`, 13 proc, 28 ELF, 16+14+10 version,
+  40 loader-stage and helper-size; six CMake suites **23 / 25 / 3 / 7 / 6 / 16**;
+  JVM 39; **7/7** host and **3/3** release markers are unchanged.
+- Host verification (evidence archived at
+  `/mnt/240G_SSD/opencode_tmp/p2-15-evidence`): a clean
+  `:app:clean :app:assembleRelease` with a **disposable local test key**
+  (`/home/samson1357924/dfroot-device-test.jks`; KO sha256
+  `94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7`)
+  produced `DFRoot_4.8-gzif.apk` sha256
+  `33c3742dc777f82a9e8f0b61ca1054b198ba9c75ec22b3503125cd184005fec9`.
+  Each loader entry occurs **exactly once** in the APK; extracted bytes are
+  `731c3fa1…` / 5,127,584 B and `7f28f1fb…` / 4,728,320 B. The real
+  `verify_loader_hashes.cmake` manifest status is `verified`, and the **verbatim**
+  P2-14 gate script from `build.yml` (`Verify bundled loader bytes in every
+  distributable APK`) passed with the pins file and one index row (APK name +
+  APK sha256 + both loader sha256 values). The key was never tagged, uploaded
+  or published and is not official signing material.
+
+**Limits.** This is **host-only packaging evidence**: **not a signed release**
+(the APK used a disposable local test key, not release signing material), no
+tag was created, nothing was uploaded or published, no device validation was
+performed, and the release job remains unexecuted. No completed-green CI
+conclusion is claimed for the literal head: a run had started but not concluded
+when this ledger was written.
+
+### Disposition
+
+- **P2-15 is addressed in Phase 1 (`7e18b13`), pending final comprehensive
+  review** — not claimed finally closed here.
+- **P1-02, P1-07 and P1-08 remain OPEN** (the three P1 items still open in the
+  round-10 review).
+- **P2-13 and P2-14 are unchanged** from the round-8/10 ledger (addressed in
+  Phase A/B, pending final comprehensive review).
+- No device, merge or release claim: this head is **not device-verified, not
+  independently merge-ready and not release-ready**; no tag, no publish and no
+  release claim.
+
+## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; post-review hardening; gate still OPEN
+
+This section is authoritative for the **Phase B code head** of
+`fix/native-exploit-robustness` (`0ea022fd4dac054ad37e1cf0809e56a8604eaaba`,
+Phase B), not for the literal head (round 11 above). The round-8 review covered head `36a11bc`; two increments landed
+after that review: `0832331` (`fix(cmake): invalidate loader evidence before
+argument validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes
+inside every distributable APK`, Phase B). The producer change `2b59684` and
+loader integration `413a5cb` are earlier/mid-increment points, **not** the
+head. Every earlier section, including round 6, is **historical** and
+describes earlier heads only. All evidence in this section is **host-only**;
+there was no device run, no tag and no release.
+
+### Root-owned staging contract and rebuilt loaders
+
+P1-08 was the `/data/local/tmp/.ksud-stage` trust gap: a `shell`-uid process
+could replace the staged daemon between the producer's `close()` and the
+loader's `rename()`. It is addressed at the **loader/source** layer, not by
+documentation or Java-side gating:
+
+- The Samsung-patched loaders were rebuilt from source on payloads branch
+  `fix/p1-08-root-owned-staging` (commit `891e897`) to consume a stage in the
+  root-owned `/data/adb` directory: `/data/adb/.ksud-stage`. The daemon validates
+  that stage **by fd** (owner, mode, non-empty content) before promoting it to
+  `/data/adb/ksud`. The old `/data/local/tmp/.ksud-stage` string is no longer
+  present in either rebuilt binary; both contain `/data/adb/.ksud-stage`.
+- DFRoot's producer side was changed accordingly at `2b59684` (bootstrap stages
+  into `/data/adb/.ksud-stage`, 0700, then execs it). That producer change by
+  itself is **not** proof the gate is closed: both halves must be re-reviewed
+  together and the full chain must be validated on a device.
+- A clean-state device attempt exposed an unrelated preflight defect: the
+  fixed `helper_orig[1024]` save buffer was smaller than the 1,408 B embedded
+  splicehelper, so every build aborted before touching system state. The buffer
+  is now dynamically allocated with an inclusive 32..65536 B validator and a
+  host boundary test; this is host-proven only and the device run must be
+  repeated with the rebuilt APK.
+- Source-build evidence (host builds of the patched loaders): CI run
+  **45674540939** (classic pair, `android13-5.15`) and CI run **45674545588**
+  (Next generic, four KMIs). Run 45674540939 **failed overall**: only its
+  successful `pair ksud` job produced the integrated classic artifact; its
+  separate generic-ksud job failed because no no-patch-text module was
+  available. Run 45674545588 succeeded overall. These runs attest the loader
+  rebuilds only; they are not device validation and not certification of this
+  head.
+
+Rebuilt artifacts now bundled under `app/src/main/jniLibs/arm64-v8a/`:
+
+| Artifact | sha256 | size |
+|---|---|---|
+| `libksud.so` (classic pair daemon, v3.3.0 / code 32601, `android13-5.15`) | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` | 5,127,584 B |
+| `libksudnext.so` (Next generic daemon, four KMIs) | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` | 4,728,320 B |
+
+### Build-time loader gate
+
+A new fail-closed `verify_loader_hashes.cmake` pins **both** sha256 values and
+both exact sizes and is wired as an `ALL` CMake target, so every build checks
+the committed loader bytes. It rejects missing files, non-regular/symlinked
+paths, wrong sizes and wrong hashes with distinct fatal reasons, removes any
+prior verified manifest at entry, and writes a manifest only after both
+loaders pass. There is no skip option. The KO pins and KO gates are untouched.
+At the reviewed round-8 head (`36a11bc`) the host fixture suite
+`tests/cmake/loader_hash_test.cmake` covered 5 cases (reviewed pins pass, wrong
+hash, wrong size, missing file, reused output path) and the six CMake suites
+stood at **23 / 25 / 3 / 3 / 6 / 5** cases (KO policy / packaged-KO / APK
+packaging / APK content / target graph / loader hash). Those are historical
+counts for that head: at the Phase B code head the loader-hash suite has **16**
+cases and the APK-content suite has **7**, giving **23 / 25 / 3 / 7 / 6 / 16**.
+The host-gates marker set stays **7/7** unchanged.
+
+### Post-review increments (Phase A / Phase B)
+
+- **`0832331` (Phase A, `fix(cmake): invalidate loader evidence before argument
+  validation`).** Stale verified loader evidence is invalidated before
+  required-argument validation, so a failed re-check cannot leave a prior
+  success behind. This is a host/CMake evidence-integrity fix, not device
+  validation.
+- **`0ea022f` (Phase B, `fix(ci): verify loader bytes inside every distributable
+  APK`).** A new release gate named `Verify bundled loader bytes in every
+  distributable APK` extracts **both** bundled loader entries from each final
+  signed APK and checks SHA-256 **and** size against the pins in
+  `app/src/main/jni/CMakeLists.txt` through the real verifier. A required
+  **per-APK loader index** (nonempty) is asserted at the pre-upload choke
+  point. Release markers stay **3/3** and host suite markers stay **7/7**.
+  This is a host/CI packaging gate, **not** device validation.
+- **P2-13 and P2-14** were addressed across these two post-review increments
+  (Phase A / Phase B) after the round-8 review. Both are **addressed in this
+  round, pending final comprehensive review**; this ledger does not claim
+  final closure before that review.
+
+### Current-increment host test shape and evidence scope
+
+Locally verified at the final increment (`0ea022f`; host-only):
+
+- Native: **61** status cases plus `final_publish` (canonical token /
+  permission / atomicity / strict reader / bootfail / bound + unbound
+  recovery), **13** proc-scan cases, **28** ELF cases, **16 + 14 + 10**
+  device-version cases, **40** loader-stage cases
+  (`tests/native/loader_stage_test.c`) and the helper-size suite
+  (`tests/native/helper_size_test.c`).
+- CMake: six suites at **23 / 25 / 3 / 7 / 6 / 16** cases (KO policy /
+  packaged-KO / APK packaging / APK content **7** cases / target graph /
+  loader hash **16** cases).
+- JVM: **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
+  ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13).
+- Workflow policy (`tests/workflow/test_policy.py`): **90 tests** (was 85) at
+  the Phase B code head; at the round-11 literal head the policy suite is
+  **92 tests** (P2-15 regression added), with every other count unchanged.
+  **7/7** host markers and **3/3** release markers unchanged.
+- CI status re-checked before finalizing this ledger: run **45708004129** at
+  the Phase B code head `0ea022f` **completed with conclusion `success`**
+  (host-only evidence, **not** device validation or a release claim); its log
+  confirms 23/25/3/7/6/16 CMake cases, 39 JVM tests and 7/7 markers. Runs
+  **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
+  **45697296267** (`bb83849`) are also completed `success`, but are **earlier
+  heads**. No exact code-head count is asserted from an earlier log.
+
+### Disposition
+
+- **P1-08 remains OPEN — RELEASE GATE.** The root-owned staging contract is
+  implemented in both halves and built from reviewed source, but it is
+  **pending re-review and fresh on-device full-chain validation**. No device
+  run was performed for these binaries: do not consume or distribute unverified
+  privileged content and do not claim the gate is closed from host evidence.
+- **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
+  DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
+  (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
+  intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+  `build-lkms` on every event; it is a build intermediate, not a DFRoot app
+  APK and not a release claim.
+- **APK loader gate is a host/CI gate.** Phase B checks bundled loader bytes
+  inside every distributable APK at the release path, with a required
+  per-APK loader index at the pre-upload choke; it does not validate device
+  behavior and does not close any open safety/release gate.
+- **Open gates:** P1-02, P1-07 and P1-08 remain **OPEN** safety/release gates.
+  P2-13 and P2-14 were addressed in this round (Phase A/B), **pending final
+  comprehensive review** — not claimed finally closed here.
+- run6 (classic, 2026-11-17) and run8 (Next, 2026-11-17) — and every earlier
+  CI run — are **historical**: they validated the previous loaders and earlier
+  implementations, never these rebuilt binaries or this head. No device run
+  validates the literal head.
+- **Auto Soft Reboot and Start on Boot remain disabled by default and
+  unvalidated.** No tag was created and no release was published; this head is
+  not device-verified, not independently merge-ready and not release-ready.
+
+## Round-6 repair (2026-11-25) — historical (round-6 head `d72838d`)
+
+> **Historical section.** The round-13 section at the top is authoritative for
+> the committed head `e823fb4` and the current validation boundary (round
+> 12 for `376f5e2`; round 11 for `7e18b13`; round 8/P1-08 for the Phase B code
+> head `0ea022f`); this section describes the round-6 head only.
+
+This section was authoritative for the round-6 head of
+`fix/native-exploit-robustness` (`d72838d`). **Every section below is
+historical**; its counts and dispositions describe earlier heads, not this
+one. All evidence here is **host-only**: no hardware run validates this head,
+a successful build is not a safety certificate, no tag was created and no
+release was published. This round changed CI gating, the signing smoke, the
+packaged-KO host fixture and the boot-state UI; no exploit payload or reviewed
+KO pin was relaxed.
+
+### Stable-ID disposition (round-6)
+
+| ID | Round-6 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing UNVALIDATED** | `dfrecover` remains bound to the current run nonce: a stale or foreign `ok` is rejected, so reserved-channel token syntax is **not** invocation proof and absence of evidence is **not** proof that system activity stopped. `dfbootfail` carries the reserved-nonce `BOOTSTRAP_FAILED` token (observable rc=1) only when no normal final token parses. Android publication/access and on-device timing remain unproven; no device certification is derived from host mocks. |
+| P1-07 | **Addressed in host-tested scope; UNVALIDATED on device** | The absolute deadline is checked before consulting a positive recovery result, again after it, and after cleanup before any terminal outcome; late/uncertain evidence yields `REBOOT_SKIPPED` and can only disable a reboot. These are **host-proven ordering checks only**: device quiescence and verified restoration remain UNVALIDATED. This is a release restriction, not a safety claim. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing this requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not consume or distribute unverified privileged content, do not claim fixed. |
+| P1-11 | **Resolved in round 6 (host-only evidence)** | A new **unconditional** `host-gates` job (`needs: build-lkms`, no `if`, checkout-SHA assertion) runs **all** host suites on **every** event including protected tag pushes: native, all five CMake suites, the real KO CI policy, the JVM 39/0/0/0 assertion and 7/7 markers. Both `build-dfroot` and `build-release` require `host-gates`; `publish` requires `build-release`. A tag release cannot proceed without host evidence of the tested commit. No device claim. |
+| P1-12 | **Resolved in round 6 (host-only evidence)** | Non-tag events no longer distribute an APK: the only upload is the `DFRoot-CI-evidence` licence/notice bundle (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The Debug APK is a compile/content gate only, never uploaded, signed with release material or published. No stale `DFRoot-UNVERIFIED-CI` downloadable APK remains. Distribution is withheld pending P1-08, a reviewed re-pin and device validation. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | Staged-link → verified-copy chain; AGP targets `dfroot_packaged` **and** `bootstrap`; APK-content and target-graph harnesses (named target, `ALL`, raw bypass, cached, poisoned); CI gathers evidence over **every** `app/.cxx` packaged manifest. The byte gate rejects UNKNOWN bytes but **accepts the two known obsolete pins**; release is withheld by **POLICY** (reviewed re-pin, OPEN P1-08, device validation), not by the hash gate alone. A passing gate is not device validation. |
+| P2-10 | **Addressed in round 6 (host-tested scope); real UI lifecycle UNVALIDATED** | Boot component state is tri-state with a **persistent** `UNKNOWN` status row plus an explicit "Disable automatic startup" action that attempts only DISABLE and never claims verified `OFF` without a `DISABLED` readback. `UNKNOWN` is never shown as verified `OFF` and never used to accept `OFF`; there is no auto-enable path. Real Activity/Fragment recreation and PackageManager behavior remain UNVALIDATED. |
+| P2-11 | **Resolved in the stated narrow scope, not re-litigated** | `objcopy` runs only on an isolated copy with original-artifact immutability proven on success and failure. Round 6 additionally removes any stale verified `.so` at the first step of the verified-copy command, so a failed re-check leaves no verified copy, and runs the mutating-objcopy fixture through a generated 755 launcher with an explicit `python3` interpreter so cases 14a/14b actually execute and pass. Graph case 5 proves wrong-pin failure and correct-pin recovery. Pins/sizes unchanged (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). |
+| P2-12 | **Resolved in the stated narrow scope (host-only)** | The signing smoke uses an isolated identity (`df.root.signingsmoke` / `4.8-gzif-signingsmoke` / `SigningSmoke-4.8-gzif-signingsmoke.apk`), explicitly rejects any `DFRoot_*.apk`, and still fails closed with no signing material. It produces no distributable artifact. |
+
+Findings that **remain resolved in their prior narrow scope** and are not
+re-litigated here: **P1-10** (exactly-once cleanup on every exit path),
+**P2-08** (durable `PENDING` → same-key commit, sticky fail-closed `WILDCARD`,
+launch tokens and whole-transaction lock) and **P2-09** (stale packaged evidence
+invalidated before required-argument validation). None of them constitutes
+device validation.
+
+### Post-fix CI status (round-6 head; historical — see round-8 section above)
+
+- **The pre-repair head was RED.** At `4a81aa5`, CI run **45558516540** failed
+  at `packaged_ko_test` case **14a** with "permission denied": the
+  mutating-objcopy fixture is stored with git mode 100644 and was invoked
+  directly. That head is **not** a green head. The fix generates a **755
+  launcher** that invokes the fixture with an explicit `python3`; cases
+  **14a/14b now actually execute** and pass their strict SHA-256 mismatch and
+  recovery assertions.
+- **Round-6-head host results (local, host-only; historical counts — the
+  Phase B code head is tabulated in the round-8 section above):** native **61**
+  status cases plus `final_publish` (canonical token / permission / atomicity /
+  reader / bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF,
+  **16 + 14 + 10** device-version; CMake **23 / 25 / 3 / 3 / 6** cases (KO
+  policy / packaged-KO / APK packaging / APK content / target graph); JVM
+  **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
+  ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13);
+  workflow policy **85 tests / 202 subtests**. **7/7** host suite markers and
+  **3/3** release markers (plus the nonempty gate index and single upload
+  choke point) are asserted. No required gate uses `continue-on-error`.
+- **Distribution:** non-tag events upload only `DFRoot-CI-evidence` with the
+  GPL-3.0/licence/notice bundle; no APK is downloadable from CI. The signing
+  smoke emits only the isolated `SigningSmoke-*.apk` inside a disposable copy
+  and is never uploaded.
+- **Boundary:** run6/run8 and all earlier CI runs — including 45523079469 and
+  45558516540 — are **historical**, not certification of this head. Auto Soft
+  Reboot and Start on Boot stay disabled and unvalidated. No tag was created,
+  no release was published, no device verification was performed, and this
+  head is not independently merge-ready.
+
+## Round-5 repair (2026-11-25) — historical (round-5 head)
+
+> **Historical section.** It was authoritative for the pre-round-6 head; the
+> round-13 section at the top is authoritative for the upcoming documentation
+> commit and the current validation boundary (round 8 for the Phase B code head
+> `0ea022f`). Its counts,
+> CI shape and dispositions describe the round-5 implementation only.
+
+### Stable-ID disposition (round-5, 9 findings carried forward)
+
+| ID | Round-5 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing UNVALIDATED** | `dfrecover` is now bound to the current run nonce: a stale or foreign `ok` is rejected, so syntax alone is not invocation proof. The reserved-nonce `BOOTSTRAP_FAILED` token on the app-owned `dfbootfail` channel is observable rc=1; token syntax is not proof that bootstrapping succeeded. Real-file and mock tests cover stale/foreign evidence; Android publication/access and device timing remain unproven. |
+| P1-07 | **Addressed in host-tested scope; asynchronous quiescence UNVALIDATED** | The absolute deadline is enforced before consulting a positive recovery result, again after it, and after cleanup before any terminal outcome. Late or uncertain evidence yields `REBOOT_SKIPPED` (never an authorization); recovery polling is bounded/clamped. Mocks prove ordering, count and fail-closed branches, not device quiescence or that asynchronous privileged activity has finished. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing it requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not claim fixed. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | Staged-link → verified-copy chain; AGP targets `dfroot_packaged` **and** `bootstrap`; APK-content and target-graph harnesses (named target, `ALL`, raw bypass, cached, poisoned); CI gathers evidence over **every** `app/.cxx` packaged manifest before upload. The byte gate rejects unknown bytes but **accepts the two known obsolete pins**; release is withheld by policy — a reviewed re-pin, OPEN P1-08 and device validation — not by the hash gate alone. Passing the gate is not device validation. |
+| P2-06 | **Resolved in the stated narrow scope; not re-litigated** | Required identity check on every `dfroot-build-provenance.txt` (git HEAD, release variant, reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler identity) plus complete-set evidence with one row per uploaded APK. Records are audit evidence, not an attestation or independent reproducible-build proof. |
+| P2-07 | **Resolved in the stated narrow scope; not re-litigated** | Exact CI shape, markers, counts and validation boundary are recorded here, in the README/NOTICE/PORTING docs and in the PR #3 description; historical run6/run8 remain attached only to the historical implementation. |
+| P2-08 | **Addressed in host-tested scope; real PackageManager/fsync UNVALIDATED** | Boolean transaction result, sticky `WILDCARD` restored, launch tokens plus a whole-transaction lock, and no success reported on a failed integrity transaction. The write-ahead `PENDING` marker still requires a validated same-key PENDING→commit cycle. Device-protected storage and real PackageManager/fsync behavior are untested. |
+| P2-09 | **Addressed; verified by host fixtures** | Stale packaged evidence is invalidated before required-argument validation, not only afterwards; same-path failure fixtures (success→failure, failure→success, poisoned dump) prove a reused path cannot carry stale success forward. |
+| P2-10 | **Addressed in host-tested scope; real UI lifecycle UNVALIDATED** | Boot component state is tri-state; `UNKNOWN` is never shown as verified `OFF` and is never used to accept an `OFF` setting, and nothing auto-enables. The user can always turn boot OFF; a framework write is accepted only on a real state match. Real Activity/Fragment recreation and PackageManager behavior are unvalidated. |
+
+Newly closed in round 5: **P1-10** — `status_flow_run()` performs exactly-once
+cleanup on **every** exit path; an `ERR` path uses unbound cleanup, sets the
+recovery-failed bit and returns `DF_RC_UNKNOWN`; fault-injection tests cover
+these paths. **P2-11** — `objcopy` runs only on an isolated copy, with original
+artifact immutability proven on both success and failure; no hash or size pin
+was relaxed (pins `94f8be…` / `9dfb8b…`, sizes 13504 / 13384 B, unchanged).
+
+### Post-PR-#1 rebase integration
+
+PR #1 is merged into the base and PR #3 was rebased onto that head. PR #1's
+CI/signing/GPLv3-conveyance, Gradle 9.9.2 + AGP 9.5.0 version catalog, NDK/DKK
+digest pinning and Make/contract tests are integrated. Kept from PR #1: the
+version catalog, release-environment signing writer / `apksigner` / checksum /
+conveyance and the `publish` job. Non-tag events at this historical round-5 head
+uploaded a Debug-only `DFRoot-UNVERIFIED-CI` artifact with PR #1's licence/notice
+bundle and **no release claim**; signed release remains tag-only and gated. At
+the current head non-tag events upload no DFRoot APK (only `DFRoot-CI-evidence`).
+run6/run8 and every
+older CI run (including 45523079469) validate only historical implementations
+or pre-rebase heads, never this head. No tag was created by us.
+
+### Final host test shape (round-5 head; historical — see round-6 above)
+
+- **Native** (`make -C tests/native test`): **61** `status_protocol` cases;
+  `final_publish` (canonical token / permission / atomicity / reader / bootfail
+  / bound + unbound recovery); **13** `proc_scan_policy` cases; **26** ELF
+  fixtures; **16 + 14 + 10** kernel / token / release device-version cases.
+  Host tests never execute privileged payloads.
+- **CMake** (`cmake -P`, host-only): `ko_hash_policy_test.cmake` **23** cases
+  (clean environment and simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`);
+  `packaged_ko_test.cmake` **25** cases (same-path arg failures, mutating
+  `objcopy`, input immutability); `apk_packaging_gate_test.cmake` **3** cases;
+  `apk_content_gate_test.cmake` **3** cases (`libbootstrap.so` present / wrong
+  ABI / missing); `packaging_target_graph_test.cmake` **6** cases (named target
+  `dfroot_packaged` + `bootstrap`, `ALL`, raw bypass, cached, poisoned).
+- **JVM** (`:app:testDebugUnitTest`): **36 tests, 0 failures, 0 errors, 0 skips**
+  — LaunchGate 4, ListenerLifecycle 7, PreferenceIntegrity 12,
+  PreferencePersister 13. CI parses the JUnit XML and asserts exactly 36/0/0/0;
+  a green Gradle exit code alone is not accepted.
+- **Suite markers on every non-tag CI event (7/7)**: `marker-native`,
+  `marker-ko-policy`, `marker-packaged-ko`, `marker-apk-packaging-fixture`,
+  `marker-ko-ci-policy`, `marker-jvm`, `marker-junit`. **Publishing-only gates
+  (3/3)**: `marker-apk-gate`, `marker-provenance-identity`,
+  `marker-release-evidence`, plus the nonempty gate index and a single upload
+  choke point. No required gate uses `continue-on-error`.
+
+### Validation boundary
+
+All current verification is host-only. P1-02/P1-07 are proven with host mocks
+and real-file adapters; device timing, quiescence, Android publication/access
+and privileged-state safety are UNVALIDATED. P2-04/P2-06/P2-09/P2-11 are proven
+with host fixtures and CI-shaped checks; the byte gate accepts the two known
+obsolete pins, and release is withheld by policy (reviewed re-pin, P1-08 and
+device validation), not by the hash gate alone. P2-08/P2-10 are proven with host
+JVM tests; real PackageManager/fsync and UI lifecycle are UNVALIDATED. P1-08
+remains OPEN. Auto Soft Reboot and Start on Boot remain disabled by default and
+unvalidated. run6/run8 and all earlier CI runs — including 45523079469 —
+validate only historical implementations and pre-rebase heads. A successful
+build is not a safety certificate.
+
+## Historical — PR #1 hardening (CI build reliability), integrated into the rebased head
+
+> **Historical section.** It describes the PR #1 baseline as integrated before
+> round 6; the round-13 section at the top is authoritative for the upcoming
+> documentation commit and the current validation boundary (round 8 for the
+> Phase B code head `0ea022f`).
+
+
+---
+
+### Integration note
+
+The PR #3 ledger above is authoritative for native status protocol, staging,
+signing and release policy. The section below preserves PR #2 / R8 supporting
+device evidence only; it does **not** close any gate, approve any head, or
+claim device safety. All R2-14/R2-16/R2-18 and experimental-reboot limitations
+remain OPEN with an owner and release hold.
+
+## PR #2 / R8 supporting evidence (integration addendum — NOT a new gate closure)
 
 Authoritative record of the **eighth documentation round** (R8) on PR #2 /
 branch `fix/app-correctness-safety`, started from reviewed head `be9201c` — the
@@ -27,12 +632,12 @@ disposition, no new finding IDs assigned):
 | R2-17, R2-24 | Closed **only in the previously reviewed scope**; no new claim here. |
 | Verdict | Unchanged **REQUEST CHANGES / keep draft**. |
 
-Device / build identity and authorization scope: S23 Ultra SM-S9180 (`dm3q`),
-build `CP2A.260605.016.S9180ZHU8GZIF`, Android 17 (SPL 2026-10-05), bootloader
+Device / build identity and authorization scope: S23 Ultra [device model/codename redacted],
+build [device-specific build identifier redacted], Android 17 (SPL 2026-10-05), bootloader
 locked with `ro.boot.verifiedbootstate=green`, installed `df.root` 4.8-gzif /
 versionCode 408 matching repo head `be9201c`. The owner explicitly authorized
 **FULL device testing including soft-reboot / crash in R8 only**, overriding the
-earlier no-device constraint. All operations used `-s R5CW21C8PLR`. No payload
+earlier no-device constraint. All operations targeted the single S23 device (serial redacted). No payload
 rebuild, no APK assembly, no privileged container, no PCK/guard change; the
 installed APK was unchanged throughout.
 
@@ -83,802 +688,44 @@ to expand the implementation merely to generate more review iterations.
 
 Keep PR #2 draft/open; R8 changes no production code and closes no gate.
 
-## 2026-11-26 — Seventh repair round (R7.1–R7.3) consolidated — PR #2 / branch `fix/app-correctness-safety`
-
-Authoritative record of the **seventh repair round** (final local HEAD
-`57df54c`; R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`) on top of the R6
-close (`92572ea`, R6 code head `9e1aff7`). It addresses Re-review 6.
-Dispositions: **R2-24 fixed in the reviewed host scope; R2-17 fixed in the
-reviewed host scope; R2-18 SCOPED / DOCUMENTED (NOT fixed and NOT closed).**
-**R2-14 and R2-16 remain SCOPED / OPEN gates — not closed and not proved
-safe.** **R2-02 and R2-07 are linked only** — the owning items remain the
-R2-16 authorization gate and the R2-14 publication gate. All evidence below is
-focused host-only verification plus independent static reviews; no device,
-ADB, payload, privileged-container, crash/power-loss or APK work, no fresh
-full-suite or CI-green result and no device-ANR or foreground-service-grace
-proof is claimed. Older R7.x notes below are historical phase records; the
-counts and gate states in this section are current.
-
-### Phase table — commit (verified via `git log`), finding, fix loop, focused verification, review outcome
-
-| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
-|---|---|---|---|
-| R7.1 `985fa71` | R2-24 (notification-construction exception escape) | `buildNotification()` stays outside `startsLock` (R5.4 serialization unchanged) but moves inside its own `RuntimeException` boundary: on failure it logs, publishes one request-correlated `REJECTED` with the distinct honest reason `"notification setup failed: …"`, resolves that start's lifetime with exactly one `stopSelf`, and starts nothing. No WakeLock, admission command, owner-token change, barrier mutation, foreground attach/removal claim or second `stopForeground`; `START_NOT_STICKY` unchanged. A host-only one-shot throwing seam is null in production. **83 focused tests, 0 failures.** | Two independent reviews APPROVED (exception boundary, test quality), no Required/Critical. |
-| R7.2 `36076de` | R2-17 (final-tick two-observation gap) | Exactly one read-only ledger observation per watch tick now drives both reconciliation and the final-tick unconfirmed decision, so a late correlated record with a lost observer post can no longer leave the pending UI blank/disabled. A host-only lookup seam (null in production, writes nothing) lets a deterministic fixture script disagreeing observations: it goes **red under the old two-read algorithm and green after the fix** (red-green verified), with exact one-lookup-per-tick assertions. Ledger 32, reporter 64, watch 25 × 200 ms, one-per-token unconfirmed status and no replay/retry/authorize/durable-clear unchanged. **52 focused `MainActivityTest` cases, 0 failures.** | Correctness review APPROVE; test quality first REQUEST CHANGES because the initial tests were **non-discriminating** → replaced with the red-green discriminator plus one-lookup assertions and re-reviewed RESOLVED. Both reviews APPROVE otherwise, no Required/Critical outstanding. |
-| R7.3 `57df54c` | R2-18 (residual `startsLock` monitor contention) | **SCOPED / DOCUMENTED, not fixed and not closed; zero production behavior change** (honest scope note + deterministic host fixtures only). Residual named explicitly: the main-thread start checks `flushInProgress` once, so a duplicate arriving while the express worker holds `startsLock` inside foreground attach with **no** active flush can still enter `registerStart`/duplicate checking and briefly contend on that monitor; the refused-express fallback and `onDestroy()` pending-work bookkeeping also take short caller-side `startsLock` sections that a slow platform call can delay. Harmless fixtures pin the fail-closed gate under those interleavings (one correlated `REJECTED`/`CANCELLED`, one lease close and lifetime resolution, no second lease, no submit/engine, no barrier, no duplicate `stopForeground`, `START_NOT_STICKY`) and graceful shutdown/drain of the owned express worker. **85 focused tests, 0 failures.** | Two independent reviews APPROVED (scope honesty, test quality), no Required/Critical. Bounded host-only evidence of the residual and the safety gate — **not** a device ANR proof and **not** an FGS-grace proof. |
-
-### R7 final gate state and residual items
-
-- **R2-24 — fixed in the reviewed host scope.** Notification setup failure fails closed with a correlated, honest rejection and exactly one lifetime resolution; no operation start or misleading pending state on that path.
-- **R2-17 — fixed in the reviewed host scope.** One observation per tick closes the final-tick gap; absence/unconfirmed is still never an outcome, admission, completion or permission to retry. The red-green discriminator relies on an inert host-only seam: it proves the host algorithm change, **not** device behavior.
-- **R2-18 — SCOPED / DOCUMENTED, NOT fixed and NOT closed.** The residual main-thread monitor contention and the OS foreground-deadline gate remain. R7.3 adds honest documentation and harmless fixtures only: no broad refactor, no weakened authorization, and foreground-ownership uncertainty never leads to continued work.
-- **R2-14 — OPEN gate, NOT closed or proved safe.** The publication/acknowledgement observation window and the abnormal-death window are unchanged; linked only here, no new device evidence.
-- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization read remains non-atomic with the external `PackageManager` OFF write; linked only here, no new device evidence.
-- **Earlier residuals unchanged, not silently accepted:** the R5/R6 bounded-mechanism residuals (per-session 25-tick watch budget, no explicit `onPause()` cancel, one-shot post-winner sweep, four-slot terminal replay drops, rare short caller-side `startsLock` sections), the signed-release packaged-pin gate inherited from PR #1 policy, no in-app recovery UI, `BOOT_COUNT` diagnostic only, `/dev` marker-root trust, and the OPEN abnormal-death publication window.
-- **Final comprehensive reviews all APPROVE at the R7 final head `020175b`** (R7 code head `57df54c`; the four fresh reviews and full verification completed after this consolidation). Historical APPROVE outcomes (R3/R4/R5/R6, including Final 6.1–6.6 at `92572ea`) are scoped to their own heads and are **not** an approval of the current HEAD. Keep PR #2 draft/open; green host CI is not device safety and is not release approval. `tasks/plan.md` and `tasks/todo.md` keep Checkpoint R7 and the final 7.1–7.6 checkboxes **UNCHECKED**.
-
-## 2026-11-26 — Final correctness review fix (PR #2): guaranteed sweep for refused terminals
-
-The FINAL correctness review found one Required stranding gap in the R6.4
-second-fix-loop guarantee. A refused TERMINAL render only called
-`scheduleDeferredFlush()`, which returns immediately once
-`MAX_DEFERRED_FLUSH_REDECISIONS = 3` is spent, and the post-winner sweep was
-scheduled only in a flush winner's `finally`. With a full 64-slot host queue at
-terminal publication (observer callbacks arrive on the main thread) and no later
-flush winner, `resolveTerminalOperation` never ran and the accepted start was
-never stopped.
-
-Fix: `rememberRefusedRender()` and the offloaded-flush post-refusal path in
-`maybeFlushResolvedStarts()` now ALSO queue the **uncapped, single-flight,
-destroy-aware `schedulePostFlushSweep()`** directly at refusal time, outside
-`deferredRendersLock`/`flushMonitor`. The sweep drains the bounded terminal replay
-queue on the host-only deferred executor, never spends the loser deferral budget,
-and is never an admission, engine, retry, privileged or completion-claim action.
-The four-slot terminal-only cap, overflow/non-terminal honesty, destroy-time
-no-op, R5.4 epoch serialization, R6.3 deadline/deferral bounds, all admission
-gates, owner token, `START_NOT_STICKY` and the 32/64/64/16/4 bounds are unchanged.
-
-Two new deterministic fixtures pin the no-winner path
-(`refusedTerminalRenderIsResolvedByUncappedSweepWithoutLaterWinner`) and the
-offloaded-flush refusal path
-(`refusedOffloadedFlushPostAfterDeferralCapQueuesGuaranteedSweep`): three
-deferrals spent, a real TERMINAL render / offloaded flush post refused, **no
-winner injected**, the single queued task is the uncapped sweep, and draining it
-stops the start exactly once with no duplicate `stopForeground`, no
-engine/admission/lease work and no completion claim at refusal. Focused
-verification: `ExploitServiceAsyncTest` 34 + `ExploitServiceTest` 47 = **81 tests,
-0 failures**. No commit/stage/push. Host-only evidence, **not a device ANR
-proof**; R2-14 and R2-16 remain OPEN.
-
-## 2026-11-26 — R7.1: notification setup failure boundary (R2-24) — short note (R7.4 consolidates)
-
-Re-review 6 found a new P2 regression: `buildNotification()` had moved outside
-the guarded foreground-start failure path, so a `RuntimeException` from
-`PendingIntent`/`Notification.Builder` escaped the background task with no
-correlated `REJECTED` and no lifetime resolution.
-
-Fix: notification construction stays outside `startsLock` (preserving R5.4
-epoch/attach serialization) but inside its own `try/catch`. On failure it logs,
-reports `REJECTED` for that request with the distinct honest reason
-`"notification setup failed: " + e.getMessage()`, resolves that start's lifetime
-and returns. No WakeLock, `RequestWork`, submit, owner-token change, barrier
-publish/clear, foreground attach/removal claim or second `stopForeground` is on
-this path; `START_NOT_STICKY` is unchanged. One HOST-ONLY throwing seam
-(`notificationSetupFailureForTesting`) is null in production and cleared on
-create/destroy. Two deterministic fixtures pin the correlated rejection /
-single-stop lifetime and the isolation of an unrelated `ACCEPTED` outcome.
-Focused verification: `ExploitServiceTest` + `ExploitServiceAsyncTest`; no
-full suite or native tests in this phase. No commit/stage/push. Host-only
-evidence, **not** a device proof; R2-14 and R2-16 remain OPEN.
-
-## 2026-11-26 — R7.2: one ledger observation per watch tick (R2-17) — short note (R7.4 consolidates)
-
-The final watch tick previously read the ledger twice: reconciliation could see
-`null` while the expiry branch independently saw a late record, leaving neither
-an unconfirmed status nor reconciliation and a blank/disabled pending UI. Now
-`runOutcomeWatchTick()` makes exactly one read-only observation and passes it to
-an overloaded `reconcilePendingRequest(record)`; the final-tick unconfirmed
-decision uses that same record and never re-reads. The lifecycle no-arg path
-still performs its own single observation and delegates unchanged. A
-`Function<String, RequestOutcomeRecord>` host-only seam (null in production,
-installed/reset ForTesting) lets deterministic fixtures script each observation
-and count lookups; it writes nothing. No record still means UNCONFIRMED only —
-never an outcome, admission, completion or permission to retry. Ledger 32,
-reporter 64, watch 25 × 200 ms, snapshot/button semantics, 32 KiB UI buffer and
-the no-main-thread-locking/read-only contract are unchanged. Three deterministic
-host-only fixtures cover late final-tick reconciliation, the null/unconfirmed
-case with one-per-token status, and one lookup per tick; existing R6.1/R6.2
-watch tests are unchanged. Focused verification: `df.root.MainActivityTest`
-only. No commit/stage/push, no device/full-suite/native work. Host-only evidence,
-**not** a device proof; R2-14 and R2-16 remain OPEN, R2-18/R2-24 untouched.
-
-## 2026-11-26 — R7.3: residual `startsLock` contention — SCOPED / DOCUMENTED (R2-18) — short note (R7.4 consolidates)
-
-Finding R2-18 is **SCOPED / DOCUMENTED, not fixed or closed**. Zero production
-behavior change: only deterministic host fixtures and this honest scope note.
-Residual stated explicitly: the main-thread start branch checks
-`flushInProgress` once, so a duplicate start arriving while the express worker
-is inside foreground attach under `startsLock` (with **no** active flush) can
-still enter `registerStart`/duplicate checking and briefly contend on that
-monitor. The refused-express fallback and `onDestroy()` pending-work
-bookkeeping also take short caller-side `startsLock` sections, which a slow
-platform call under the monitor can delay. No broad refactor was attempted;
-delayed foreground setup and UI-thread blocking remain ordinary Android
-lifecycle/ANR risks. New harmless fixtures pin the safety gate under those
-interleavings: one correlated `REJECTED`/`CANCELLED` publication, one lease
-close and one lifetime resolution, no second lease, no submit/engine, no
-barrier, no duplicate `stopForeground`, `START_NOT_STICKY`, and graceful
-shutdown/drain of the owned express worker. Existing main-thread flush
-deferral, express-priority and post-winner-sweep fixtures are unchanged.
-This is **bounded HOST-ONLY evidence, NOT a device ANR proof and NOT an FGS-grace
-proof**; the safety gate is retained, authorization is never weakened, and
-foreground-ownership uncertainty never leads to continued work. R2-14 and
-R2-16 remain **OPEN** gates; R2-24 untouched. No commit/stage/push, no
-device/full-suite/native work in this phase.
-
-## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
-
-Authoritative record of the **sixth repair round** (final local HEAD
-`9e1aff7`, on top of the last pre-R6 commit `fd1ccd8` (R5 code `33980e2` / docs `689f378`). It addresses
-Re-review 5. It closes the remaining **R2-17** residuals (visible-Activity and
-eviction/absence halves) and reduces **R2-18** to bounded **host-only**
-responsiveness evidence. **R2-14 and R2-16 remain SCOPED / OPEN gates — NOT
-closed and NOT proved safe.** All evidence below is focused host-only tests plus
-independent static reviews; no device, ADB, payload, privileged-container,
-crash/power-loss or APK-assembly work, no fresh full-suite run, no device-ANR
-proof and no CI-green claim. Older R6.x notes below are historical phase
-records; the counts and gate states in this section are current.
-
-### Phase table — commit (verified via `git log`), finding, fix loop, focused verification, review outcome
-
-| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
-|---|---|---|---|
-| R6.1 `13ee65fe` | R2-17 (visible-Activity half) | Per-Activity main-looper read-only outcome watch armed on start requests, 25 ticks 200 ms apart, cancelled on clear/stop/destroy; one explicit UI-only "outcome unconfirmed" status on cap exhaustion with no record. No fabricated outcome, replay, retry, cancel, clear or authorization; run control stays disabled. **46 focused `MainActivityTest` cases, 0 failures.** | Two independent reviews APPROVED (correctness/lifecycle, test quality), no Required/Critical. Optional residuals: watch budget is per visible arming session, and `onPause` does not explicitly cancel (ticks become no-ops while paused). |
-| R6.2 `731e88c3` | R2-17 (eviction/absence half) | Documented that a `null` ledger lookup — including eviction of the Activity's own record from the bounded 32-entry LRU after a long absence — means UNCONFIRMED, never admission/rejection/completion proof. Comment-stripped diff identical: ledger 32, reporter 64, separate `outcomeLock` and strict `lock -> outcomeLock` order unchanged. **108 focused tests, 0 failures.** | Two independent reviews APPROVED; one optional vacuous replay assertion strengthened and re-reviewed RESOLVED. |
-| R6.3 `cdf76e7e` | R2-18 (unbounded foreground-flush wait) | Replaced the deadline-free flush wait with a 200 ms monotonic deadline; main-thread contenders never wait and queue one bounded host re-decision; expiry/interruption log honestly and claim no `stopForeground`/`stopSelf` completion; re-decisions capped at three, singly queued and destroy-aware; a post-winner host-only sweep retires a start ID resolved during the winner's guarded phase after the deferral cap is spent, without spending that budget or interrupting the winner. **115 focused tests, 0 failures; post-fix re-run also green.** | Correctness review found one Required stranding gap → post-winner sweep added, re-reviewed RESOLVED; test-quality APPROVE with source-guard hardening applied. No device ANR proof. |
-| R6.4 `9e1aff73` | R2-18(b) (main-thread foreground platform calls) | Owned bounded daemon executors: **express** 16-slot AbortPolicy worker for main-thread foreground attach/start handling, **general host** 64-slot worker for observer renders and the whole winning guarded flush phase; flush guard released in the posted task's `finally`. A main-thread start during a held flush offloads whole handling and returns `START_NOT_STICKY`; a refused express post registers/resolves that start ID's own `REJECTED` + one `stopSelf` (short caller-side bookkeeping only); refused TERMINAL renders enter a **four-slot terminal-only replay queue** drained by both the deferred re-decision and the post-winner sweep, with non-terminal refusals/overflow dropped honestly. **124 focused tests initially, then 127 after the second fix loop (47 + 32 + 48 classes), 0 failures.** | Architecture review found three Required items (main-thread `startsLock` wait, render-post strand, FGS attach priority) → fixed; both reviewers then found a guard-refusal start-ID leak and a render-slot residual → fixed again and re-reviewed RESOLVED by both. Host-only evidence, not a device ANR proof. |
-
-### R6 final gate state, bounded mechanisms and residual optional items
-
-- **R2-17 — closed in the reviewed host scope.** Reconciliation reads only the
-  Activity's own ledger record, is independent of best-effort observer
-  delivery, and treats absent/evicted records as explicit uncertainty. Nothing
-  is replayed, retried, cancelled or authorized from an unconfirmed UI state.
-- **R2-18 — reduced to bounded host-scope responsiveness, NOT a device ANR
-  proof.** The two bounded mechanisms are the 25-tick / 200 ms read-only outcome
-  watch and the 200 ms flush deadline + three-deferral cap + post-winner sweep,
-  with express 16 / host 64 owned executors and the four-slot terminal-only
-  render replay. Device foreground-service-grace timing remains an OS/hardware
-  gate that host fixtures cannot prove.
-- **R2-14 — OPEN gate, NOT closed or proved safe.** The publication observation
-  window and the OPEN hardware/OS gate are unchanged; no new device or
-  crash/power-loss evidence was produced in R6.
-- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization
-  read and the external `PackageManager` OFF write remain non-atomic; no
-  unattended action or post-start revocation was added.
-- **R5 residuals superseded, new residuals recorded, not silently accepted.**
-  R5.3 reporter-overflow UX and R5.4 interrupted-wait / ANR residuals are
-  superseded by R6.1/R6.3/R6.4 work, but the following remain: the 25-tick
-  budget is per visible arming session; `onPause()` does not explicitly cancel
-  the watch (ticks are no-ops while paused); the post-winner sweep is a bounded
-  one-shot backstop that does not re-queue after a no-op sweep; the four-slot
-  render replay drops overflow and non-terminal refusals with honest logs;
-  rare refusal paths still take short caller-side `startsLock` sections; and
-  the R6.4-added timing-sensitive
-  `hostExecutorIsOwnedBoundedAndShutdownGracefully` test remains green in full runs.
-- **Final comprehensive reviews are PENDING at the current R6 head `9e1aff7`:**
-  the main agent runs the correctness/lifecycle, security, architecture/native
-  and test/build/CI reviews after this consolidation. APPROVE outcomes recorded
-  for R4 were at `74d35f5` and for the R5 final gate at `689f378`; both are
-  historical and are **not** an approval of the current HEAD. `tasks/plan.md`
-  and `tasks/todo.md` keep the final 6.1–6.6 checkboxes **UNCHECKED**.
-
-## 2026-11-26 — R6.4 second fix loop: guard-refusal lifetime + bounded render replay — PR #2
-
-Both reviewers of the remaining Required finding required two more fixes in
-`ExploitService`. (1) A main-thread start arriving while the flush guard is held
-whose express post is REFUSED now registers and resolves that start ID's own
-lifetime on the caller (correlated `REJECTED` plus exactly one `stopSelf` once
-the flush releases and the bounded deferral / post-winner sweep drain). The
-previous code only reported a correlated `REJECTED` and leaked the platform
-start ID; no `handleStartCommand`, `registerStart` or `stopSelf` ever ran for it.
-This is **host-only bookkeeping evidence, not device proof**, and no refusal path
-admits work, acquires a lease, starts the engine or claims completion. (2) The
-single `deferredRenderSnapshot` slot became a four-slot bounded queue of
-TERMINAL-only snapshots, replayed from BOTH `runDeferredFlushRedecision` and
-`runPostFlushSweep`; a terminal render refused after the three-deferral budget is
-spent is now still resolved — **qualified by the final review fix below**: this
-originally still required a later flush winner, and the uncapped sweep is now
-queued directly at refusal so no winner is needed. Non-terminal refusals and
-overflow are dropped with honest logs, and the queue is cleared on
-create/destroy. R5.4 epoch serialization,
-R6.3 deadline/deferral/sweep, admission gates, 64/64 bounds, owner token and
-`START_NOT_STICKY` are unchanged; no executor post holds `startsLock` or the new
-replay lock. Three deterministic host fixtures were added:
-`guardLevelExpressRefusalRegistersAndResolvesLifetimeExactlyOnce`,
-`postWinnerSweepReplaysTerminalRenderRefusedAfterDeferralCap`, and
-`refusedRenderReplayQueueIsBoundedTerminalOnlyAndClearedOnDestroy`. Focused
-three-class verification: 127 tests, 0 failures (47 + 32 + 48). No commit/stage/
-push; no device/ADB/payload/privileged-container/APK work.
-
-## 2026-11-26 — R6.4 Required fixes: start guard, render fallback, express attach — PR #2
-
-Short note (R6.5 consolidates): three architecture findings are addressed in
-`ExploitService` and its host fixtures. (1) A main-thread start arriving while
-`flushInProgress` is set now posts the whole start handling to the owned express
-worker as one task and returns `START_NOT_STICKY`, so the whole handling never
-takes `startsLock` behind a held flush. (The later second-fix-loop entry narrows
-this: an express REFUSAL does take only the short `registerStart`/`resolveStart`
-bookkeeping sections on the caller.) (2) A bounded general-host render refusal is
-remembered and the lost terminal resolution is re-applied by the existing
-bounded deferred re-decision; no completion is claimed on refusal. (3) Main-thread
-foreground attach uses a separate owned 16-slot express worker with AbortPolicy,
-so it is not queued behind 64 render/flush tasks; express refusal fails closed.
-The R5.4 attach/epoch serialization and all admission gates are unchanged.
-Honest residual: caller-side bookkeeping outside a flush and `onDestroy()` still
-take short `startsLock` sections; deferral is capped with a sweep backstop;
-device FGS-grace timing is an OS/hardware gate. R2-14 and R2-16 remain OPEN.
-Focused three-class verification: 124 tests, 0 failures. No commit/stage/push.
-
-## 2026-11-26 — R6.3: bounded main-thread flush responsiveness (R2-18 residual) — PR #2
-
-Short note (R6.5 consolidates): replaced the unbounded foreground-flush wait
-with a 200 ms monotonic deadline and a main-thread no-wait path that queues one
-bounded host-only re-decision. Deadline expiry and interruption log honestly,
-re-assert interruption and claim no `stopForeground`/`stopSelf` completion;
-re-decisions are capped at three, singly queued, destroyed-aware and shut down
-on destroy. R5.4 serialization, admission gates and privileged engine are
-unchanged; R2-14/R2-16 remain OPEN gates. Focused three-class verification:
-115 tests, 0 failures. No commit/stage/push; no device/ADB/payload/
-privileged-container/APK work.
-
-## 2026-11-26 — R6.4: owned host workers for foreground UI latency (R2-18 residual) — PR #2
-
-Short note (R6.5 consolidates): main-thread foreground attach and request setup
-run on a small dedicated owned single daemon-thread **express** worker
-(`dfroot-express`, 16-slot bounded queue, AbortPolicy), separate from the
-general owned host worker (`dfroot-host`, 64-slot bounded queue) that carries
-observer render posts and the whole guarded flush side-effect phase. The flush
-guard is released in the posted task's finally, not on the UI caller. A
-main-thread start during a held flush offloads the entire start handling as one
-express task and returns `START_NOT_STICKY`; a refused observer render is
-remembered and re-applied by the bounded deferred re-decision; a refused express
-post fails closed (correlated `REJECTED` plus `resolveStart`, never admitted).
-`onDestroy()` gracefully drains both owned workers and refuses new work without
-interrupting a winner. Eight deterministic fake-platform-latency / refusal
-fixtures pin bounded host-side returns, unchanged stale-epoch serialization and
-per-ID stop-once, express-vs-general-worker separation and fail-closed refusal.
-This is bounded **host-only** evidence, not a claim that UI latency can never
-depend on foreground/notification timing: caller-side bookkeeping outside a
-flush and `onDestroy()` still take short `startsLock` sections, deferral is
-capped at three with a post-winner sweep backstop, up to 16 express tasks can
-precede an attach, and device FGS-grace timing remains an OS/hardware gate.
-Admission gates, owner token, privileged engine, 64/64 bounds, START_NOT_STICKY
-and the OPEN R2-14/R2-16 gates are untouched. Focused three-class verification:
-124 tests, 0 failures. No commit/stage/push; no device/ADB/payload/
-privileged-container/APK work.
-
-## 2026-11-26 — R6.2: explicit eviction/absence contract (Javadoc + tests) — PR #2
-
-Short note (R6.5 consolidates): `RunCoordinator` Javadoc now states that a
-`null` ledger lookup — including eviction of the Activity's own record from the
-bounded 32-entry LRU after a sufficiently long absence — means UNCONFIRMED and
-is never an outcome or proof of admission, rejection or completion. No
-executable production change: ledger capacity (32), reporter capacity (64),
-the separate `outcomeLock` and the strict `lock -> outcomeLock` order are
-untouched, verified by a comment-stripped diff. Host tests pin eviction-only
-unconfirmed status on the watch and on a later start, exact 32-record retention
-with monotonic sequences and unchanged bounds, and no replay, fabricated reason
-or durable mutation. R2-14 and R2-16 remain OPEN gates; no device/ADB/payload/
-privileged-container/APK work; no commit/stage/push.
-
-## 2026-11-26 — R6.1: bounded read-only outcome watch for a visible Activity — PR #2
-
-Short note (R6.5 consolidates): `MainActivity` arms a per-Activity main-looper
-outcome watch immediately after each manual start request, re-arms on
-start/resume while the same request is still pending, and cancels it on stop,
-destroy or correlated clearing. At most 25 read-only ticks (200 ms apart) call
-the unchanged ledger-only reconciliation; cap exhaustion with no record shows
-one explicit UI-only "outcome unconfirmed" status instead of silent pending,
-without fabricating a rejection, replaying, retrying, cancelling, clearing any
-durable attempt or enabling the run control. A static test-only scheduler seam
-is unset in production. Focused `MainActivityTest` verification is recorded in
-the R6.5 consolidation; R2-14 and R2-16 remain OPEN gates, and no device, ADB,
-payload, privileged-container or APK work was done. No commit/stage/push.
-
-## 2026-11-26 — Fifth repair round (R5.1–R5.8) consolidated — PR #2 / branch `fix/app-correctness-safety`
-
-Authoritative record of the **fifth repair round** (final local HEAD `33980e2`)
-on top of R4 (`74d35f5`). It addresses Re-review 4 (2026-11-26) and closes
-**R2-17, R2-18, R2-20, R2-21 and R2-23 in reviewed scope**, while **R2-14 and
-R2-16 are explicitly SCOPED, not closed and not proved safe**. All evidence
-below is focused host-only verification plus independent static reviews; no
-device, hardware, ADB, payload, privileged-container, cold-boot, soft-reboot,
-crash/power-loss, APK-assembly or root validation was performed, and no fresh
-full-suite or CI-green result is claimed here. Older R5.x notes below are
-historical phase records; counts and gate states in this section are current.
-
-### Phase table — commit, finding, fix loop, focused verification, review outcome
-
-| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
-|---|---|---|---|
-| R5.1 `f9e55a9` | R2-17 (stopped-Activity half) | 32-entry LRU outcome ledger under a separate `outcomeLock` (strict `lock -> outcomeLock`); record before best-effort post; `onStart()` reconciles only its own ID; absence stays uncertainty; nothing replayed/cancelled. Dispatch-failure half explicitly deferred to R5.3. **90 focused tests, 0 failures.** | Two reviews APPROVED (correctness/lock-order, test quality), no Required/Critical. |
-| R5.2 `3a221ab` | R2-18 | No production change: the synchronous `startForegroundService` catch already calls `noteRequestOutcomeAsync`. Harmless blocked-store + throwing-starter fixtures pin prompt click return, the correlated `REJECTED` written off the durable lock, and checked persistence respected after release. **93 focused tests, 0 failures.** | Two reviews APPROVED (UI responsiveness, test quality), no Required/Critical. |
-| R5.3 `05ff93a` | R2-21 + R2-17 (dispatch-failure half) | Ledger write before enqueue; bounded 64-slot abort-on-full reporter (overflow harmless because the ledger is authoritative); active starts and resolved history bounded at 64 each; eldest resolved ID gets its own `stopSelf` at eviction outside the lock; deferred stops at the final flush. **172 focused tests, then 112 after the fix, 0 failures.** | Three reviews: correctness APPROVE; test-quality and architecture REQUEST CHANGES (shared Required history-eviction loss and vacuous bound assertions) — fixed and re-reviewed RESOLVED by both. |
-| R5.4 `48bf31b` | R2-20 (foreground side-effect race) | `startsLock` now spans the whole foreground attach sequence; flush epoch recheck and the single `stopForeground(REMOVE)` run under that lock behind one flush guard; per-ID `stopSelf` stays outside. **62 focused tests, 0 failures.** | Both reviews first found a Required attach-side gap (epoch bump after an unlocked `startForeground`); fixed with an in-flight-attach latch test plus mutation check, then re-reviewed RESOLVED. |
-| R5.5 `513af88` | R2-20 (liveness half) | Final pre-engine gate reads the potentially blocking authorization **before** the owner-token liveness sample under the `engineStarted` lock; an `onDestroy` during that read is seen and denied as a proven pre-effect `PRECHECK_FAILED` (checked clear, no engine). Post-recheck invalidation is intentionally not revoked. **74 focused tests, 0 failures.** | Two reviews APPROVED; a racy `STARTING` assertion was replaced with a latch-gated `RUNNING` assertion and re-verified green. |
-| R5.6 `3ef725c` | R2-16 — SCOPED, not closed | Documentation/boundary only, zero executable/control-flow change in production Java: removed the atomic-with-Settings and "no OFF can slip" overclaims; the final gate is a re-read under the coordinator lock, fail-closed on OFF/unreadable, no revocation after engine start; the `PackageManager` OFF write is outside that lock. Source-text guard pins the overclaims out. **75 focused tests initially, 59 re-verified after the guard fix, 0 failures.** | Doc review APPROVE (zero executable production changes independently confirmed); test review REQUEST CHANGES for a vacuous forbidden-phrase assertion — fixed and re-reviewed RESOLVED. |
-| R5.7 `e9b12c6` | R2-14 — SCOPED, gate stays OPEN | Docs + harmless host fixtures only: narrowed the "never sees actionable success on ANY detected failure" overclaim; the provable statement is that once rc7 is published AND observed it outranks success/conflicts, while an earlier definitive-looking consumption cannot be revoked. Host-only pause seam plus two deterministic fixtures and a proved/not-proved table; hooks absent from production CMake. **142 host CTest, 0 failures, warnings-clean.** | Two reviews APPROVED (no production control-flow change; fixtures genuine and non-vacuous). |
-| R5.8 `33980e2` | R2-23 | `build-dfroot` now verifies **both** debug and unsigned-release packaged loader pins in one fail-closed step on every trigger, before APK counts/upload; equality locks, active-task checks, weakening mutations and a stub-`gradlew` fail-closed fixture. Signed-release/publish job, pins, action SHAs, permissions and workflow
-upload/trigger allowlists untouched (policy test-side locks were extended). **Policy 73/73, make 36/36, pins matched; no local APK assembly.** | Two reviews APPROVED, no Required/Critical. |
-
-### R5 final gate state and residual optional items
-
-- **R2-14 — OPEN gate, NOT closed or proved safe.** The acknowledgement
-  protocol narrows the observation window but does not eliminate it: the
-  post-confirm/detection and abnormal-death windows remain unproved hardware/OS
-  safety gates. R5.7 scoped the documentation honestly; no device
-  crash/power-loss validation was performed.
-- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization
-  check remains a read under the coordinator monitor, not an atomic transition
-  shared with the `PackageManager` component-setting write. R5.6 documented the
-  honest boundary: an OFF written after the re-read is not observed before
-  `engine.run()`, and work already started is not cancelled.
-- **Code-fixed in reviewed scope:** R2-17 (replayable correlated outcomes and
-  bounded reporting), R2-18 (off-lock synchronous start-failure reporting),
-  R2-20 (foreground lifetime serialization and pre-engine owner liveness),
-  R2-21 (bounded start/outcome bookkeeping) and R2-23 (both APK variants
-  pin-gated before upload). These are host/review results, **not** device-safety
-  proofs.
-- **Unchanged contracts:** marker conflict → rc7, never rc1; definitive non-7
-  needs a matching `dfroot_confirm_`; `/dev/df` and `/dev/dfm6` stay progress-only;
-  fail-closed on OFF/unreadable; no revocation after engine start; unattended
-  soft reboot OFF; no root probe; no in-app recovery UI; no retry/clear path.
-- **Outstanding hardware/OS validation:** Direct Boot FGS eligibility from boot,
-  real soft-reboot safety, abnormal-death/crash/power-loss `/dev` marker
-  durability, and all device/ADB/payload/APK validation. Green host CI is not
-  proof of device safety.
-- **Final comprehensive reviews are PENDING at the current R6 head `9e1aff7`**
-  (this R5 section was written when the pending head was `33980e2`; R6 has since
-  added four phase commits). The main agent runs the correctness/lifecycle,
-  security, architecture/native and test/build/CI reviews after the R6.5
-  consolidation. The APPROVE outcomes recorded in the R4 sections were run at
-  `74d35f5` and the R5 final reviews at `689f378`, both historical; neither is
-  an approval of the current HEAD. `tasks/plan.md` and `tasks/todo.md` keep the
-  final 6.1–6.6 checkboxes **UNCHECKED** for that purpose.
-- **Prior-round baselines only:** **623 JVM tests / 45 suites** and **140 host
-  CTest** (R4 final gate) and the **138/138 host-native + 623/45 Java tests**
-  reported in Re-review 4 are prior-round baselines, **not** a fresh R5
-  full-suite result. No fresh full suite or CI-green result is claimed here.
-- **Residual optional items recorded, not silently accepted:** R5.3 optional
-  reporter-overflow UX until `onStart()` and R5.4 `stopForeground` under
-  `startsLock` / interrupted-waiting flush — both superseded by R6.1/R6.3/R6.4
-  work, with the new R6 residuals listed in the consolidated section above;
-  R5.8 optional
-  `if: always()` upload-bypass guard (currently absent); plus earlier accepted
-  residuals — benign duplicate correlated rejection, signed-release job
-  packaged-pin gate inherited from PR #1 policy, owner-facing recovery UI out
-  of scope, `/dev` marker-root trust, AES key in argv, `BOOT_COUNT` diagnostic
-  only, and the abnormal-death publication window (OPEN).
-
-## 2026-11-26 — R5.8: integrated CI/artifact pin gate (R2-23) — PR #2
-
-Scoped workflow + policy change only; R5.9 consolidates. In `build-dfroot` the
-`Verify packaged loader pins` step now runs **both**
-`:app:verifyDebugPackagedLoaderPins` and
-`:app:verifyReleasePackagedLoaderPins` in one `set -euo pipefail` script, with
-no `github.event_name` conditional, no `if:` and no `continue-on-error`. It
-precedes the unchanged `Verify APK counts` and `Upload DFRoot APKs` steps, so a
-verification failure skips upload and withholds unverified artifacts on PR,
-branch-push and manual runs. The signed-release/publish job, digest pins, action
-SHAs, permissions, artifact paths/counts, event triggers and negative loader
-fixture are untouched. Policy tests equality-lock the new script and both active
-Gradle task lines, assert the gate is unskippable and precedes upload, lock the
-CI upload allowlist unchanged, and reject event-name guards, dropped variants,
-tolerated failures, step skips and allowlist edits. Results:
-`python3 tests/workflow/test_policy.py` 73/73 OK (includes a harmless stub
-`./gradlew` fixture proving a failed gate never reaches a follow-on upload);
-`python3 -B tests/make/test_make.py` 36/36 OK; `git diff --check` clean. No
-local APK assembly, device/ADB or privileged container; no commit/stage/push.
-
-## 2026-11-26 — R5.7: R2-14 residual publication-window boundary (scoped docs + harmless host fixtures) — PR #2
-
-Documentation and harmless host fixtures only; **R2-14 remains OPEN** and the
-privileged publication mechanism was not redesigned, made device-safe, or
-claimed fixed. Narrowed the overclaim in `run_status.h` / `run_status.c` that a
-concurrent reader "never sees actionable success on ANY detected failure".
-Replacement, provable statement: **ONCE rc7 has been published AND OBSERVED it
-outranks success/conflicts; BEFORE that a reader may have consumed a
-definitive-looking confirmation in the window between the confirmation `link()`
-and its temp unlink/directory fsync; a detected failure produces corrective rc7
-only AFTER detection; later correction cannot revoke an already consumed
-result.** The OPEN hardware/OS gate note is retained in both files.
-
-Added a host-only `#ifdef RUN_STATUS_TEST_HOOKS` pause in `publish_marker` for
-`MARKER_CONFIRM` immediately AFTER `link()` and BEFORE temp unlink/fsync, using
-the existing one-shot wait_fd/notify_fd pipe handshake; a companion host-only
-setter arms the existing transient unlink fault only after phase 1 completes,
-so the detected failure is strictly post-confirm. Production
-`app/src/main/jni/CMakeLists.txt` compiles `run_status.c` into both binaries
-with no `RUN_STATUS_TEST_HOOKS` definition; `exp.c` / `bootstrap.c` contain no
-hook usage. No production control-flow change (only comments plus `#ifdef`
-hook code in `run_status.c`/`run_status.h`).
-
-New deterministic fixtures: `run_status.r2_14_residual_confirm_window_boundary`
-records observation (1) a definitive-looking rc0 with
-`publication_confirmed == 1` while the writer is gated after the confirmation
-link and before its fsync, with no rc7 yet, and (2) after release and the
-injected post-confirm unlink fault, rc7 published before retraction and
-classified as indeterminate; the fixture states that (1) was consumed before
-detection and cannot be revoked. `run_status.publication_state_machine_boundary`
-is a pure table over unconfirmed / confirmed / detected-failure /
-abnormal-death with an explicit proved / not-proved column; abnormal-death is
-observationally identical to confirmed and marked NOT proved safe.
-
-Verification: `cmake -S app/src/main/jni/host-tests -B
-/mnt/240G_SSD/opencode_tmp/dfroot-hosttests-r5 -DCMAKE_BUILD_TYPE=Debug &&
-cmake --build ... -j && ctest --test-dir ... --output-on-failure
---no-tests=error` → **142/142 host CTest passed, 0 failures**, warnings-clean.
-Unchanged: rc contract 0/1/2/3/4/6/7, `/dev/df` and `/dev/dfm6` progress-only
-SUCCESS semantics, the confirmation protocol and all Java behavior. No device,
-ADB, payload, privileged-container, APK-assembly or root work; no device safety
-implied; no commit, stage or push.
-
-## 2026-11-26 — R5.6: honest final-authorization boundary (R2-16 scoped docs/boundary phase) — PR #2
-
-Documentation/boundary phase only: ZERO executable or control-flow changes in
-production code (verified by a comment-stripping diff filter over all four
-touched Java production files). Removed the overclaims that the final OFF check
-was atomic with the Settings control or that no OFF transition could slip
-between the re-read and engine start. The final gate in
-`RunCoordinator.start()` is now documented as a re-read of unattended
-authorization under the coordinator lock immediately before `engineStarted`:
-OFF/unreadable at that read blocks a not-yet-started action. The external
-`PackageManager` component-setting write is outside that lock and cannot be
-made atomic with the read or `engine.run()`; an authorization withdrawn after
-the re-read cannot be observed before the engine starts, and work already
-started is never cancelled. The `ExploitService` boot-component recheck is
-described as defense-in-depth and READ-ONLY, not an atomic transition, with the
-authoritative `submit()`/durable-publish gate and pre-engine recheck named as
-the real gate. `SettingsFragment` / `BootClaimCoordinator` state that the OFF
-write is a `PackageManager` operation outside the coordinator monitor and that
-the claim-time read is read-only, not an atomic transition with admission.
-README and the authorization section replace the unconditional guarantee with
-the honest residual window; no device safety is implied.
-
-Unchanged and re-verified: fail-closed on OFF/unreadable, the authoritative
-final gate in `submit()` plus pre-engine recheck, no revocation after engine
-start, unattended soft-reboot OFF, hardware/OS FGS eligibility gate, final gate,
-preflight, boot claim, durable barrier, recovery lockout, `START_NOT_STICKY`,
-SUCCESS/progress reporting, no root probe, loader pin/preflight and no in-app
-recovery. Added one deterministic source-text guard test in `RunCoordinatorTest`
-that the removed overclaim phrases are absent from the touched Java/README
-sections and the honest replacement text is present; no behavior test was
-weakened. Focused `:app:testDebugUnitTest` (`RunCoordinatorTest` 59 tests +
-`ExploitServiceAsyncTest` 16 tests = 75 tests, 0 failures / 0 errors / 0
-skipped), `git diff --check` clean. No device, ADB, payload,
-privileged-container, APK-assembly or native work was performed; no commit,
-stage or push.
-
-## 2026-11-26 — R5.5: final pre-engine gate ordering (liveness half of R2-20) — PR #2
-
-Short contract note (R5.9 consolidates): `RunCoordinator.start()` now reads
-unattended authorization **before** owner-token liveness inside the same lock
-that sets `engineStarted`. The authorization read may block while that lock is
-held, so an `onDestroy()` that invalidates the owner token during the read is
-still observed before the not-yet-started request is authorized: it is denied
-as a proven pre-effect `PRECHECK_FAILED` with an honest offender-specific reason
-(`FOREGROUND_OWNER_GONE_BEFORE_ENGINE` / `UNATTENDED_AUTH_CHANGED`), a checked
-attempt clear and no engine call. Honest boundary: an invalidation arriving
-after the recheck but before `engine.run()` is intentionally **not** revoked —
-once `engineStarted` is set the coordinator owns the work and never cancels it.
-Deterministic latches/fakes only; no engine behavior, rc, `/dev`, persistence,
-recovery, device, ADB, payload or APK changes.
-
-## 2026-11-26 — R5.4: foreground side effects serialized with the lifetime decision (foreground half of R2-20) — PR #2
-
-Short contract note (R5.9 consolidates): `ExploitService` adds a monotonic
-`foregroundEpoch`, incremented only under `startsLock` whenever a start
-attaches/re-attaches the notification. A flush snapshots the epoch with its
-decision under that lock, then re-acquires the lock, verifies the epoch and the
-removal claim, and calls `stopForeground(STOP_FOREGROUND_REMOVE)` inside the
-lock under a single `flushInProgress` guard; a contending flush waits without
-`startsLock` and re-decides. A newer foreground attachment in the decision ->
-side-effect gap therefore keeps its notification, while the stale flush still
-retires its own immutable per-ID `stopSelf` snapshot exactly once. A start that
-fails before re-attaching foreground still gets its own stopSelf, and bounded
-R5.3 eviction retirement is untouched. Host-only pause seam and deterministic
-tests only; no operation is replayed, cancelled or transferred, and no device,
-ADB, payload or APK work was performed.
-
-## 2026-11-26 — R5.3: total request bookkeeping bounds (R2-21 / dispatch half of R2-17) — PR #2
-
-Short contract note (R5.9 consolidates): `ExploitService` outcome reports now
-delegate to `RunCoordinator.noteRequestOutcomeAsync`, so the correlated ledger
-record is written on the caller before observer delivery is posted to a
-dedicated **bounded (64 entries) reporter queue with an abort policy**. A
-rejected post is logged, never retried and never replaced with extra admission
-work; the Activity can reconcile its own request from the ledger on `onStart()`.
-Admission stays single-flight on its own single-thread worker. Retained start
-records are bounded too: oldest resolved records move out of the active map
-while a long-lived indeterminate host keeps the foreground alive, into a small
-bounded (64 IDs) history preserving TERMINAL-state observations. When that
-history is also full, the eldest resolved ID receives its own `stopSelf` at
-eviction (outside the bookkeeping lock, retiring only that start ID); the
-remaining deferred IDs are stopped at the final flush. No start ID is lost to
-bounded pruning. No operation is replayed, cancelled or transferred, and no
-privileged/device work was performed.
-
-## 2026-11-26 — R5.2: synchronous start-failure stays off the storage lock (R2-18) — PR #2
-
-Short contract note (R5.9 consolidates): no production change was needed —
-`MainActivity`'s synchronous service-start catch already uses
-`noteRequestOutcomeAsync`, whose inline part writes the correlated `REJECTED`
-record under `outcomeLock` only and posts `noteRequestOutcome` (`lock ->
-outcomeLock`) to the outcome executor. Added deterministic host tests with a
-harmless blocked `OperationAttemptStore` and a throwing starter: the click
-returns while a separate boot admission holds the durable monitor, the ledger
-already carries the honest reason, no coordinator locking method ran on the
-click caller, checked boot persistence is respected after release, and two rapid
-failures keep two distinct correlated records. No device, ADB, payload or APK
-work was performed.
-
-## 2026-11-26 — R5.1: replayable request-outcome ledger (R2-17) — PR #2
-
-Short contract note (R5.9 consolidates): a bounded 32-entry LRU
-`RequestOutcomeRecord` ledger lives under a separate `outcomeLock` with a strict
-`lock -> outcomeLock` order; correlated submit/note paths record outcomes,
-`getRequestOutcome` takes only `outcomeLock`, and `noteRequestOutcomeAsync`
-records on the caller before best-effort posting to a dedicated single-thread
-daemon outcome executor. `MainActivity.onStart()` reconciles its own pending ID
-from that ledger after rendering the latest snapshot; absence stays uncertainty,
-no click is replayed, and the single-slot Snapshot/identity guard and operation
-ownership are unchanged. Harness-verified with focused `RunCoordinatorTest` and
-`MainActivityTest` runs; no device, ADB, payload or APK work was performed.
-
-## 2026-11-26 — Fourth repair round (R4.1–R4.9) consolidated — PR #2 / branch `fix/app-correctness-safety`
-
-Authoritative record of the **fourth repair round** (final local HEAD
-`74d35f5`) on top of the R3 round (`1252b3d`). It closes Re-review 3 findings
-**R2-13, R2-12, R2-14 (narrowed), R2-16, R2-17, R2-18, R2-20, R2-21 and R2-22**.
-Every phase below was host-verified only by focused runs and independent
-reviews; **no device, hardware, ADB, payload, privileged-container, cold-boot,
-soft-reboot, APK-assembly, dependency or bundled-binary validation was
-performed**, and no full-suite/CI green result is claimed locally. Older notes
-below are historical phase records, not current gate claims.
-
-### Phase table — commit, finding, fix loop, verification
-
-| Phase / commit | Finding closed | Fix loops and focused verification evidence |
-|---|---|---|
-| R4.1 `6348c71` | R2-13 | Replaced the instance-local poison latch with a static process-wide latch keyed by the attempt-preference file, so every store wrapper (coordinator, boot claim, artifact authorization) fails closed after a poisoned commit. Harmless cross-wrapper tests; **59 focused tests, 0 failures**; two independent reviews (correctness/safety, test/contract) APPROVED, no Required/Critical. |
-| R4.2 `b8526d8` | R2-12 | `RUN_STATUS_VERDICT_CONFLICT` maps to rc7, never definitive rc1; origin-aware diagnostics never claim native rc=7 for an unknown exit or Java exception; unverified outcomes retain lease, freeze, attempt and single-flight. **137 host CTest + 114 focused Java tests, 0 failures**; two independent reviews (native, Java contract) APPROVED. |
-| R4.3 `916a18e` | R2-14 (narrowed, not proved safe) | Two-phase acknowledgement: reader accepts a definitive non-7 code only with a matching `dfroot_confirm_` marker (same operation ID and code); unconfirmed intended marker yields no decision; any detected publication failure publishes rc7 **before** retraction and the writer exits 7. Early-observation test reworked into fix verification + three confirmation cases. **140 host CTest, 0 failures**, `-Wall -Wextra -Werror -pedantic` clean, no production test hooks; three independent reviews APPROVED. Residual abnormal-death window remains an OPEN hardware/OS gate. |
-| R4.4 `7e41d27` | R2-16 (later SCOPED / OPEN in R5) | Authoritative unattended gate moved inside `submit()` under the durable-publish lock, with a pre-engine recheck; OFF during init/blocked commit yields a proven pre-effect `PRECHECK_FAILED` (no engine, checked clear); OFF after engine start is not revoked. **98 focused tests, 0 failures**; two reviews APPROVED. Optional residual: no isolating test for the second recheck window — recorded, not silently accepted. |
-| R4.5 `11ae87d` | R2-17 | Click-time request IDs carry through service to coordinator; correlated `ACCEPTED`/`REJECTED`/`CANCELLED`; unclaimed service-local cancellation published and closed exactly once, never replayed; accepted work stays coordinator-owned. **142 focused tests + 3 deterministic `BootReceiverBoundaryTest` repetitions, 0 failures**; two reviews plus **one Required fix loop** (stale/flaky OFF-at-admission assertion) RESOLVED. Optional residual: benign duplicate correlated rejection on unattended-OFF — recorded. |
-| R4.6 `15bb5cc` | R2-18 | Main-thread failure/cancellation reports enqueued on the admission worker instead of taking the durable-lock monitor; status/notification reads stay volatile-snapshot-only. Narrow guarantee: a worker may still wait on storage. **95 focused tests, 0 failures**; correctness review found **one Required issue** (over-broad destruction guard dropped early `REJECTED`), fixed and re-review RESOLVED; test-quality review APPROVED. |
-| R4.7 `a51f74e` | R2-20 | Per-start lifetime resolves each start once; foreground removal no longer suppresses `stopSelf` for later-resolved starts; per-service owner token invalidated before destruction cancellation and denied under the admission lock and before engine start; engine-started work never cancelled. **158 focused tests in the touched classes, 0 failures** (156 initially, 158 after the Required fix loop); correctness review found **two Required interleavings** (stranded accepted start, `foregroundRemoved` gating `stopSelf`), both fixed and re-review RESOLVED; test-quality and architecture reviews APPROVED. |
-| R4.8 `186fc8d` | R2-21 | Duplicate starts rejected before WakeLock/admission work while another request is `PENDING`/`CLAIMED`, with correlated `REJECTED`; single-thread admission worker shut down gracefully in `onDestroy()` after outcome reports are queued and recreated on `onCreate()`. **74 focused tests + 3 determinism repetitions, 0 failures**; test-quality review found **one Required flake** (ungated `PENDING` assertion), fixed via a per-cycle latch gate and re-review RESOLVED; correctness review APPROVED with optional residuals. |
-| R4.9 `74d35f5` | R2-22 | Honest wording/docs only, no functional/control-flow change (message text only): `SOFT_REBOOT_PENDING` no longer says "root active" (now `DFRoot: soft-reboot was requested (root status unverified); verify root status yourself`, code 4 kept); `RunCoordinator` Javadoc says `engineFinished` proves only that the Java call returned/threw and that app-data reset is not evidence effects stopped; final messages ban "root active"/bare `SUCCESS`; README/CHANGELOG/PORTING/plan/todo consolidated. Focused `ResultMessagesTest`: **50 tests, 0 failures / 0 errors / 0 skipped** (10 parameterized cases × 5 methods). No retry/clear control added. |
-
-### R4 final gate state and residual optional items
-
-- **Result contract:** marker conflict → rc7 (never rc1); definitive non-7
-  results need a matching `dfroot_confirm_` marker; an early intended marker is
-  indeterminate; rc7 is published before retraction; the residual
-  abnormal-death window is an **OPEN hardware/OS gate, NOT proved safe**.
-- **OFF / ownership:** authoritative gate in `submit()` with pre-engine
-  recheck; no revocation after engine start; boot FGS eligibility is still a
-  hardware gate. Unattended soft reboot stays OFF; manual soft reboot remains
-  experimental/unvalidated on GZIF (historical full hard reboot on this model).
-- **Recovery:** no in-app UI; ordinary users intentionally locked out behind
-  the durable barrier; app-data reset only discards the barrier and is NOT
-  safe recovery; `engineFinished` is a narrow trusted-caller precondition, not
-  a retry/clear control; a new `BOOT_COUNT` is diagnostic only.
-- **Residual optional items recorded, not silently accepted:** R4.4 missing
-  isolating second-recheck test, R4.5 duplicate correlated rejection, R4.8
-  idle worker thread/benign duplicates, signed-release job not running
-  packaged-pin verification itself (inherited PR #1 policy), AES key in argv out
-  of scope, `/dev` marker-root trust, sticky-bit `/data/local/tmp` owner
-  (`shell`), recovery UI out of scope. Final comprehensive reviews additionally
-  recorded (non-blocking): permissive null-context branch in the production
-  `BootComponentGate` constant (all production callers pass a context),
-  fatal-`Error` during checked commit can leave a service-local WakeLock until
-  timeout, and a synchronous locking coordinator call in the Activity's
-  service-start failure catch (responsiveness only).
-- **Final gate:** four independent comprehensive reviews run at HEAD
-  `74d35f5`: correctness/lifecycle APPROVE, security APPROVE, architecture/native
-  APPROVE, test/build/CI REQUEST CHANGES solely for stale R4.9 "uncommitted"/HEAD
-  tags — corrected here and re-reviewed APPROVE. Fresh host verification by the
-  main agent: **623 JVM tests / 45 suites, 0 failures/errors/skips**, **140 host
-  CTest**, lint 0 errors, workflow policy 67/67, signing 40/40, make 36/36, pins
-  matched, `git diff --check` clean. These are **prior-round baselines at R4
-  (`74d35f5`), not a fresh R5 full-suite result**. A fresh remote CI green run
-  after push remains a **POST-PUSH gate**; it is not claimed locally.
-
-## 2026-11-26 — R4.8: bounded service-local admission lifetime (R2-21)
-
-Short note (R4.9 consolidates docs): `ExploitService` now admits at most one
-undecided service-local request. Any further start while an owned request is
-`PENDING`/`CLAIMED` is correlated-`REJECTED` on the caller with
-"another operation request is pending; duplicate rejected" **before** a timed
-WakeLock is acquired or work is enqueued; early null-intent and foreground-start
-failures use that same rejection while a request is pending. The lazily created
-single-thread admission worker is shut down gracefully in `onDestroy()` only
-after cancellation/outcome reports have been enqueued, and a fresh worker (and
-owner token) is used on the next `onCreate()`. Already-queued reports still run;
-no safety check, lease transfer, success/progress semantic, root probe,
-kill/signal or replay contract changes.
-
-## 2026-11-25 — R4.7: per-start foreground lifetime and owner-token gate (R2-20)
-
-Short note (R4.9 consolidates docs): `ExploitService` now tracks every start as
-`PENDING → CLAIMED → ACCEPTED/REJECTED/CANCELLED → TERMINAL`, issues `stopSelf`
-once per resolved start only when no owned start is unresolved and no owned
-operation is active, and removes the foreground notification only at that point.
-A terminal snapshot for one operation cannot cancel or stop a newer pending
-request. Each service instance mints a one-way `RunCoordinator.OwnerToken`,
-invalidated before pending work is cancelled on destruction; the coordinator
-rejects a dead owner under the admission lock and rechecks before `engine.run()`.
-A proven pre-engine owner loss clears the durable attempt as `PRECHECK_FAILED`
-without an engine call; an engine that already started is never cancelled and an
-unverified outcome keeps lease, freeze and barrier. Legacy callers without a
-token keep the previous contract. No root probe, kill/signal or replay.
-
-## 2026-11-25 — R4.6: main-thread outcome reporting off the storage lock (R2-18)
-
-Short note (R4.9 consolidates docs): `ExploitService` now enqueues every
-main-thread null/unknown-intent, foreground-start, wake-lock, admission-dispatch
-and destruction-cancellation outcome report on the admission worker instead of
-calling the coordinator's lock-taking `noteRequestOutcome` from
-`onStartCommand`/`onDestroy`. The queued report is a strict no-op if the service
-was destroyed after that report was requested. Status/notification reads still
-use only the volatile snapshot. The durable barrier lock scope is unchanged: a
-background worker may still block on storage, so this is not a claim that all
-paths are nonblocking. Harness tests use blocked harmless storage to verify
-main-thread responsiveness and off-main publication.
-
-## 2026-11-25 — R4.3: publication confirmation narrows R2-14
-
-Fourth repair round on `fix/app-correctness-safety` (after `6348c71` / `b8526d8`).
-Scope: R2-14 only. No device/ADB, payload, privileged container, APK assembly,
-Java suite, loader pin, boot claim, preflight, kill/signal, progress-marker or
-rc-contract change. The reproduced early-observation race is closed in code at
-the detected-failure level; the abnormal-death instant remains an open
-hardware/OS gate and is NOT claimed proved safe (see residual window below). The broader "ANY detected failure" claim was later narrowed by R5.7; see the R5.7 boundary note below.
-
-- **Code fix, not documentation or a passing reproduction.** `run_status_write()`
-  now publishes two checked markers in the same root: the intended
-  `dfroot_terminal_<operation_id>_rc<code>` and a matching
-  `dfroot_confirm_<operation_id>_rc<code>` (magic `DFROOT_CONFIRM 1`, validated
-  operation ID and code, unpredictable temp name, `O_EXCL|O_NOFOLLOW`,
-  regular-file `fstat`, full write, `fsync`, `fchmod 0644`, checked close, atomic
-  `link()`, temp unlink, directory fsync). It returns 0 / its intended exit code
-  only when **both** phases complete. Any failure in either phase publishes the
-  rc7 channel **before** retracting either final link, cleans temps, restores the
-  first diagnostic and returns -1 (writer exits 7).
-- **Reader.** `struct run_status_result.publication_confirmed` is set only for a
-  definitive non-7 verdict with a matching confirmation (same ID and code).
-  An intended marker without confirmation yields NO decision with an explicit
-  "not publication-confirmed; completion unverified" diagnostic; rc7 stays
-  authoritative without confirmation; two different observed codes (confirmed
-  or not) are rc7; foreign/malformed/wrong-magic confirmations cannot confirm a
-  run. `run_status_exit_code()`, `run_status_decide()` and the native reader
-  (`exp.c`) all refuse to act on an unacknowledged non-7 code and keep polling.
-- **Host-only seams.** `RUN_STATUS_FAULT_CONFIRM` fails only the confirmation
-  write; all hooks remain behind `RUN_STATUS_TEST_HOOKS`, absent from the
-  production `dfroot`/`bootstrap` targets.
-- **Tests.** `post_link_early_observation` is now fix verification (N at the
-  unconfirmed gate, R after rc7 publication, writer 7). Added
-  `confirmed_publication_yields_success`, `confirmation_failure_is_indeterminate`
-  and `unconfirmed_or_crossed_markers_never_confirm`. Existing tests were
-  strengthened where any publication failure now correctly yields rc7 instead
-  of a clean absence; none was deleted.
-- **Verification:** `cmake -S app/src/main/jni/host-tests -B
-  /mnt/240G_SSD/opencode_tmp/dfroot-hosttests-r4 && cmake --build ... -j && ctest
-  --test-dir ... --output-on-failure --no-tests=error` → **140/140 passed, 0
-  failed** (was 137), with `-Wall -Wextra -Werror -pedantic` clean. Production
-  `app/src/main/jni/CMakeLists.txt` defines no `RUN_STATUS_TEST_HOOKS`.
-- **Residual window (OPEN hardware/OS gate, NOT proved safe):** abnormal death
-  after the confirmation link but before its fsync, or between intended-marker
-  publication and confirmation, can still expose an early observation to an
-  external reader. Device crash/power-loss validation of `/dev` marker
-  durability remains required. No full Java suite or CI run was performed here.
-
-## 2026-11-25 — Result-contract wording (R4.2, R2-12)
-
-- A **marker conflict** is rc=7 **indeterminate**, no longer rc=1: contradictory
-  terminal observations confirm no completed outcome, so a conflicted or
-  otherwise unconfirmed result is neither a definitive error nor a success and
-  never authorizes another operation. The rc contract values (0/1/2/3/4/6/7),
-  `/dev/df` and `/dev/dfm6` progress-only SUCCESS semantics, and the no-root-probe
-  policy are unchanged.
-
-## 2026-11-25 — Third repair round (R3) consolidated summary — PR #1 rebase, CI integration, R2-12/13/14/16/17/18/19 + R2-04 caveat
-
-Authoritative record of the third repair round on `fix/app-correctness-safety`
-(final local HEAD `1252b3d`). The branch was rebased mid-round onto merged
-**PR #1** (`origin/master` `9f60e16`) and then repaired in six phase commits;
-all earlier sections below are historical.
-
-**Rebase / CI integration (PR #1 contract retained):**
-
-- `f6faf75` — integrated PR #2 app verification with the merged PR #1 CI
-  policy: preserved the release/signing/policy jobs, extended the **closed**
-  allowlists for app-checks, loader-pin-fixtures and packaged-pin verification,
-  pinned every action, moved the unit-test report check out of the forbidden
-  heredoc, and kept fail-closed upload settings.
-- `770d07c` — restored the JUnit/Robolectric test-only dependencies dropped by
-  the PR #1 app build script and added `buildSrc` to the hermetic signing
-  fixture so packaged-loader task definitions resolve.
-
-**Phase commits and finding closure (host evidence only):**
-
-| Finding | Commit | Closure |
-|---|---|---|
-| R2-12 | `6ebf9e3` | Terminal classifier failures map to rc=7; a single authoritative unverified-outcome predicate stops timeout/interruption flags masking an unknown exit; `RunCoordinator` retains lease/freeze/attempt on every unverified result or engine exception. |
-| R2-13 | `2a74dd0` | Incomplete/corrupt persisted attempts fail closed; a store poisoned by a failed checked commit cannot prove durable absence until a post-restart store re-reads durable state. |
-| R2-14 | `6012c21` | Post-link publication window stated as provable: pre-link failure leaves no final marker; rc=7 wins once published; only results acted on after publication completes are indeterminate. Deterministic concurrent-reader host test proves an early, unrevocable confirmed observation is possible. **Superseded by the R4.3 confirmation protocol above.** |
-| R2-16 / R2-17 | `b87318f` | Boot-OFF is re-read at admission for queued unattended requests (OFF/unreadable fails closed, admitted work untouched); every rejected coordinator submission publishes a fresh snapshot so the Activity shows the real barrier reason and leaves its pending state (pre-submission Boot-OFF suppression is intentionally silent). |
-| R2-18 | `d32006e` | Checked attempt-store work moved to a bounded single-thread admission executor (claim-once/close-once); read-only availability diagnostic computed on a separate worker with sequence/generation guards. Boot OFF, durable barrier, single-flight and fail-closed diagnostics remain authoritative. |
-| R2-19 + R2-04 caveat | `1252b3d` | In-process recovery requires confirmed engine completion, not just timeout publication; persisted-attempt recovery is a trusted post-process-death acknowledgement with a checked clear and no UI/retry/boot-count proof; final-result messages drop bare `SUCCESS` ("run completed — verify root status yourself" / "already attempted/hooked; root status unverified"). Typed codes, the already-hooked SUCCESS code/no-reentry guard, `/dev/df` and `/dev/dfm6` progress strings, and no-root-probe policy unchanged. Narrowed in R4.9: `engineFinished` proves only the Java call ended — see §R4. |
-
-**Final local verification (non-privileged host only, R3 prior-round
-baseline — not a fresh R4 full-suite result):** **554 JVM tests / 45
-suites, 0 failures / 0 errors / 0 skipped** at that round; **137 host CTest
-cases, 0 failures** then (**140** after R4.3); lint **0 errors / 15 warnings**; workflow policy **67/67**; signing
-**40/40**; make **36/36**; `:app:tasks --all` resolves and the clean/tampered
-negative loader-pin fixture is green. Pins still match `app/build.gradle.kts`
-and `app/src/main/jniLibs`; `git diff --check` clean. No dependency was added or
-removed and no bundled loader/binary changed; the documentation, notices and
-hygiene edits introduce no runtime behavior change.
-
-**Open release/hardware gates (not claims):** Direct Boot FGS eligibility from
-boot; real soft-reboot safety (historical full hard reboot still stands); `/dev`
-marker-root trust; sticky-bit `/data/local/tmp` owner (`shell`) limitation; AES
-key in argv out of scope; owner-facing recovery UI out of scope (ordinary users
-stay locked out behind an unconfirmed persisted attempt); a new `BOOT_COUNT` is
-diagnostic only, **not** proof of safe recovery. No device, hardware, ADB,
-payload, privileged-container, cold-boot, soft-reboot or APK-assembly validation
-was performed. A fresh remote GitHub Actions run after push, with all PR #1
-policy jobs plus restored app checks, loader-pin fixtures and packaged-pin
-verification green, is the **POST-PUSH gate**; CI green is not claimed locally.
-
-## Unreleased — PR #1 hardening (CI build reliability)
 
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
 line with the shipped configuration (Gradle wrapper **9.9.2** with a pinned
 distribution SHA-256; AGP **9.5.0** effective through
-`gradle/libs.versions.toml` with no root `build.gradle.kts` pin; Kotlin/Java
-sources unchanged).
+`gradle/libs.versions.toml` via the version-catalog alias with no root
+`build.gradle.kts` pin; Kotlin/Java sources unchanged).
 
 - **Signing writer and fail-closed behavior** (`scripts/WriteSigningProperties.java`,
   `app/build.gradle.kts`): signing material is serialized safely for arbitrary
   passwords/aliases and locales; `signing.properties` is optional at
   configuration time (a fresh checkout no longer fails `assembleDebug`),
-  incomplete properties fail with a readable error, and local keystore/property
+  incomplete properties are reported readably, and local keystore/property
   files are created with restrictive permissions and verified after writing.
-  Without `signing.properties`, **Release is unsigned** (warning only) and
-  **Debug is debug-keystore signed**; an installable Release requires signing.
+  With PR #3's rebased semantics, absent/incomplete signing material installs
+  a harmless placeholder and **disables/fails closed on every release task**;
+  Debug stays debug-keystore signed. An installable Release requires complete
+  signing material.
 - **Protected release environment** (`.github/workflows/build.yml`): least
   privilege by default; only a push of a `v*` tag runs `build-release` in the
   `release` environment, where the four `KEYSTORE*` secrets are available.
-  PR/branch/manual runs build a **debug-keystore-signed Debug + unsigned
-  Release** pair with no secrets, with no release signing on those events, and
-  never publish a GitHub Release; their unsigned APKs are uploaded as a public,
-  downloadable Actions artifact carrying the same notice/licence bundle.
-  Ancestry check precedes any secret reference; the signed APK
-  is `apksigner`-verified, checksummed and uploaded with 1-day retention; the
+  Ancestry check precedes any secret reference; the signed APK is
+  `apksigner`-verified, checksummed and uploaded with 1-day retention; the
   publish job only downloads, verifies and publishes. Action references are
-  hardened/pinned to full 40-hex SHAs and permissions are least-privilege; the
-  gates and exact step/run-script allowlists remain enforced by contract tests.
+  pinned to full 40-hex SHAs and permissions are least-privilege.
+- **PR/branch/manual CI artifacts, reconciled with PR #3**: those events run
+  all host suites as required gates and build a **debug-keystore-signed Debug**
+  APK (no signing secrets, no signed Release, no GitHub Release). The APK is
+  uploaded as a public, downloadable Actions artifact named
+  **`DFRoot-UNVERIFIED-CI`**, carrying `GPL-3.0.txt`, `LICENSE`, `NOTICE` and
+  `THIRD_PARTY_NOTICES.md`. It is explicitly UNVERIFIED — no release claim.
+  The protected tag path adds PR #3's packaged-byte, provenance-identity and
+  release-evidence gates before any signed artifact is uploaded or published.
 - **New release key identity warning**: releases from this hardened pipeline
   are signed with a **new key identity**. Android will not overwrite-update an
   installed application signed by a different key — uninstall any existing
-  DFRoot GZIF build before installing a signed release APK (**unsigned CI
-  Release artifacts** from PR/branch/manual builds cannot update a signed
-  install either).
+  DFRoot GZIF build before installing a signed release APK (**UNVERIFIED CI
+  Debug artifacts** cannot update a signed install either).
 - **Make/DDK hardening** (`Makefile`, `scripts/ddk-image.sh`): exactly one
   digest-pinned `android13-5.15` DDK image for the single embedded KMI, derived
   from CI instead of a floating tag; Podman uses `--network=none`,
@@ -891,44 +738,456 @@ sources unchanged).
   the build-id note); they are not byte-identical.
 - **GPLv3 licence conveyance**: added verbatim `GPL-3.0.txt` from
   https://www.gnu.org/licenses/gpl-3.0.txt; `NOTICE` and
-  `THIRD_PARTY_NOTICES.md` now state the full GPL-3.0-or-later obligations for
-  the bundled userspace loaders (correcting the "no other obligations"
+  `THIRD_PARTY_NOTICES.md` state the full GPL-3.0-or-later obligations for the
+  bundled userspace loaders (correcting the "no other obligations"
   overstatement) while retaining the provenance and complete-source offer.
   Both `GPL-3.0.txt` and the repository's own GPL-2.0 `LICENSE`, plus `NOTICE`
   and `THIRD_PARTY_NOTICES.md`, accompany the signed release assets **and** the
-  publicly downloadable unsigned CI APK artifact, with the upload and publish
-  allowlists tightened to those exact files.
-- Documentation corrections in `README.md`, `PORTING-GZIF.md`, `NOTICE` and
-  `THIRD_PARTY_NOTICES.md`: 9.9.2 / 9.5.0-effective, signing/debug behavior,
+  publicly downloadable UNVERIFIED CI APK artifact, with the upload and
+  publish allowlists tightened to those exact files. The signed bundle is not
+  the only unit of conveyance.
+- **Documentation corrections** in `README.md`, `PORTING-GZIF.md`, `NOTICE`
+  and `THIRD_PARTY_NOTICES.md`: 9.9.2 / 9.5.0-effective, signing/debug behavior,
   CI KO hash, digest-pinned DDK image, environment-only Make credentials,
   single-KMI Make, and the CI event matrix. No AndroidX / Material Components
-  dependency (the themes use the framework `android:Theme.Material*`), four KMI
-  modules embedded in `libksudnext.so` with GZIF using `android13-5.15`.
-  Historical hardware-validation evidence in `PORTING-GZIF.md` is retained.
-- Regression coverage: workflow policy/contract tests, make contract tests,
-  signing material/permission tests and signed/unsigned release smoke tests all
-  pass; new tests assert that the license and notice assets are packaged,
-  uploaded and published — including a byte pin for `LICENSE` and
-  equality-locked upload/publish allowlists — while still rejecting `secrets/`,
-  `.jks`, `signing.properties` and `..` artifact entries.
+  dependency (themes use framework `android:Theme.Material*`); four KMI modules
+  are embedded in `libksudnext.so` with GZIF using `android13-5.15`.
+- **Regression coverage**: workflow policy/contract tests, make contract tests,
+  signing material/permission tests and signed/unsigned release smoke tests
+  cover the hardened pipeline, including license/notice packaging, a byte pin
+  for `LICENSE`, equality-locked upload/publish allowlists, and rejection of
+  `secrets/`, `.jks`, `signing.properties` and `..` artifact entries.
 
-### Cross-PR integration note
+### Post-rebase integration
 
-PRs #2–#5 were based on `38eebc3`; before merge they must rebase onto this
-hardened head and refresh every shared file they touch. In particular:
+PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
+head. The round-13 section at the top is authoritative for the upcoming
+documentation commit and the current validation boundary (round 8 for the Phase
+B code head `0ea022f`); the
+round-5 section above and the host-suite counts, stable-ID disposition table and
+validation boundary in the round-4 section below are historical. run6/run8 and
+every prior CI run predate
+the rebase: they are historical and do not validate this head. No tag was
+created by us. Where PR #1's unsigned Release CI
+APK met PR #3's fail-closed release variant, the rebased CI path builds Debug
+only and labels the artifact UNVERIFIED; signed releases are exclusively on
+the gated `v*` tag path.
 
-- PR #5 changes the LKM bytes, so PR #3's `KO_EXPECTED_SHA256S` and every KO
-  hash/size quoted in the docs must be rebuilt and re-pinned against the new
-  artifact.
-- PR #4 must update its Gradle reference from **9.7.1** to **9.9.2** and refresh
-  the referenced PR #1 head to the current hardened commit.
+## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
-Both licence texts, `NOTICE` and `THIRD_PARTY_NOTICES.md` accompany the signed
-release assets **and** the publicly downloadable unsigned CI APK artifact: the
-repository is public, so Actions artifacts are not private, and the unsigned
-APKs are treated as conveyance with the same notices and source offer rather
-than as "internal, not third-party" outputs. The signed release bundle is not
-the only unit of conveyance.
+> **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
+> describe the round-4 implementation, not the literal head. The round-13
+> section at the top is authoritative for the committed head `e823fb4` and
+> the current validation boundary (round 8 for the Phase B code head `0ea022f`).
+
+**All evidence in this section is host-only.** No hardware run validates the
+current head of `fix/native-exploit-robustness`; a green build does not certify
+safe privileged execution. No tag was created and no release artifact was
+published. This round-4 repair also changes code, tests, CMake and CI in the
+preceding commits; the final documentation commit updates only docs and the PR
+description. Historical run6/run8 results stay
+attached to the historical implementation described in §4.8-gzif below.
+
+### Stable-ID disposition (consolidated review comment 7126155178, round 4)
+
+| ID | Round-4 disposition | Host evidence / remaining boundary |
+|---|---|---|
+| P1-02 | **Addressed in host-tested scope; device timing/quiescence UNVALIDATED** | 128-bit nonce generated and bound before any state write; strict `df_parse_final_token()` (exact length, no embedded NUL, exact nonce, no extra bytes) with garbled/foreign tokens ignored; reserved-nonce `BOOTSTRAP_FAILED` published only on the separate app-owned `dfbootfail` channel and consumed as observable rc=1 via a dedicated reader. Real-file and mock tests cover stale state and repeated observations. Android publication/access and on-device freshness remain unproven. |
+| P1-07 | **Addressed in host-tested scope; asynchronous safety UNVALIDATED** | Cleanup runs exactly once, after the first valid bound status observation (or once on the shared deadline if none arrives), on the SAME absolute deadline as the poll loop; its time is charged to that deadline and the clock is rechecked. Recovery polling is bounded to 5 s and clamped to the remaining deadline; a NULL/failed `recovery_ok()` or timeout publishes `REBOOT_SKIPPED` and can only disable the reboot. A failed restore adds the rc-64 bit to every code. Mocks prove ordering, count and fail-closed branches, not device quiescence or that asynchronous activity has finished. |
+| P1-08 | **OPEN — RELEASE GATE** | The bundled loaders hardcode `/data/local/tmp/.ksud-stage`; a `shell`-uid process can still swap the staged file before the loader renames it. Closing it requires rebuilding the loaders. Documentation is not a fix: keep blocked, do not claim fixed. |
+| P2-04 | **Addressed for host/distributable gates; real-device release path UNVALIDATED** | The packaged-byte gate always runs; the real APK gate runs on the protected `v*` tag publishing path before any signed artifact is uploaded or published, over the complete staged APK set, with per-APK manifest + `so_sha256` binding, manifest/dump invalidation at entry and `if-no-files-found: error`. PR/branch/manual runs upload only an explicitly UNVERIFIED Debug APK with no release claim. The byte gate rejects unknown bytes but **accepts the two known obsolete pins**; release is withheld by policy (reviewed re-pin, OPEN P1-08, device validation), not by the hash gate alone. Passing the gate is not device validation. No tag was created by us. |
+| P2-06 | **Addressed for identity checks; provenance remains informational** | Required identity check on EVERY `dfroot-build-provenance.txt` (git HEAD == `GITHUB_SHA`, release variant, reviewed KO pin, KO manifest and splicehelper binary/source digests, compiler identity fields), plus complete-set release evidence with one row per uploaded APK. Records are audit evidence, not an attestation or an independent reproducible-build proof. |
+| P2-07 | **Addressed in this repair** | Test/lifecycle/failure-path counts and CI markers documented below; the PR description is replaced to match the current head and actual CI without device-verification claims; historical run6/run8 remain attached only to the historical implementation. |
+| P2-08 | **Addressed in host-tested scope; real PackageManager/fsync UNVALIDATED** | A durable write-ahead `PENDING` marker is published before the commit (full write, read-back, fsync); recovery requires a fully validated PENDING→commit cycle of the SAME key; unattributable faults latch a sticky fail-closed `WILDCARD`; the boot component is disabled synchronously at the failure boundary. Device-protected storage and real PackageManager/fsync behavior are untested. |
+| P2-09 | **Addressed; verified by host fixtures** | The packaged verifier invalidates its manifest and section dump at entry; fixtures reuse a single output path for success→failure, poisoned-dump and failure→success sequences, and the upload path verifies the complete staged set before upload. |
+| P2-10 | **Addressed in host-tested scope; real UI lifecycle UNVALIDATED** | Lifecycle-scoped listener registration/removal, component-state-authoritative boot switch, the user can always turn boot OFF, nothing auto-enables, and a framework write is accepted only when actual component state matches. Real Activity/Fragment recreation and PackageManager behavior are unvalidated. |
+
+Findings that **remain resolved in the prior narrow scope**: P1-01, P1-03,
+P1-04, P1-05, P1-06, P2-01, P2-02, P2-03, P2-05 and P1-09 (newly resolved in
+round 4 through the CI-policy environment isolation). Their earlier evidence is
+unchanged; none of them constitutes device validation.
+
+### Final host test shape (round-4 head; historical — see round-5 above)
+
+- **Native** (`make -C tests/native test`): **49** `status_protocol` cases;
+  `final_publish_test` against real temp files (0644 under a hostile umask,
+  atomic replace, symlink temp sabotage, reserved-nonce bootfail token and
+  strict recovery-status reader); **13** `proc_scan_policy` cases; **26** ELF
+  fixtures; **16 + 14 + 10** kernel / token / release device-version cases.
+  Host tests never execute privileged payloads.
+- **CMake** (`cmake -P`): `ko_hash_policy_test.cmake` **23** cases (clean
+  environment and simulated `CI` / `GITHUB_ACTIONS` / `DFROOT_RELEASE`, skip
+  rejection, variant authority); `packaged_ko_test.cmake` **15** cases
+  including reused-path stale manifest/dump evidence;
+  `apk_packaging_gate_test.cmake` **3** cases using a harmless deterministic ZIP
+  fixture (not a real APK).
+- **JVM** (`:app:testDebugUnitTest`): **28 tests, 0 failures, 0 errors,
+  0 skips** — `LaunchGate` 4, `ListenerLifecycle` 5, `PreferenceIntegrity` 8,
+  `PreferencePersister` 11. CI parses the JUnit XML and asserts exactly
+  28/0/0/0; a green Gradle exit code alone is not accepted.
+- **Suite markers on every non-tag CI event (7/7)**: `marker-native`, `marker-ko-policy`,
+  `marker-packaged-ko`, `marker-apk-packaging-fixture`, `marker-ko-ci-policy`,
+  `marker-jvm`, `marker-junit`; one gate fails if any marker is missing.
+- **Publishing-only gates (`v*` tag path, before any signed upload/publish)**:
+  `marker-apk-gate` (every distributable APK, per-APK manifest + `so_sha256`
+  binding), `marker-provenance-identity` (required, every record),
+  `marker-release-evidence`, `marker-distributable-evidence`, then a single
+  upload choke point on the staged set. PR/branch/manual runs upload only an
+  explicitly UNVERIFIED Debug APK (with the licence/notice bundle) and make no
+  release claim. Provenance is informational evidence, not attestation or
+  reproducible-build proof.
+
+### Validation boundary
+
+P1-02/P1-07 are proven only with host mocks and real-file adapters; device
+timing, quiescence and privileged-state safety are UNVALIDATED. P2-04/P2-06/
+P2-09 are proven with host fixtures and CI-shaped checks; the byte gate rejects
+unknown bytes but **accepts the two known obsolete pins**. Release is withheld
+by policy — a reviewed re-pin, the OPEN P1-08 staging gate and device
+validation — not by the hash gate alone; passing the gate is not device
+validation. No tag was created by us. P2-08/P2-10 are proven with host JVM
+tests; real PackageManager/fsync and UI lifecycle behavior are UNVALIDATED.
+P1-08 remains OPEN. Auto Soft Reboot and Start on Boot remain disabled by
+default and unvalidated. No hardware run validates the rebased head — run6/run8
+and all earlier CI runs validate only the historical implementation (old
+multi-marker protocol, then-current pins, old preference path). A successful
+build does not certify safe privileged execution.
+
+## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
+
+> Historical section. The round-13 section at the top of this file is
+> authoritative for current counts (workflow policy 92), cleanup timing, the
+> recovery channel and the committed head `e823fb4` (round 8 for the Phase
+> B code head `0ea022f`). This section, the round-4 section above it and the phase
+> sections below are kept for provenance only.
+
+**All changes in this section are host-tested only and UNVALIDATED on device.**
+No hardware run has exercised the quarantine latch, the new rc gates or the
+updated UI messages. Documenting a release gate is not closing it.
+
+- **SharedPreferences memory/disk divergence (P2-08).** New
+  `PreferenceIntegrity.java` is a process-wide quarantine latch with a durable
+  marker file in device-protected storage. `init(Context)` / `init(File)` are
+  idempotent; `markAmbiguous(key)` latches quarantine and writes the marker;
+  `markConsistent(key)` clears it ONLY for the same key (a different key cannot
+  recover another key), and when the last key is consistent the marker is
+  removed. A marker found at startup is restored (`SENTINEL_RESTORED`) and keeps
+  the quarantine active across process death. Any marker read/write/delete
+  failure fails closed (quarantine stays set, `durableMarkerActive()` false).
+  `addListener()` lets the UI refresh; `resetForTest()` is test-only.
+  `PreferencePersister.java` keeps its public API: a failed/throwing commit is
+  reported first and then calls `markAmbiguous(key)`; a successful commit calls
+  `markConsistent(key)`. The JVM fake now models separate in-memory and on-disk
+  maps, so a failed commit really leaves them divergent.
+  **Round-4 final behavior (supersedes the in-process latch above):** a durable
+  `PENDING` marker is published *before* the commit with full-write/read-back/
+  fsync; recovery needs a fully validated PENDING→commit cycle of the SAME key;
+  unattributable faults latch a sticky fail-closed `WILDCARD` that no key can
+  clear, and the boot component is disabled synchronously at the failure
+  boundary. Real PackageManager/fsync behavior is UNVALIDATED.
+- **Launch / boot gating.** `ExploitRunner.run()` initializes
+  `PreferenceIntegrity` and evaluates the pure static `earlyExitRc(devDfExists,
+  prefsQuarantined)` before touching the device: `/dev/df` now returns rc 9
+  (`RC_ALREADY_HOOKED`) with a truthful "already hooked" message instead of rc 0;
+  a quarantined preference state returns rc 8 (`RC_PREF_STATE_UNCERTAIN`);
+  `/dev/df` takes precedence when both hold. `MainActivity` disables LAUNCH
+  ROOT while quarantined, updates the button through a listener, states that a
+  failed save blocks launch, and disables the `BootReceiver` component when the
+  marker could not be persisted (so boot gating cannot be trusted).
+  `SettingsFragment` disables "Start on Boot" while quarantined, refuses to
+  enable it, uses the same failure toast/boot-component guard, and refreshes on
+  listener callbacks. `BootReceiver` initializes the latch from the DE context
+  and skips the boot launch when quarantined.
+  Round 4 makes listener registration lifecycle-scoped and the boot switch
+  component-state-authoritative (the user can always turn boot OFF; nothing
+  auto-enables). See the round-4 section above and `PORTING-GZIF.md` §17.
+- **Java rc map is now truthful (phase 1b follow-up).** New `StatusRc.java`
+  mirrors `status_protocol.h`: rc 0 root-only, 1 error, 2 unknown, 3 patch
+  failure, 4 reboot requested, 5 reboot skipped, 6 reboot failed,
+  7 attempt unknown, 8 preference state uncertain, 9 already hooked, plus the
+  additive 64 recovery-failed bit. `base()`, `recoveryFailed()` and `name()`
+  are pure; `name()` appends a recovery warning for ANY rc with bit 64 and never
+  claims "root verified" or a confirmed reboot. `MainActivity.runExploit()`
+  uses `StatusRc.name(rc)` instead of its own string ladder.
+- **Tests / CI.** `tests/java/PreferencePersisterTest.java` now has 11 JVM cases
+  (failed put/remove quarantine, same-key clears, different-key does not, thrown
+  write, marker created and restored after a simulated restart). New
+  `tests/java/LaunchGateTest.java` has 4 cases (early-exit truth table including
+  `/dev/df` precedence, rc constants, recovery bit on every code, never claiming
+  verified root/confirmed reboot). The Gradle `test` source dir already points
+  at `tests/java`; CI's JUnit XML assertion now expects **28 tests** (four JVM classes; see round-4 section above), 0
+  failures/errors/skips. These are host-only JVM tests, not device validation.
+- **Release gates unchanged.** P1-08 (`/data/local/tmp/.ksud-stage` swapped by a
+  `shell`-uid process before the loader renames it) remains **OPEN**: this phase
+  only documents the Java-side gating and does not rebuild the bundled loaders.
+  Auto Soft Reboot and Start on Boot stay disabled by default and unvalidated;
+  the packaged-KO real gate is still blocked until the reviewed KO is re-pinned.
+
+## Unreleased — round-3 PR #3, phase 2 (build / packaging gates)
+
+**All changes in this section are host-tested only and UNVALIDATED on device.**
+No hardware run has exercised these gates; a tag build that fails them must
+not be published.
+
+- **Android variant is authoritative (P2-04).** `app/build.gradle.kts` passes
+  `-DDFROOT_ANDROID_VARIANT=release` / `=debug` through each build type's
+  `externalNativeBuild.cmake.arguments`. `CMakeLists.txt` maps `release` →
+  effective `Release` (and `debug` → `Debug`) ahead of the cache's
+  `CMAKE_BUILD_TYPE`, so a stale cached Debug label can no longer weaken the
+  skip guard. `verify_ko_sha256.cmake` independently rejects
+  `DFROOT_SKIP=ON` with `DFROOT_ANDROID_VARIANT=release` (case-insensitive),
+  even with no CI marker and a stale Debug label, and records
+  `android_variant` in its manifest. Signing guards are unchanged.
+- **Final packaged bytes are verified (P2-04).** `exp.c` now emits the KO into
+  a dedicated `.dfroot_ko,"a",@progbits` section (`.balign 16`, same symbol
+  names and `.previous`; no C changes). A new POST_BUILD step runs
+  `verify_packaged_ko.cmake`, which extracts that section from the linked
+  `libdfroot.so` with `CMAKE_OBJCOPY` and compares its SHA-256 against the
+  **same unchanged pins** plus the reviewed artifact sizes (13504 / 13384 B).
+  Configure fails if `CMAKE_OBJCOPY` is unavailable. The verifier has **no
+  skip option** (a skip flag is a hard error), fails closed with distinct
+  reasons (objcopy unavailable / section not found / size mismatch / packaged
+  KO SHA-256 MISMATCH) and writes a manifest with status, sha256, bytes,
+  section, so_sha256, pins, timestamp and git HEAD. No pin was added or
+  relaxed. `ko_pin_policy.cmake` shares pin validation between both verifiers.
+- **Real APK gate (P2-04).** On the protected `v*` tag publishing path the
+  workflow unzips `lib/arm64-v8a/libdfroot.so` from EACH distributable APK,
+  runs the same verifier with the NDK's llvm-objcopy and asserts
+  `status: verified` plus a matching manifest `so_sha256` **before** any signed
+  upload or GitHub Release, with no `continue-on-error`. PR/branch/manual runs
+  upload only an explicitly UNVERIFIED Debug APK and make no release claim.
+  **The byte gate rejects unknown bytes but accepts the two known obsolete
+  pins**; release is withheld by policy (reviewed re-pin, OPEN P1-08 and device
+  validation), not by the hash gate alone. A passing host fixture run is not
+  device validation.
+- **Provenance is evidence, never stale (P2-06).**
+  `record_build_provenance.cmake` now fails closed if the KO manifest is
+  missing, malformed or disagrees with the stable stamp (status and hash), and
+  records `ko_manifest_sha256` and `android_variant`. An always-run force
+  target plus `KO_VERIFY_MANIFEST`, `CMakeLists.txt` and the force file in
+  `DEPENDS` refresh the record when inputs change. It remains an informational
+  audit record, **not an independent reproducible-build proof or attestation**.
+- **All suites reached (P2-07).** New host-only
+  `tests/cmake/packaged_ko_test.cmake` (deterministic harmless ELF64 fixtures
+  from `make_packaged_ko_fixture.py`) covers valid pin, ANY-pin, mismatch,
+  corrupted byte, missing section, wrong size, bad objcopy, skip-cannot-bypass
+  and fail-closed manifest behaviour. CI asserts a marker from every native /
+  CMake / JVM suite (the round-4 final shape asserts 7/7 markers) and parses the
+  JUnit XML for **28 tests, 0 failures/errors/skips** across four JVM classes, so
+  one failure cannot hide another. Required gates
+  have no `continue-on-error`; the informational provenance uploads are also
+  required in the round-4 shape (`if-no-files-found: error`), not best-effort.
+  A release-evidence step checks the git SHA, skip OFF in every
+  CMakeCache, a verified KO manifest whose hash is in the pins, a verified
+  packaged manifest with the same hash, and the APK hash.
+- **Unchanged gates / boundary.** P1-08 (`/data/local/tmp/.ksud-stage`
+  race-at-creation fixed, but a `shell`-uid process could still swap the file
+  before the loader renames it) remains a release gate requiring a loader
+  rebuild. run6/run8 validated the historical implementation only; everything
+  above is host-tested only and UNVALIDATED on device. Auto Soft Reboot and
+  Start on Boot stay disabled by default and unvalidated.
+
+## Unreleased — PR #3 hardening pass (round 2)
+
+**All changes in this section are host-tested only and UNVALIDATED on device.**
+
+- Native: bounds/overflow-safe ELF parsing (ELF64/LE/AArch64/ET_DYN only,
+  bounded string tables, segment-contained hook/payload offsets), strict
+  numeric/version parsing, checked `waitpid`, secure `ksud` staging.
+- P1-04 preflight before any write: `exp.c` now builds a `struct preflight`
+  containing exact KMI, padded helper/KO payloads, pre-read originals and a
+  fully validated hook plan. Every version, stat, length, ELF, alignment,
+  branch-range, overlap and pread check happens before the first
+  `patch_file_cbc()` call; an INVALID ELF aborts with **no fallback**, while
+  only UNSUPPORTED selects the next hook candidate. Vendor originals are
+  captured after the helper patch but before the KO write, so the restore iv
+  cannot depend on our own payload.
+- P1-05 ELF parser contract: `elf_parser.{c,h}` returns
+  `ELF_PARSE_OK=0` / `ELF_PARSE_UNSUPPORTED=1` / `ELF_PARSE_INVALID=-1`; out
+  parameters are zeroed on every failure. Metadata validation covers
+  EI_CLASS/DATA/VERSION, ET_DYN/EM_AARCH64, header sizes, PN_XNUM/SHN_XINDEX
+  rejection, table ranges, phdr/shdr type/entsize/link/info rules, bounded
+  NUL names, symbol section/vaddr/range checks and ambiguous-name rejection.
+  A `struct elf_layout` claim list proves that tail/zero-run placement never
+  overlaps the ELF header, phdr/shdr tables, file-backed sections or other
+  file-backed segments, and zero-run starts must be 4-byte aligned.
+  26 deterministic fixtures (`tests/native/fixtures/`, regenerated by
+  `gen_fixtures.py`) and `elf_parser_test.c` cover all of the above.
+- P2-01 strict versions: `device_version.{c,h}` parses kernel major/minor and
+  Android release with bounded digits (no signs, leading zeros or overflow)
+  and token boundaries, rejects ambiguous releases, and records provenance.
+  Preflight requires uname-token provenance and an exact android/major/minor
+  KMI match; getprop-only values and fuzzy KO pairings are rejected.
+- Cleanup truthfulness: every started write is recorded and restored in
+  reverse order with an explicit per-target `restore OK/FAILED` log;
+  `cleanup()` returns -1 if any restore fails, a status-flow cleanup failure
+  downgrades a success rc 0 to 1, and `main()` reports rc 3 when preflight
+  fails before any file is touched.
+- Status protocol (replaces the multi-marker scheme; historical — under D2 the
+  authoritative channel is the `dfroot.final` property and `/dev/dffinal` is no
+  longer produced): a **single** final outcome was atomically published to
+  `/dev/dffinal` (world-readable 0644 temp,
+  mode pinned with `fchmod()` against umask, `+ fsync + rename`; the token has
+  no secrets and must be readable by the app uid). The old terminal markers
+  `/dev/dfmsr`, `/dev/dfm6`, `/dev/dfmw2`,
+  `/dev/dfmw3` and `/dev/dfme2` are no longer published or polled; `/dev/dfm*`
+  files remain informational progress only. The inverted `dfmsr` publication
+  check (which made a successful publication report failure) is removed.
+- Pure, host-testable logic module `status_protocol.{c,h}` owns all decisions
+  with injected callbacks: fail-closed producer (late-load failure → ERROR,
+  no reboot; reboot only after a confirmed-absent late-load state and a
+  successful ROOT_ONLY preflight; bounded WNOHANG child wait; refinement
+  publish failure leaves ROOT_ONLY) and consumer (checked monotonic deadline,
+  ROOT_ONLY grace rebase, garbled tokens ignored, read errors keep polling,
+  cleanup exactly once). Clock failure fails closed everywhere; `/proc` scan
+  errors are never treated as "late-load absent"; a SIGKILLed child is reaped
+  with WNOHANG against a 2 s secondary deadline instead of a blocking wait.
+  `status_poll.{c,h}` is deleted.
+- App rc mapping: 0 late-load exited 0 / root not verified, 1 error,
+  2 unknown, 3 local patch failure, 4 soft-reboot command issued / not
+  confirmed, 5 soft reboot skipped, 6 soft-reboot command failed. No toast
+  claims root was verified or a reboot is guaranteed.
+- Build/tests: `status_protocol.c` is linked into both native targets;
+  `tests/native/status_protocol_test.c` replaces the marker test with 28
+  mock-based cases at that time (**49 in the round-4 final suite**) and touches
+  no real `/dev`. `final_status_publish.c` is
+  linked into `bootstrap` and exercised by `tests/native/final_publish_test.c`
+  against real temp files (0644 under a hostile umask, atomic replace, symlink
+  temp sabotage).
+- KO hash-skip policy (P2-04): `verify_ko_sha256.cmake` now requires
+  `DFROOT_BUILD_TYPE`, validates every pin up front, and enforces the skip
+  policy in the script itself (FATAL when `DFROOT_SKIP` is combined with
+  `CI`/`GITHUB_ACTIONS`/`DFROOT_RELEASE`, a Release build type, or an empty
+  `DFROOT_SKIP_REASON`). Blob existence/directory checks still run first. The
+  verified stamp stays stable (no timestamps or reasons in it); a separate
+  `dfroot-ko.sha256.manifest` records status, hash, accepted-pin count, build
+  type, environment flags, UTC timestamp, git HEAD and script path. CI parses
+  the pins from `CMakeLists.txt`, runs the script directly under `CI=true`
+  (must pass), asserts skip fails, and greps the CMakeCache for
+  `DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF`.
+- Build provenance (P2-06): new `record_build_provenance.cmake` and
+  `dfroot_build_provenance` target record splicehelper binary/source SHA-256,
+  compiler id/version/target/sysroot/flags, CMake version, git HEAD, build type
+  and KO gate status. A release-only, best-effort workflow step hashes the APK,
+  KO, splicehelper and bundled loaders and uploads an informational manifest.
+  No new pins are introduced. Provenance is evidence only; it is **not** an
+  independent reproducible-build proof, and splicehelper is not claimed to be
+  bit-for-bit deterministic across toolchains.
+- Preference persistence (P2-08): new `PreferencePersister.java` uses
+  synchronous `commit()` and returns failure to callers. `MainActivity` reverts
+  the SU-manager spinner (with a recursion guard) and `SettingsFragment`
+  returns the listener result so switches revert on a failed write; both show
+  a Toast and log. New `tests/java/PreferencePersisterTest.java` (fake
+  `SharedPreferences`, 8 JVM cases at introduction; 11 in the round-4 final
+  suite) and a `:app:testDebugUnitTest` CI step.
+  PR builds configure without `signing.properties`: the release signing
+  config is a harmless placeholder unless the real keystore and all secrets
+  are present, and `assembleRelease` fails closed otherwise. This resolves the
+  earlier CI signing configuration issue; it is unrelated to the P1-08
+  staging gate.
+- Test/docs truthfulness (P2-07): 20 cases at introduction (14 numbered groups,
+  some with a/b subcases; **23 cases** in the round-4 final shape) in host-only
+  `tests/cmake/ko_hash_policy_test.cmake`, wired into CI alongside the existing
+  `make -C tests/native test` step; docs below state the validation boundary
+  explicitly.
+- Round-3 docs correction: `PORTING-GZIF.md` §4's "70 s plus a 10 s grace" was
+  inaccurate — the wait is capped at 70 s total, with the grace
+  `min(observation + 10 s, start + 70 s)` and cleanup once on observation or
+  timeout. Documentation-only; `status_protocol.c` is unchanged in that phase.
+  The native phase below subsequently raises the grace cap to the 85 s overall
+  deadline and retires the ROOT_ONLY grace entirely.
+
+## Unreleased — round-3 PR #3, phase 1b (native only, Java mapping later)
+
+**Host-tested only and UNVALIDATED on device.** No hardware run has exercised
+this protocol. Java result-code strings/map were deliberately untouched *at
+this phase*; the phase 3 section above now adds the Java `StatusRc` mapping.
+
+- **Nonce-bound v2 token.** `exp.c` generates a 128-bit nonce with `getrandom`
+  (`/dev/urandom` fallback), writes it atomically (0644, `fchmod`, `fsync`,
+  `rename`) to `/data/user_de/0/df.root/files/dfinv` **before**
+  `createOrphanProcess()`, and uses it for the consumer. `bootstrap.c` strictly
+  reads/validates the same 32-hex-char nonce at startup; at this phase a
+  missing/malformed nonce published ERROR with the reserved zero nonce and
+  skipped reboot/late-load. Round 4 changed this to `BOOTSTRAP_FAILED` under
+  the reserved nonce on the separate app-owned `dfbootfail` channel (rc=1) and
+  binds the nonce before any state write. The single final token is now
+  `dfroot-v2:<nonce>:<outcome>\n`; `df_format_final_token()` /
+  `df_parse_final_token()` reject embedded NUL, truncated or extra bytes, a
+  stale/foreign nonce and unknown/`none` outcomes. `df_publish_final()`
+  validates canonical shape before any write, keeping 0644 + `O_EXCL|O_NOFOLLOW`
+  + `fsync` + `rename` + unlink-on-failure; both real read adapters use
+  `O_NOFOLLOW` + `fstat(S_ISREG)` + size bound + exact read and pass an explicit
+  byte count to the strict parser (no C-string prefix acceptance).
+- **New outcomes and truthful preflight.** `ROOT_ONLY` now means ONLY "no
+  reboot requested" and is terminal immediately (no grace). A soft-reboot
+  attempt publishes `REBOOT_PENDING` as its non-terminal preflight; a failed
+  refinement publishes `REBOOT_ATTEMPT_UNKNOWN` — never a fallback to
+  `ROOT_ONLY`. `REBOOT_PENDING` opens the grace window, which is clamped to the
+  **overall** deadline (85 s), not the 70 s budget; a pending observation with
+  no refinement becomes `REBOOT_ATTEMPT_UNKNOWN`. New rc constants:
+  `DF_RC_ATTEMPT_UNKNOWN=7`, `DF_RC_ALREADY_HOOKED=9`,
+  `DF_RC_RECOVERY_FAILED_BIT=64`; both pending and unknown map to rc 7.
+- **Cleanup timing (superseded in round 4).** At this phase `status_flow_run()`
+  called `cleanup_cb` exactly once **before** `consumer_await()`; the round-4
+  lifecycle fix moved it to exactly once **after the first valid bound status
+  observation** (or once at the end of the shared deadline), charged to that
+  same deadline, with a bounded/clamped recovery poll and `REBOOT_SKIPPED` on a
+  NULL/failed `recovery_ok()` or timeout. Producer-side confirms absence only
+  if the checked deadline has not expired. `/proc` scanning uses the new pure
+  `proc_scan_policy.{c,h}` verdict (benign ENOENT/ESRCH/zero bytes, incomplete
+  on other errno or a full buffer without a match, match wins), strict PID
+  `strtol` validation and a tri-state -1/0/1 result. `run_ctx()` and
+  `wait_child_bounded()` use bounded `WNOHANG` waits with a 5 s/5 s cap and
+  `kill_and_reap_bounded()`; timeout/clock failure is -1.
+- **Recovery bit.** Every final rc from `exp.c` is OR'ed with 64 when cleanup
+  failed (instead of downgrading only rc 0 to 1). `cleanup()` now reads each
+  restored region back, `memcmp`s it with the saved original and logs
+  `VERIFICATION FAILED` + marks failure on any mismatch.
+- **Tests:** `status_protocol_test.c` had 34 mock cases at this phase (**49 in
+  the round-4 final suite**, adding lifecycle, reserved-bootfail and strict
+  recovery-status paths: strict v2 format/parse, new outcomes, pending preflight,
+  unknown on refinement failure, grace past budget and clamped by overall,
+  cleanup timing, pending timeout, clock/deadline boundaries); new
+  `proc_scan_policy_test.c` has 13 table cases; `final_publish_test.c` exercises canonical tokens and rejects
+  malformed ones with the prior final untouched. `make -C tests/native test`,
+  host compiles and `git diff --check` are clean.
+
+Residual risks / **release gates** (not closed by this PR):
+
+- run6 and run8 (2026-11-17) and every earlier CI run validated the
+  **historical implementation** — the old multi-marker status protocol and the
+  then-current KO pins — only; they predate the post-PR #1 rebase. Every change
+  in this "Unreleased" section is **host-tested only and UNVALIDATED on
+  device**; no new hardware run has exercised the historical single-`/dev/dffinal`
+  flow (`/dev/dffinal` is no longer produced under D2), the new build policy, or
+  the new Java persistence paths.
+- **No release may ship with obsolete KO pins.** The byte gate rejects unknown
+  bytes but still accepts the two known obsolete pins; if a DDK rebuild
+  produces a hash outside them, stop and verify out of band. Withhold release
+  by policy until a reviewed re-pin, P1-08 is closed and the device path is
+  validated. Never skip the check for CI/release builds; passing it is not
+  device validation.
+- Provenance manifests are informational and are **not** an independent
+  reproducible-build proof.
+- Auto Soft Reboot and Start on Boot remain disabled by default and
+  **unvalidated** on S9180ZHU8GZIF.
+- P1-08: the bundled loaders hardcode `/data/local/tmp/.ksud-stage`; the
+  symlink/race-at-creation is fixed, but a `shell`-uid process could still swap
+  the staged file before the loader renames it. **This cannot be closed without
+  rebuilding the bundled loaders and is a release gate** (documented in
+  `PORTING-GZIF.md` §6).
+- Stale SU-manager preference: when `PreferencePersister.remove()` fails in
+  `MainActivity`, the old package name may remain in the prefs XML on disk. The
+  phase 3 quarantine now blocks manual launch (rc 8) and `BootReceiver` skips
+  booting while the key is ambiguous, so a stale value is not acted on; the
+  stale disk bytes are still not erased by a failed write (fail-closed gating,
+  not a repair). Recovery requires a successful save of the same key or clearing
+  app data. This path is host-tested only and UNVALIDATED on device.
+- The 32-byte AES key is still passed to the native binary on `argv`
+  (`/proc/<pid>/cmdline` exposure). Both in-process copies are wiped on all
+  paths, but fully removing this residual needs a Java→native fd/pipe contract
+  change; the CLI format is preserved to avoid a cross-branch conflict.
 
 ## 2026-11-25 — Re-review 3.6 fix (R2-19 recovery truth; R2-04 wording; later committed as `1252b3d`)
 

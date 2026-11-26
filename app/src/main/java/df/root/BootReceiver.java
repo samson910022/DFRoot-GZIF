@@ -4,6 +4,8 @@
 // Modified 2026-11-24 (DFRoot GZIF): reduce boot handling to action validation plus an explicit foreground-service request. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): gate boot handling on a short durable BOOT_COUNT claim with goAsync. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): expose a narrow dispatch/finish seam for deterministic boundary tests. See NOTICE.
+// Modified 2026-11-25 (PR #3 round-4): defense-in-depth preference quarantine
+// SKIP check. It can only skip a launch, never authorize one. See NOTICE.
 package df.root;
 
 import android.content.BroadcastReceiver;
@@ -34,6 +36,15 @@ public class BootReceiver extends BroadcastReceiver {
     /** goAsync() keeps the receiver prompt while the checked claim runs off-main. */
     void receive(Context context, Intent intent, ClaimFactory factory) {
         if (context == null || intent == null || !isBootAction(intent.getAction())) {
+            return;
+        }
+        // Master's P2-08/P2-10 defense-in-depth quarantine. This is NEVER an
+        // authorization oracle: the only action it can take is to SKIP a boot
+        // launch. The durable BootClaimCoordinator remains the sole admission
+        // authority, and the component is expected to be disabled already.
+        PreferenceIntegrity.init(context);
+        if (PreferenceIntegrity.isQuarantined()) {
+            Log.i(TAG, "boot: preferences quarantined, skipping launch");
             return;
         }
         PendingResult pending = goAsync();

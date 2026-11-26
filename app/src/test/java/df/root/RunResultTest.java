@@ -58,13 +58,13 @@ public class RunResultTest {
     @Test
     public void unverifiedPredicateCoversRc7UnknownExitAndExceptionOnly() {
         assertTrue(NativeResultMapper.map(7).isOutcomeUnverified());
-        for (int unknown : new int[] {5, 8, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
+        for (int unknown : new int[] {8, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
             assertTrue("native rc=" + unknown + " was not unverified",
                     NativeResultMapper.map(unknown).isOutcomeUnverified());
         }
         assertTrue(RunResult.exception(new IllegalStateException("boom")).isOutcomeUnverified());
 
-        for (int confirmed : new int[] {0, 1, 2, 3, 4, 6}) {
+        for (int confirmed : new int[] {0, 1, 2, 3, 4, 5, 6}) {
             assertFalse("native rc=" + confirmed + " became unverified",
                     NativeResultMapper.map(confirmed).isOutcomeUnverified());
         }

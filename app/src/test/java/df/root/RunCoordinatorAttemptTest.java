@@ -633,7 +633,6 @@ public class RunCoordinatorAttemptTest {
     public void everyUnverifiedOutcomeRetainsBarrierLeaseAndFreeze() throws Exception {
         List<RunResult> unverified = Arrays.asList(
                 NativeResultMapper.map(7),
-                NativeResultMapper.map(5),
                 NativeResultMapper.map(255),
                 NativeResultMapper.map(-1),
                 RunResult.exception(new IllegalStateException("reporter terminated unexpectedly")));
@@ -782,7 +781,7 @@ public class RunCoordinatorAttemptTest {
     /** Confirmed native codes always finish, close owned resources and clear the attempt. */
     @Test
     public void confirmedNativeCodesClearDurableAttemptAndFinish() throws Exception {
-        for (int code : new int[] {0, 1, 2, 3, 4, 6}) {
+        for (int code : new int[] {0, 1, 2, 3, 4, 5, 6}) {
             ConfigurationRepository localRepository = new ConfigurationRepository(
                     new Store(), Runnable::run, Runnable::run);
             localRepository.start();

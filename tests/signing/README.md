@@ -23,10 +23,10 @@ The suite covers:
 - missing, partial, empty, complete, whitespace-only credential, whitespace-only `KEYSTORE_FILE`, and non-BMP Gradle signing configuration;
 - shared-writer use and JDK 21 ordering in CI.
 
-Run the disposable signed/unsigned release smoke on ext4:
+Run the disposable signed-release / fail-closed smoke on ext4:
 
 ```sh
 bash tests/signing/smoke_signed_release.sh "$HOME"
 ```
 
-The smoke copies the current tracked and untracked non-ignored files to a temporary ext4 directory, creates a placeholder KO and disposable non-BMP credentials, builds signed and unsigned releases, verifies the signed APK with `apksigner`, and requires `apksigner` to reject the unsigned APK. Its trap removes the copy, keystore, properties, KO, and APKs. `JAVA`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `APKSIGNER` may be overridden. Never use real secrets in the smoke.
+The smoke copies the current tracked and untracked non-ignored files to a temporary ext4 directory and uses disposable non-BMP credentials. It exercises the signing paths with an explicit smoke-only native-build opt-out (`-Pdfroot.signingSmokeSkipNative=true`): a real keystore must produce an APK that `apksigner` verifies, while a fresh configuration with no signing material must fail `assembleRelease` and produce NO unsigned or dummy-signed release APK (PR #3's fail-closed release variant). This opt-out can never produce a distributable artifact because the release byte gate requires a verified `libdfroot.so`. Its trap removes the copy, keystore and properties. `JAVA`, `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and `APKSIGNER` may be overridden. Never use real secrets in the smoke.

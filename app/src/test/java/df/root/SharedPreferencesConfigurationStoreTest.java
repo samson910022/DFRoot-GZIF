@@ -8,17 +8,37 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
 public class SharedPreferencesConfigurationStoreTest {
+    private Path marker;
+
+    @Before
+    public void initWriteAheadBoundary() throws Exception {
+        marker = Files.createTempFile("dfroot-config-integrity", ".marker");
+        Files.deleteIfExists(marker);
+        PreferenceIntegrity.resetForTest();
+        PreferenceIntegrity.init(marker.toFile());
+    }
+
+    @After
+    public void resetWriteAheadBoundary() throws Exception {
+        PreferenceIntegrity.resetForTest();
+        Files.deleteIfExists(marker);
+    }
+
     @Test
     public void loadReadsTheCompleteSnapshotAndSafeDefaults() {
         Map<String, Object> values = new HashMap<>();
@@ -81,13 +101,14 @@ public class SharedPreferencesConfigurationStoreTest {
     }
 
     @Test
-    public void commitFalseIsReturnedRatherThanIgnored() {
+    public void commitFalseIsReturnedRatherThanIgnoredAndFailCloses() {
         FakePreferences preferences = new FakePreferences(new HashMap<>());
         preferences.commitResult = false;
 
         assertFalse(new SharedPreferencesConfigurationStore(preferences.delegate()).write(
                 RunConfig.defaults()));
         assertEquals(1, preferences.commitCalls);
+        assertTrue(PreferenceIntegrity.isQuarantined());
     }
 
     @Test
@@ -102,7 +123,7 @@ public class SharedPreferencesConfigurationStoreTest {
     }
 
     @Test
-    public void falseCommitLeavesTheCandidateOnlyInCachedMemory() {
+    public void falseCommitFailClosesAndNeverPromotesTheCandidateOnReload() {
         FakePreferences preferences = new FakePreferences(new HashMap<>());
         preferences.commitResult = false;
         SharedPreferencesConfigurationStore store = new SharedPreferencesConfigurationStore(
@@ -111,19 +132,19 @@ public class SharedPreferencesConfigurationStoreTest {
                 ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 23);
 
         assertFalse(store.write(candidate));
+        assertTrue(PreferenceIntegrity.isQuarantined());
 
-        RunConfig cached = store.load();
-        assertEquals(candidate.getManagerPackage(), cached.getManagerPackage());
-        assertTrue(cached.isSoftReboot());
-        assertEquals(23, cached.getGeneration());
-        RunConfig durable = new SharedPreferencesConfigurationStore(
-                new FakePreferences(preferences.values).delegate()).load();
-        assertEquals(RunConfig.defaults().getGeneration(), durable.getGeneration());
-        assertNull(durable.getManagerPackage());
+        // The in-memory map holds the candidate, but a quarantined store must
+        // never promote it as durable configuration.
+        RunConfig reloaded = store.load();
+        assertNull(reloaded.getManagerPackage());
+        assertFalse(reloaded.isSoftReboot());
+        assertEquals(0, reloaded.getGeneration());
+        assertFalse(preferences.values.containsKey(ConfigurationKeys.PREF_SU_MANAGER));
     }
 
     @Test
-    public void commitExceptionLeavesTheCandidateOnlyInCachedMemory() {
+    public void commitExceptionFailClosesAndNeverPromotesTheCandidateOnReload() {
         FakePreferences preferences = new FakePreferences(new HashMap<>());
         preferences.commitFailure = new IllegalStateException("commit failed");
         SharedPreferencesConfigurationStore store = new SharedPreferencesConfigurationStore(
@@ -131,15 +152,50 @@ public class SharedPreferencesConfigurationStoreTest {
         RunConfig candidate = new RunConfig(SuManager.NEXT.getPackageName(), false, true, 0, 24);
 
         assertThrows(IllegalStateException.class, () -> store.write(candidate));
+        assertTrue(PreferenceIntegrity.isQuarantined());
 
-        RunConfig cached = store.load();
-        assertEquals(SuManager.NEXT.getPackageName(), cached.getManagerPackage());
-        assertTrue(cached.isDisableModules());
-        assertEquals(24, cached.getGeneration());
-        RunConfig durable = new SharedPreferencesConfigurationStore(
-                new FakePreferences(preferences.values).delegate()).load();
-        assertEquals(RunConfig.defaults().getGeneration(), durable.getGeneration());
-        assertNull(durable.getManagerPackage());
+        RunConfig reloaded = store.load();
+        assertNull(reloaded.getManagerPackage());
+        assertFalse(reloaded.isDisableModules());
+        assertEquals(0, reloaded.getGeneration());
+        assertFalse(preferences.values.containsKey(ConfigurationKeys.PREF_SU_MANAGER));
+    }
+
+    @Test
+    public void failedCommitDisablesBootLaunchAtTheFailureBoundary() {
+        FakePreferences preferences = new FakePreferences(new HashMap<>());
+        preferences.commitResult = false;
+        boolean[] bootDisabled = {false};
+        PreferenceIntegrity.setBootGateForTest(new PreferenceIntegrity.BootGate() {
+            @Override
+            public void disableBootLaunch() {
+                bootDisabled[0] = true;
+            }
+        });
+
+        assertFalse(new SharedPreferencesConfigurationStore(preferences.delegate())
+                .write(RunConfig.defaults()));
+
+        assertTrue(bootDisabled[0]);
+        assertTrue(PreferenceIntegrity.isQuarantined());
+    }
+
+    @Test
+    public void aSuccessfulWriteOfTheSameSnapshotRestoresConsistency() {
+        FakePreferences preferences = new FakePreferences(new HashMap<>());
+        SharedPreferencesConfigurationStore store = new SharedPreferencesConfigurationStore(
+                preferences.delegate());
+        RunConfig candidate = new RunConfig(SuManager.NEXT.getPackageName(), true, true,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 25);
+        preferences.commitResult = false;
+
+        assertFalse(store.write(candidate));
+        assertTrue(PreferenceIntegrity.isQuarantined());
+
+        preferences.commitResult = true;
+        assertTrue(store.write(candidate));
+        assertFalse(PreferenceIntegrity.isQuarantined());
+        assertEquals(candidate.getGeneration(), store.load().getGeneration());
     }
 
     private static final class FakePreferences implements InvocationHandler {

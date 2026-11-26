@@ -15,7 +15,7 @@ public class SuManagerTest {
 
         assertEquals("me.weishu.kernelsu", manager.getPackageName());
         assertEquals("libksud.so", manager.getLoaderName());
-        assertEquals("aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940",
+        assertEquals("731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4",
                 manager.getLoaderSha256());
     }
 
@@ -25,15 +25,15 @@ public class SuManagerTest {
 
         assertEquals("com.rifsxd.ksunext", manager.getPackageName());
         assertEquals("libksudnext.so", manager.getLoaderName());
-        assertEquals("679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d",
+        assertEquals("7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414",
                 manager.getLoaderSha256());
     }
 
     @Test
     public void generatedBuildConfigPinsDriveTheManagerModel() {
-        assertEquals("aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940",
+        assertEquals("731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4",
                 BuildConfig.BUNDLED_LOADER_CLASSIC_SHA256);
-        assertEquals("679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d",
+        assertEquals("7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414",
                 BuildConfig.BUNDLED_LOADER_NEXT_SHA256);
         assertEquals(BuildConfig.BUNDLED_LOADER_CLASSIC_SHA256,
                 SuManager.CLASSIC.getLoaderSha256());

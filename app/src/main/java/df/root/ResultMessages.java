@@ -6,7 +6,16 @@ package df.root;
 
 /** Pure user-facing mapping for typed run outcomes. */
 final class ResultMessages {
+    private static final String SKIPPED_REBOOT_MARKER =
+            "native rc=5 soft reboot skipped";
+
     private ResultMessages() {}
+
+    /** The mapper labels a skipped reboot with this exact reason prefix. */
+    private static boolean isSkippedReboot(RunResult result) {
+        String reason = result.getReason();
+        return reason != null && reason.startsWith(SKIPPED_REBOOT_MARKER);
+    }
 
     static String message(RunResult result) {
         switch (result.getType()) {
@@ -20,7 +29,12 @@ final class ResultMessages {
             case PRECHECK_FAILED:          return "DFRoot: Error - precheck failed (see output)";
             case PATCH_FAILED:             return "DFRoot: Error - failed to patch files";
             // A soft-reboot command returning is not independent evidence of root state.
-            case SOFT_REBOOT_PENDING:      return "DFRoot: soft-reboot was requested (root status unverified); verify root status yourself";
+            // Native rc=5 shares this typed family but NO command was issued, so
+            // its reason must never be rendered as "was requested".
+            case SOFT_REBOOT_PENDING:      return isSkippedReboot(result)
+                    ? "DFRoot: soft reboot skipped (late-load not confirmed absent; "
+                      + "root status unverified); verify root status yourself"
+                    : "DFRoot: soft-reboot was requested (root status unverified); verify root status yourself";
             case NATIVE_SETUP_FAILED:      return "DFRoot: Error - native setup/timeout (see logcat & dmesg)";
             case SOFT_REBOOT_FAILED:       return "DFRoot: Error - soft-reboot command failed";
             case UNKNOWN:                  return "DFRoot: Error - unknown result (" + result.getReason() + ")";

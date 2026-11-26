@@ -1,7 +1,13 @@
 // Modified 2026-11-24 (DFRoot GZIF): wire settings to confirmed configuration and require durable modal consent. See NOTICE.
 // Modified 2026-11-24 (DFRoot GZIF): gate boot and dangerous settings on writable configuration plus an idle coordinator. See NOTICE.
 // Modified 2026-11-25 (DFRoot GZIF): keep Start at Boot OFF reachable in every state and surface component-setting failures. See NOTICE.
-// Modified 2026-11-26 (DFRoot GZIF, R5.6): comment only — state that the OFF write is a PackageManager operation outside the coordinator monitor, not atomic with admission. No behavior change. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R5.6): comment only — the OFF write is a
+// PackageManager operation outside the coordinator monitor, not atomic with
+// admission. No behavior change. See NOTICE.
+// Modified 2026-11-25 (PR #3 round-4/5/6): tri-state component observation,
+// UNKNOWN presentation with a persistent status row, an explicit safe OFF
+// action, quarantine-gated writes and lifecycle-scoped integrity listener.
+// See NOTICE.
 package df.root;
 
 import android.app.AlertDialog;
@@ -9,10 +15,17 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.preference.Preference;
 import android.preference.PreferenceFragment;
 import android.preference.PreferenceScreen;
 import android.preference.SwitchPreference;
+import android.util.Log;
+import android.widget.Toast;
+
+import df.root.BootUiPolicy.BootComponentState;
+import df.root.BootUiPolicy.BootStatusPresentation;
 
 public class SettingsFragment extends PreferenceFragment {
     private static final String BOOT_SUMMARY = "Automatically run DFRoot on device boot";
@@ -47,6 +60,11 @@ public class SettingsFragment extends PreferenceFragment {
     private ConfigurationRepository mConfiguration;
     private RunCoordinator mCoordinator;
     private SwitchPreference mBootStartPreference;
+    private Preference mBootStatusPreference;   // master: persistent UNKNOWN/OFF status row
+    private Preference mBootDisablePreference;  // master: explicit safe OFF action
+    private Context mAppContext;
+    private PreferenceIntegrity.Listener mIntegrityListener;
+    private final Handler mMain = new Handler(Looper.getMainLooper());
     private SwitchPreference mSoftRebootPreference;
     private SwitchPreference mDisableModulesPreference;
     private Preference mStatusPreference;
@@ -60,27 +78,45 @@ public class SettingsFragment extends PreferenceFragment {
             this::renderConfirmedConfiguration;
     private final RunCoordinator.Listener mCoordinatorListener = snapshot -> renderConfirmedConfiguration();
 
+    private static final String TAG = "dfroot";
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         addPreferencesFromResource(R.xml.preferences);
 
         Context ctx = getActivity();
+        mAppContext = ctx.getApplicationContext(); // never retain an Activity in a callback
+        // Initialize the durable write-ahead boundary before the repository can
+        // start its load/migration; ConfigurationRepository is the only writer.
+        PreferenceIntegrity.init(ctx); // durable quarantine latch; SKIP-only for launches
         mConfiguration = ConfigurationRepository.get(ctx);
         mCoordinator = RunCoordinator.get(ctx);
 
         ComponentName bootReceiver = new ComponentName(ctx, BootReceiver.class);
         mBootStartPreference = (SwitchPreference) findPreference("boot_start");
         mBootStartPreference.setPersistent(false);
-        int state = mBootComponents.read(ctx, bootReceiver);
-        mBootStartPreference.setChecked(state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        // Master: authoritative tri-state observation; DEFAULT/failure is UNKNOWN.
+        mBootStatusPreference = findPreference("boot_status");
+        mBootDisablePreference = findPreference("boot_disable");
+        if (mBootDisablePreference != null) {
+            mBootDisablePreference.setOnPreferenceClickListener(preference -> {
+                requestDisableBootLaunch();
+                return true;
+            });
+        }
+        applyBootPresentation(readBootComponentState(ctx, bootReceiver));
         mBootStartPreference.setOnPreferenceChangeListener((pref, value) -> {
             boolean enabling = (Boolean) value;
             // Enabling still requires verified configuration and an idle
             // coordinator. Disabling never does: the owner must always be able
             // to stop future unattended attempts, even mid-operation or in ERROR.
-            if (enabling && !areControlsWritable()) {
+            if (enabling && (!areControlsWritable()
+                    || PreferenceIntegrity.isQuarantined()
+                    || !BootUiPolicy.mayChangeTo(true, readBootComponentState(ctx, bootReceiver),
+                            PreferenceIntegrity.isQuarantined()))) {
                 renderConfirmedConfiguration();
+                applyBootPresentation(readBootComponentState(ctx, bootReceiver));
                 return false;
             }
             int desired = enabling ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
@@ -106,8 +142,10 @@ public class SettingsFragment extends PreferenceFragment {
             }
             mBootChangeError = null;
             renderStatusSummary();
-            mBootStartPreference.setSummary(BOOT_SUMMARY);
-            return true;
+            // Master: the observed state, never the requested value, is truth.
+            applyBootPresentation(readBootComponentState(ctx, bootReceiver));
+            return BootUiPolicy.acceptFrameworkChange(enabling,
+                    BootComponentState.fromPackageManagerState(actual));
         });
 
         mStatusPreference = findPreference("configuration_status");
@@ -127,7 +165,7 @@ public class SettingsFragment extends PreferenceFragment {
                 ConfigurationKeys.PREF_SOFT_REBOOT);
         mSoftRebootPreference.setPersistent(false);
         mSoftRebootPreference.setOnPreferenceChangeListener((pref, value) -> {
-            if (!areControlsWritable()) return false;
+            if (!areControlsWritable() || PreferenceIntegrity.isQuarantined()) return false;
             if ((Boolean) value) {
                 showSoftRebootAcknowledgement();
             } else {
@@ -141,7 +179,7 @@ public class SettingsFragment extends PreferenceFragment {
                 ConfigurationKeys.PREF_DISABLE_MODULES);
         mDisableModulesPreference.setPersistent(false);
         mDisableModulesPreference.setOnPreferenceChangeListener((pref, value) -> {
-            if (!areControlsWritable()) return false;
+            if (!areControlsWritable() || PreferenceIntegrity.isQuarantined()) return false;
             mConfiguration.setDisableModules((Boolean) value);
             return false;
         });
@@ -153,12 +191,21 @@ public class SettingsFragment extends PreferenceFragment {
         mConfiguration.addListener(mConfigurationListener);
         mCoordinator.addListener(mCoordinatorListener);
         renderConfirmedConfiguration();
+        // Master: identity-deduplicated, lifecycle-scoped integrity listener;
+        // UI-only re-read, never an authorization oracle.
+        if (mIntegrityListener == null) mIntegrityListener = this::renderBootPresentationFromState;
+        PreferenceIntegrity.addListener(mIntegrityListener);
     }
 
     @Override
     public void onPause() {
         mConfiguration.removeListener(mConfigurationListener);
         mCoordinator.removeListener(mCoordinatorListener);
+        // Master: a recreated screen must not accumulate or receive stale callbacks.
+        if (mIntegrityListener != null) {
+            PreferenceIntegrity.removeListener(mIntegrityListener);
+            mIntegrityListener = null;
+        }
         dismissConfirmation();
         super.onPause();
     }
@@ -179,7 +226,8 @@ public class SettingsFragment extends PreferenceFragment {
     }
 
     private boolean areControlsWritable() {
-        return isConfigurationWritable() && isCoordinatorIdle();
+        return isConfigurationWritable() && isCoordinatorIdle()
+                && !PreferenceIntegrity.isQuarantined();
     }
 
     private void renderConfirmedConfiguration() {
@@ -292,5 +340,77 @@ public class SettingsFragment extends PreferenceFragment {
             mConfirmationDialog = null;
         }
         mPendingSoftRebootGeneration = -1;
+    }
+
+    /** Master's tri-state bootstrap component observation via the PR#2 controller seam. */
+    private BootComponentState readBootComponentState(Context ctx, ComponentName component) {
+        if (ctx == null || component == null) return BootUiPolicy.fromReadbackFailure();
+        try {
+            return BootUiPolicy.fromPackageManagerState(mBootComponents.read(ctx, component));
+        } catch (RuntimeException e) {
+            return BootUiPolicy.fromReadbackFailure();
+        }
+    }
+
+    /** One choke point for thumb position, switch summary and persistent status row. */
+    private void applyBootPresentation(BootComponentState actual) {
+        if (mBootStartPreference == null) return;
+        mBootStartPreference.setChecked(BootUiPolicy.desiredChecked(actual)); // position only
+        mBootStartPreference.setEnabled(true); // OFF must always be reachable
+        BootStatusPresentation presentation = BootUiPolicy.presentation(actual);
+        String summary;
+        switch (presentation) {
+            case ON:
+                summary = "On - automatic startup enable setting is present";
+                break;
+            case OFF_VERIFIED:
+                summary = "Off - verified disabled";
+                break;
+            case UNKNOWN:
+            default:
+                summary = "Status unavailable - not confirmed disabled";
+                if (PreferenceIntegrity.isQuarantined()) {
+                    summary += "; preference state is quarantined, automatic startup may " +
+                            "still be enabled";
+                }
+                break;
+        }
+        mBootStartPreference.setSummary(summary);
+        if (mBootStatusPreference != null) mBootStatusPreference.setSummary(summary);
+    }
+
+    private void renderBootPresentationFromState() {
+        Context ctx = getActivity();
+        if (ctx == null || !isAdded()) return;
+        mMain.post(() -> {
+            if (!isAdded() || getActivity() == null) return;
+            applyBootPresentation(readBootComponentState(ctx,
+                    new ComponentName(ctx, BootReceiver.class)));
+        });
+    }
+
+    /** Explicit user-initiated OFF; never enables anything and never claims OFF without read-back. */
+    private void requestDisableBootLaunch() {
+        Context ctx = getActivity();
+        if (ctx == null || !isAdded() || !BootUiPolicy.mayRequestDisable()) return;
+        ComponentName receiver = new ComponentName(ctx, BootReceiver.class);
+        try {
+            mBootComponents.set(ctx, receiver,
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+        } catch (RuntimeException e) {
+            Log.e("dfroot", "Could not disable boot component setting", e);
+        }
+        BootComponentState actual = readBootComponentState(ctx, receiver);
+        applyBootPresentation(actual);
+        final BootComponentState observed = actual;
+        mMain.post(() -> {
+            if (!isAdded() || getActivity() == null) return;
+            Toast.makeText(ctx,
+                    observed == BootComponentState.DISABLED
+                            ? "Automatic startup disabled (verified)"
+                            : "Could not confirm automatic startup is disabled; " +
+                              "status unavailable - not confirmed disabled",
+                    Toast.LENGTH_LONG).show();
+        });
     }
 }

@@ -219,9 +219,194 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  build-dfroot:
-    name: CI DFRoot APKs
+  # UNCONDITIONAL host evidence gates. This job runs on every event, including
+  # protected tag pushes: a tagged release can never proceed without the full
+  # host suite evidence. It carries the reviewed PR#1 pinned actions only.
+  host-gates:
+    name: Host evidence gates
     needs: build-lkms
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # Fail before any gate if the checkout is not the exact commit being
+      # tested: evidence must always be attributable to GITHUB_SHA.
+      - name: Assert checked-out SHA
+        run: |
+          set -euo pipefail
+          head=$(git rev-parse 'HEAD^{commit}')
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "::error::git HEAD $head != GITHUB_SHA $GITHUB_SHA"
+            exit 1
+          fi
+          echo "Checked out exactly $GITHUB_SHA"
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Download DF LKM (android13-5.15)
+        # The single-file archive is rooted at out/, so this places the KO at
+        # the exact path embedded by app/src/main/jni/CMakeLists.txt.
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: df-lkm-android13-5.15
+          path: app/src/main/jni/ko/
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      # ---- PR #3 host suites: these are required gates on every event. ------
+      - name: Host status-protocol tests
+        run: |
+          set -euo pipefail
+          make -C tests/native test
+          echo "native-ok" > "$RUNNER_TEMP/marker-native"
+
+      - name: KO hash policy tests (CMake, host-only)
+        run: |
+          set -euo pipefail
+          cmake -P tests/cmake/ko_hash_policy_test.cmake
+          echo "ko-policy-ok" > "$RUNNER_TEMP/marker-ko-policy"
+
+      - name: Packaged-KO byte-gate tests (CMake, host-only)
+        run: |
+          set -euo pipefail
+          cmake -P tests/cmake/packaged_ko_test.cmake
+          # Same step, same single marker: the named/ALL/raw/cached target
+          # graph is exercised by a harmless host fixture harness.
+          cmake -P tests/cmake/packaging_target_graph_test.cmake
+          echo "packaged-ko-ok" > "$RUNNER_TEMP/marker-packaged-ko"
+
+      # Host-only fixture test of the APK extraction -> verify plumbing. This
+      # uses a harmless deterministic ZIP fixture, NOT a real/signed APK: it
+      # proves the plumbing runs on every event, not that a release APK passed.
+      - name: APK packaging gate fixture tests (CMake, host-only)
+        run: |
+          set -euo pipefail
+          cmake -P tests/cmake/apk_packaging_gate_test.cmake
+          # Harmless host content gate: libbootstrap.so must be staged at the
+          # exact ABI path. Same step and same single marker (7/7 stays intact).
+          cmake -P tests/cmake/apk_content_gate_test.cmake
+          # Harmless host gate for the bundled loader SHA-256/size pins. Same
+          # step and same single marker (7/7 stays intact); no loader is run.
+          cmake -P tests/cmake/loader_hash_test.cmake
+          echo "apk-packaging-fixture-ok" > "$RUNNER_TEMP/marker-apk-packaging-fixture"
+
+      # Pins/sizes are read from CMakeLists.txt so the standalone checks and
+      # the real APK gate use exactly the reviewed values, never a copy.
+      - name: Extract reviewed KO pins and sizes
+        run: |
+          set -euo pipefail
+          sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9a-f]{64}' | paste -sd';' - > "$RUNNER_TEMP/ko-pins.txt"
+          sed -n '/set(KO_EXPECTED_SIZES/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9]+' | paste -sd';' - > "$RUNNER_TEMP/ko-sizes.txt"
+          test -s "$RUNNER_TEMP/ko-pins.txt"
+          test -s "$RUNNER_TEMP/ko-sizes.txt"
+          echo "reviewed pins: $(cat "$RUNNER_TEMP/ko-pins.txt")"
+          echo "reviewed sizes: $(cat "$RUNNER_TEMP/ko-sizes.txt")"
+
+      # Standalone policy check: exercise the real verify script (not a CMake
+      # configure) with the downloaded KO and the pins from CMakeLists.txt.
+      # Positive case must pass under CI=true; skip must always fail there.
+      - name: KO hash policy (CI enforced, skip rejected)
+        run: |
+          set -euo pipefail
+          SCRIPT=app/src/main/jni/verify_ko_sha256.cmake
+          KO=app/src/main/jni/ko/dfroot-android13-5.15.ko
+          STAMP="$RUNNER_TEMP/dfroot-ko.sha256.verified"
+          MANIFEST="$RUNNER_TEMP/dfroot-ko.sha256.manifest"
+          PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")
+          test -n "$PINS"
+          CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
+              -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
+              -DDFROOT_BUILD_TYPE=Release -DDFROOT_ANDROID_VARIANT=release -P "$SCRIPT"
+          if CI=true cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
+                 -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
+                 -DDFROOT_BUILD_TYPE=Debug -DDFROOT_SKIP=ON \
+                 -DDFROOT_SKIP_REASON='negative CI policy check' -P "$SCRIPT"; then
+            echo "::error::KO hash skip unexpectedly passed under CI=true"
+            exit 1
+          fi
+          # Variant authority: with no automation marker and a stale Debug
+          # build type, an Android release variant must still reject skip.
+          if env -u CI -u GITHUB_ACTIONS -u DFROOT_RELEASE \
+                 cmake -DKO_FILE="$KO" "-DKO_EXPECTED_SHA256S=$PINS" \
+                 -DKO_STAMP="$STAMP" -DKO_VERIFY_MANIFEST="$MANIFEST" \
+                 -DDFROOT_BUILD_TYPE=Debug -DDFROOT_ANDROID_VARIANT=release \
+                 -DDFROOT_SKIP=ON -DDFROOT_SKIP_REASON='negative variant policy check' \
+                 -P "$SCRIPT"; then
+            echo "::error::KO hash skip unexpectedly passed for release variant"
+            exit 1
+          fi
+          echo "KO hash policy OK: verified under CI, skip rejected, release variant authoritative"
+          echo "ko-ci-policy-ok" > "$RUNNER_TEMP/marker-ko-ci-policy"
+
+      - name: Java preference-persistence unit tests
+        run: |
+          set -euo pipefail
+          ./gradlew :app:testDebugUnitTest
+          echo "jvm-ok" > "$RUNNER_TEMP/marker-jvm"
+
+      # Explicit XML assertion: a green Gradle exit code alone cannot hide a
+      # skipped test class or a failure recorded only in the report.
+      - name: Assert JUnit XML (39 tests, 0 failures)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          files = sorted(glob.glob("app/build/test-results/testDebugUnitTest/TEST-*.xml"))
+          if not files:
+              raise SystemExit("::error::No JUnit XML found for testDebugUnitTest")
+          tests = failures = errors = skipped = 0
+          for path in files:
+              root = ET.parse(path).getroot()
+              tests += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+              skipped += int(root.get("skipped", 0))
+              print("report %s: tests=%s failures=%s errors=%s skipped=%s" %
+                    (path, root.get("tests"), root.get("failures"),
+                     root.get("errors"), root.get("skipped")))
+          print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %
+                (tests, failures, errors, skipped))
+          if tests != 39 or failures != 0 or errors != 0 or skipped != 0:
+              raise SystemExit("::error::JUnit XML assertion failed: expected 39 tests, 0 failures/errors/skips")
+          PY
+          echo "junit-ok" > "$RUNNER_TEMP/marker-junit"
+
+      # Every suite writes its own marker; this single gate fails if any suite
+      # was skipped/conditioned away, so one failure cannot hide the others.
+      - name: Assert all test suites reached
+        run: |
+          set -euo pipefail
+          missing=0
+          for marker in marker-native marker-ko-policy marker-packaged-ko \
+                        marker-apk-packaging-fixture marker-ko-ci-policy \
+                        marker-jvm marker-junit; do
+            if [ ! -s "$RUNNER_TEMP/$marker" ]; then
+              echo "::error::Test suite marker missing: $marker"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "All native/CMake/JVM suites reached (7/7 markers)"
+
+  build-dfroot:
+    name: CI DFRoot evidence gates
+    needs: host-gates
+    # Tag pushes take the protected, signed build-release path instead.
     if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -250,13 +435,19 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
 
-      - name: Build debug and release APKs
-        # This fresh checkout has no signing material; release is intentionally
-        # unsigned. Retry transient Gradle/toolchain failures up to three times.
+      # This job never has signing material. app/build.gradle.kts deliberately
+      # disables/fails closed on the release variant without real signing
+      # material, so these events build the debug-keystore-signed Debug APK
+      # only, strictly as a compile/content gate. NO APK is uploaded or
+      # distributed from PR/branch/manual events: the CI upload below is a
+      # licence/notice evidence bundle only. The protected tag path
+      # (build-release) is the only signed/distributable path and inherits the
+      # unconditional host gates before it can run.
+      - name: Build debug APK (compile/content gate only)
         run: |
           set -euo pipefail
           for attempt in 1 2 3; do
-            if ./gradlew :app:assembleDebug :app:assembleRelease --no-daemon --console=plain; then
+            if ./gradlew :app:assembleDebug --no-daemon --console=plain; then
               break
             fi
             if [[ $attempt -eq 3 ]]; then
@@ -267,34 +458,71 @@ jobs:
             sleep 30
           done
 
-      - name: Verify packaged loader pins
-        # Every uploaded APK variant must be integrity-checked before upload.
-        # No event-name guard: this fails closed on all trigger paths that
-        # build and upload both debug and unsigned release APKs.
+      - name: Verify packaged debug APK loader pins
+        # PR #2 integrity gate on the ONLY APK built in this non-tag job.
+        # Master's release variant is disabled here (no signing material), so
+        # the release pins are verified in the tag-gated build-release job
+        # below instead. No gate is dropped: each built APK is checked.
         run: |
           set -euo pipefail
-          ./gradlew :app:verifyDebugPackagedLoaderPins :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
+          ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain
+
+      - name: Assert KO hash check enabled in every CMakeCache
+        run: |
+          set -euo pipefail
+          # Check ALL configured caches, not just one: a stray cached config
+          # with DFROOT_SKIP_KO_HASH_CHECK=ON must fail the build too.
+          caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)
+          if [ -z "$caches" ]; then
+            echo "::error::No CMakeCache.txt found under app/.cxx"
+            exit 1
+          fi
+          bad=0
+          while IFS= read -r cache; do
+            if ! grep -qs '^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$' "$cache"; then
+              echo "::error::DFROOT_SKIP_KO_HASH_CHECK is not OFF in $cache"
+              bad=1
+            fi
+          done <<< "$caches"
+          if [ "$bad" -ne 0 ]; then
+            exit 1
+          fi
+          echo "DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF confirmed in all CMakeCache files"
 
       - name: Verify APK counts
-        # Fail closed if the build produced zero or more than one APK of either
-        # variant; a missing release APK is not a successful unsigned CI build.
+        # Fail closed if the build produced zero or more than one debug APK.
+        # A release APK is deliberately absent here: without signing material
+        # the release variant is disabled, and an unsigned release APK is not
+        # a CI artifact we claim as distributable.
         run: |
           set -euo pipefail
           shopt -s nullglob
           debug=(app/build/outputs/apk/debug/DFRoot_*.apk)
-          release=(app/build/outputs/apk/release/DFRoot_*.apk)
-          if [[ ${#debug[@]} -ne 1 || ${#release[@]} -ne 1 ]]; then
-            echo "Expected exactly one debug APK and one release APK" >&2
+          if [[ ${#debug[@]} -ne 1 ]]; then
+            echo "Expected exactly one debug APK" >&2
+            exit 1
+          fi
+          # Required native content: ExploitRunner stages libbootstrap.so from
+          # nativeLibraryDir at runtime. This host-only zip assertion catches a
+          # Gradle named-target list that omits `bootstrap`.
+          if ! python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); n = "lib/arm64-v8a/libbootstrap.so"; sys.exit(0 if n in z.namelist() and z.getinfo(n).file_size > 0 else 1)' "${debug[0]}"; then
+            echo "::error::Debug APK is missing lib/arm64-v8a/libbootstrap.so"
             exit 1
           fi
 
-      - name: Upload DFRoot APKs
+      - name: Report CI evidence-only artifact scope
+        run: |
+          {
+            echo "## CI evidence artifact scope"
+            echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
+            echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload DFRoot-CI evidence
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: DFRoot
+          name: DFRoot-CI-evidence
           path: |
-            app/build/outputs/apk/debug/DFRoot_*.apk
-            app/build/outputs/apk/release/DFRoot_*.apk
             GPL-3.0.txt
             LICENSE
             NOTICE
@@ -304,7 +532,9 @@ jobs:
 
   build-release:
     name: Signed release APK
-    needs: build-lkms
+    needs: host-gates
+    # Tag-only, protected path. Every distributable APK is gate-verified below
+    # before the signed artifact is uploaded and before publish can run.
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -351,6 +581,13 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      - name: Verify packaged release APK loader pins
+        # PR #2's release pin gate, kept on the ONLY path where master permits
+        # a signed release APK to be built (protected version tag).
+        run: |
+          set -euo pipefail
+          ./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
 
       - name: Build signed release APK
         run: |
@@ -405,6 +642,676 @@ jobs:
             sha256sum -- "$apk" > "$apk.sha256"
           )
 
+      # ---- PR #3 publishing gates. No skip, no continue-on-error. ----------
+      - name: Extract reviewed KO pins and sizes
+        run: |
+          set -euo pipefail
+          sed -n '/set(KO_EXPECTED_SHA256S/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9a-f]{64}' | paste -sd';' - > "$RUNNER_TEMP/ko-pins.txt"
+          sed -n '/set(KO_EXPECTED_SIZES/,/^)/p' app/src/main/jni/CMakeLists.txt \
+            | grep -oE '[0-9]+' | paste -sd';' - > "$RUNNER_TEMP/ko-sizes.txt"
+          test -s "$RUNNER_TEMP/ko-pins.txt"
+          test -s "$RUNNER_TEMP/ko-sizes.txt"
+          echo "reviewed pins: $(cat "$RUNNER_TEMP/ko-pins.txt")"
+          echo "reviewed sizes: $(cat "$RUNNER_TEMP/ko-sizes.txt")"
+
+      # Real (not fixture) packaged-byte gate over the COMPLETE upload set.
+      # The set is the packaged release/ directory, i.e. exactly the APK that
+      # "Upload signed release" and the publish job will hand out. It is staged
+      # under runner.temp and every staged APK gets its own manifest; manifest
+      # and dump paths are removed before the verifier runs as defence in depth.
+      - name: Verify packaged KO bytes in every distributable APK
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/dfroot-release-apks"
+          INDEX="$RUNNER_TEMP/apk-gate-index.tsv"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          : > "$INDEX"
+          shopt -s nullglob
+          APK_SOURCE=(release/DFRoot_*.apk)
+          if [ "${#APK_SOURCE[@]}" -eq 0 ]; then
+            echo "::error::No packaged release APK found; refusing to publish unverified artifacts"
+            exit 1
+          fi
+          cp -- "${APK_SOURCE[@]}" "$STAGE/"
+          STAGED=("$STAGE"/DFRoot_*.apk)
+          if [ "${#STAGED[@]}" -ne "${#APK_SOURCE[@]}" ]; then
+            echo "::error::Staged APK count does not match the packaged release APK set"
+            exit 1
+          fi
+
+          # Prefer the NDK's llvm-objcopy: host binutils may not understand
+          # AArch64 objects. Fall back to an llvm-objcopy/objcopy on PATH.
+          OBJCOPY=""
+          for candidate in \
+              "${ANDROID_NDK_HOME:-}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy" \
+              "${ANDROID_HOME:-}"/ndk/*/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy; do
+            if [ -x "$candidate" ]; then OBJCOPY="$candidate"; break; fi
+          done
+          if [ -z "$OBJCOPY" ]; then
+            OBJCOPY="$(command -v llvm-objcopy || command -v objcopy || true)"
+          fi
+          if [ -z "$OBJCOPY" ]; then
+            echo "::error::No objcopy/llvm-objcopy available for the packaged-KO gate"
+            exit 1
+          fi
+
+          PINS=$(cat "$RUNNER_TEMP/ko-pins.txt")
+          SIZES=$(cat "$RUNNER_TEMP/ko-sizes.txt")
+          i=0
+          for apk in "${STAGED[@]}"; do
+            i=$((i + 1))
+            name=$(basename "$apk")
+            apk_sha=$(sha256sum "$apk" | awk '{print $1}')
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK $name differs from the packaged release APK"
+              exit 1
+            fi
+            # Required native content: the APK must carry the bootstrap
+            # library that ExploitRunner stages at runtime. Host-only zip
+            # assertion, not a device claim.
+            if ! unzip -Z1 "$apk" | grep -qx 'lib/arm64-v8a/libbootstrap.so'; then
+              echo "::error::APK $name is missing lib/arm64-v8a/libbootstrap.so"
+              exit 1
+            fi
+            EXTRACT="$RUNNER_TEMP/apk-extract-$i"
+            rm -rf "$EXTRACT"
+            mkdir -p "$EXTRACT"
+            unzip -q "$apk" 'lib/arm64-v8a/libdfroot.so' -d "$EXTRACT"
+            SO="$EXTRACT/lib/arm64-v8a/libdfroot.so"
+            test -f "$SO"
+            so_sha=$(sha256sum "$SO" | awk '{print $1}')
+
+            PMAN="$RUNNER_TEMP/dfroot-packaged-$i.manifest"
+            # The verifier invalidates its outputs at entry; repeat here so a
+            # reused runner-temp path can never carry stale verified evidence.
+            rm -f "$PMAN" "${PMAN}.dfroot_ko.dump"
+            cmake -DPACKAGED_SO="$SO" -DKO_OBJCOPY="$OBJCOPY" \
+                "-DKO_EXPECTED_SHA256S=$PINS" "-DKO_EXPECTED_SIZE=$SIZES" \
+                -DKO_MANIFEST="$PMAN" \
+                -DDFROOT_SOURCE_DIR="$GITHUB_WORKSPACE" \
+                -P app/src/main/jni/verify_packaged_ko.cmake
+            grep -q '^status: verified$' "$PMAN"
+            man_so_sha=$(sed -n 's/^so_sha256: //p' "$PMAN")
+            if [ "$man_so_sha" != "$so_sha" ]; then
+              echo "::error::Manifest so_sha256 for $name does not match the extracted .so"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$apk_sha" "$so_sha" "$PMAN" "$man_so_sha" >> "$INDEX"
+            echo "verified APK: $name ($apk_sha)"
+          done
+          if [ ! -s "$INDEX" ]; then
+            echo "::error::APK gate index is empty; refusing to publish"
+            exit 1
+          fi
+          echo "apk-gate-ok" > "$RUNNER_TEMP/marker-apk-gate"
+
+      # Real (not fixture) loader-byte gate over the COMPLETE upload set. The
+      # pins are read from the single source of truth used by the build, then
+      # the REAL build-time verifier is run on entries extracted from each APK
+      # that will be uploaded. No new pin, no new marker: the index below is
+      # the evidence consumed by the release-evidence step and upload choke.
+      - name: Verify bundled loader bytes in every distributable APK
+        run: |
+          set -euo pipefail
+          # Each pin must occur exactly once and be well formed in CMakeLists.txt.
+          PINS="$RUNNER_TEMP/loader-pins.tsv"
+          CMAKE_LIST=app/src/main/jni/CMakeLists.txt
+          : > "$PINS"
+          for spec in \
+              'ksud_sha256|LOADER_KSUD_SHA256|^[0-9a-f]{64}$' \
+              'ksud_size|LOADER_KSUD_SIZE|^[0-9]+$' \
+              'ksudnext_sha256|LOADER_KSUDNEXT_SHA256|^[0-9a-f]{64}$' \
+              'ksudnext_size|LOADER_KSUDNEXT_SIZE|^[0-9]+$'; do
+            field=${spec%%|*}
+            rest=${spec#*|}
+            key=${rest%%|*}
+            regex=${rest#*|}
+            value=$(sed -n "s/^set(${key}[[:space:]]\{1,\}\"\{0,1\}\([^\")]*\)\"\{0,1\})[[:space:]]*\$/\1/p" "$CMAKE_LIST")
+            count=$(printf '%s\n' "$value" | grep -c . || true)
+            if [ "$count" -ne 1 ] || [ -z "$value" ]; then
+              echo "::error::Expected exactly one well-formed $key pin in $CMAKE_LIST (found $count)"
+              exit 1
+            fi
+            if ! printf '%s\n' "$value" | grep -Eq "$regex"; then
+              echo "::error::Malformed $key pin '$value' in $CMAKE_LIST"
+              exit 1
+            fi
+            printf '%s\t%s\n' "$field" "$value" >> "$PINS"
+          done
+          test -s "$PINS"
+
+          STAGE="$RUNNER_TEMP/dfroot-release-apks"
+          INDEX="$RUNNER_TEMP/apk-loader-index.tsv"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          : > "$INDEX"
+          shopt -s nullglob
+          APK_SOURCE=(release/DFRoot_*.apk)
+          if [ "${#APK_SOURCE[@]}" -eq 0 ]; then
+            echo "::error::No packaged release APK found; refusing to publish unverified artifacts"
+            exit 1
+          fi
+          cp -- "${APK_SOURCE[@]}" "$STAGE/"
+          STAGED=("$STAGE"/DFRoot_*.apk)
+          if [ "${#STAGED[@]}" -ne "${#APK_SOURCE[@]}" ]; then
+            echo "::error::Staged APK count does not match the packaged release APK set"
+            exit 1
+          fi
+
+          KSUD_SHA=$(awk -F '\t' '$1 == "ksud_sha256" { print $2; exit }' "$PINS")
+          KSUD_SIZE=$(awk -F '\t' '$1 == "ksud_size" { print $2; exit }' "$PINS")
+          NEXT_SHA=$(awk -F '\t' '$1 == "ksudnext_sha256" { print $2; exit }' "$PINS")
+          NEXT_SIZE=$(awk -F '\t' '$1 == "ksudnext_size" { print $2; exit }' "$PINS")
+          if [ -z "$KSUD_SHA" ] || [ -z "$KSUD_SIZE" ] || [ -z "$NEXT_SHA" ] || [ -z "$NEXT_SIZE" ]; then
+            echo "::error::Loader pins are incomplete"
+            exit 1
+          fi
+
+          field() {
+            awk -v key="$1" 'index($0, key ": ") == 1 {
+              print substr($0, length(key) + 3); exit }' "$2"
+          }
+
+          i=0
+          for apk in "${STAGED[@]}"; do
+            i=$((i + 1))
+            name=$(basename "$apk")
+            apk_sha=$(sha256sum "$apk" | awk '{print $1}')
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK $name differs from the packaged release APK"
+              exit 1
+            fi
+            # Each loader must occur exactly once at its exact ABI path: a
+            # duplicate or alias would make the checked bytes ambiguous.
+            for entry in lib/arm64-v8a/libksud.so lib/arm64-v8a/libksudnext.so; do
+              count=$(unzip -Z1 "$apk" | grep -Fxc "$entry" || true)
+              count=${count:-0}
+              if [ "$count" -ne 1 ]; then
+                echo "::error::APK $name must contain exactly one '$entry' entry (found $count)"
+                exit 1
+              fi
+            done
+            EXTRACT="$RUNNER_TEMP/apk-loader-extract-$i"
+            rm -rf "$EXTRACT"
+            mkdir -p "$EXTRACT"
+            unzip -q "$apk" 'lib/arm64-v8a/libksud.so' 'lib/arm64-v8a/libksudnext.so' -d "$EXTRACT"
+            KSUD="$EXTRACT/lib/arm64-v8a/libksud.so"
+            NEXT="$EXTRACT/lib/arm64-v8a/libksudnext.so"
+            test -f "$KSUD"
+            test -f "$NEXT"
+            ksud_sha=$(sha256sum "$KSUD" | awk '{print $1}')
+            next_sha=$(sha256sum "$NEXT" | awk '{print $1}')
+
+            LMAN="$RUNNER_TEMP/dfroot-loader-$i.manifest"
+            LSTAMP="$RUNNER_TEMP/dfroot-loader-$i.verified"
+            # The verifier invalidates its outputs at entry; repeat here so a
+            # reused runner-temp path can never carry stale verified evidence.
+            rm -f "$LMAN" "$LSTAMP"
+            cmake \
+                -DLOADER_KSUD_FILE="$KSUD" \
+                -DLOADER_KSUDNEXT_FILE="$NEXT" \
+                "-DLOADER_KSUD_SHA256=$KSUD_SHA" "-DLOADER_KSUD_SIZE=$KSUD_SIZE" \
+                "-DLOADER_KSUDNEXT_SHA256=$NEXT_SHA" "-DLOADER_KSUDNEXT_SIZE=$NEXT_SIZE" \
+                -DLOADER_VERIFY_STAMP="$LSTAMP" \
+                -DLOADER_VERIFY_MANIFEST="$LMAN" \
+                -P app/src/main/jni/verify_loader_hashes.cmake
+            grep -q '^status: verified$' "$LMAN"
+            if [ "$(field ksud_sha256 "$LMAN")" != "$KSUD_SHA" ] ||
+               [ "$(field ksud_size "$LMAN")" != "$KSUD_SIZE" ] ||
+               [ "$(field ksudnext_sha256 "$LMAN")" != "$NEXT_SHA" ] ||
+               [ "$(field ksudnext_size "$LMAN")" != "$NEXT_SIZE" ]; then
+              echo "::error::Loader manifest fields for $name do not match the reviewed pins"
+              exit 1
+            fi
+            if [ "$(field ksud_sha256 "$LMAN")" != "$ksud_sha" ] ||
+               [ "$(field ksudnext_sha256 "$LMAN")" != "$next_sha" ]; then
+              echo "::error::Loader manifest hashes for $name do not match the extracted entries"
+              exit 1
+            fi
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$apk_sha" "$ksud_sha" "$next_sha" "$LMAN" >> "$INDEX"
+            echo "verified loader bytes: $name ($apk_sha)"
+          done
+          if [ ! -s "$INDEX" ]; then
+            echo "::error::APK loader index is empty; refusing to publish"
+            exit 1
+          fi
+
+      # Required identity check on the generated build-provenance records.
+      # This ties source/toolchain/helper identity to the checked-out commit and
+      # to the hashes recorded in each audit record. It is not a claim that a
+      # record proves which APK was built from it (records remain informational).
+      - name: Verify build-provenance identity for every record
+        run: |
+          set -euo pipefail
+          bad=0
+          records=0
+          field() {
+            awk -v key="$1" 'index($0, key ": ") == 1 {
+              print substr($0, length(key) + 3); exit }' "$2"
+          }
+          sha_of_recorded() {
+            case "$1" in
+              /*) path="$1" ;;
+              *)  path="$GITHUB_WORKSPACE/$1" ;;
+            esac
+            if [ -f "$path" ]; then
+              sha256sum "$path" | awk '{print $1}'
+            else
+              echo "unavailable"
+            fi
+          }
+          while IFS= read -r -d '' rec; do
+            records=$((records + 1))
+            rec_head=$(field git_head "$rec")
+            if [ "$rec_head" != "$GITHUB_SHA" ]; then
+              echo "::error::Provenance git_head '$rec_head' != GITHUB_SHA '$GITHUB_SHA' ($rec)"
+              bad=1
+            fi
+            rec_variant=$(field android_variant "$rec")
+            if [ "${rec_variant,,}" != "release" ]; then
+              echo "::error::Provenance android_variant is not release: '$rec_variant' ($rec)"
+              bad=1
+            fi
+            rec_ko=$(field ko_sha256 "$rec")
+            if ! tr ';' '\n' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$rec_ko"; then
+              echo "::error::Provenance ko_sha256 '$rec_ko' is not a reviewed pin ($rec)"
+              bad=1
+            fi
+            rec_ko_man=$(field ko_verify_manifest "$rec")
+            rec_ko_man_sha=$(field ko_manifest_sha256 "$rec")
+            if [ "$(sha_of_recorded "$rec_ko_man")" != "$rec_ko_man_sha" ]; then
+              echo "::error::Provenance ko_manifest digest mismatch ($rec)"
+              bad=1
+            fi
+            rec_helper=$(field splicehelper_binary "$rec")
+            rec_helper_sha=$(field splicehelper_sha256 "$rec")
+            if [ "$(sha_of_recorded "$rec_helper")" != "$rec_helper_sha" ]; then
+              echo "::error::Provenance splicehelper binary hash mismatch ($rec)"
+              bad=1
+            fi
+            rec_helper_src=$(field splicehelper_source "$rec")
+            rec_helper_src_sha=$(field splicehelper_source_sha256 "$rec")
+            if [ "$(sha_of_recorded "$rec_helper_src")" != "$rec_helper_src_sha" ]; then
+              echo "::error::Provenance splicehelper source hash mismatch ($rec)"
+              bad=1
+            fi
+            for compiler_field in compiler_id compiler_version compiler_target \
+                                  compiler_sysroot compiler_c_flags compiler_asm_flags; do
+              if ! grep -q "^${compiler_field}: " "$rec"; then
+                echo "::error::Provenance missing ${compiler_field} ($rec)"
+                bad=1
+              elif [ -z "$(field "$compiler_field" "$rec")" ]; then
+                echo "::error::Provenance empty ${compiler_field} ($rec)"
+                bad=1
+              fi
+            done
+          done < <(find app/.cxx -type f -name 'dfroot-build-provenance.txt' -print0 2>/dev/null)
+          if [ "$records" -eq 0 ]; then
+            echo "::error::No dfroot-build-provenance.txt found; refusing to publish"
+            bad=1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::Build-provenance identity checks failed; blocking upload/release"
+            exit 1
+          fi
+          echo "Verified $records provenance record(s)"
+          echo "provenance-identity-ok" > "$RUNNER_TEMP/marker-provenance-identity"
+
+      - name: Assert KO hash check enabled in every CMakeCache
+        run: |
+          set -euo pipefail
+          caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)
+          if [ -z "$caches" ]; then
+            echo "::error::No CMakeCache.txt found under app/.cxx"
+            exit 1
+          fi
+          bad=0
+          while IFS= read -r cache; do
+            if ! grep -qs '^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$' "$cache"; then
+              echo "::error::DFROOT_SKIP_KO_HASH_CHECK is not OFF in $cache"
+              bad=1
+            fi
+          done <<< "$caches"
+          if [ "$bad" -ne 0 ]; then
+            exit 1
+          fi
+          echo "DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF confirmed in all CMakeCache files"
+
+      # Ties the evidence to the COMPLETE set of APKs that will be uploaded.
+      # Every source-KO manifest, provenance record and staged APK is iterated;
+      # one evidence row is emitted per uploaded APK. Claims are limited to the
+      # checks actually performed (no device or reproducibility claim).
+      - name: Verify release evidence for every uploaded APK
+        run: |
+          set -euo pipefail
+          bad=0
+          EVIDENCE="$RUNNER_TEMP/release-evidence.tsv"
+          INDEX="$RUNNER_TEMP/apk-gate-index.tsv"
+          LINDEX="$RUNNER_TEMP/apk-loader-index.tsv"
+          STAGE="$RUNNER_TEMP/dfroot-release-apks"
+          LOADER_PINS="$RUNNER_TEMP/loader-pins.tsv"
+          : > "$EVIDENCE"
+          field() {
+            awk -v key="$1" 'index($0, key ": ") == 1 {
+              print substr($0, length(key) + 3); exit }' "$2"
+          }
+          in_pins() {
+            tr ';' '\n' < "$RUNNER_TEMP/ko-pins.txt" | grep -qx "$1"
+          }
+          loader_pin() {
+            awk -F '\t' -v key="$1" '$1 == key { print $2; exit }' "$LOADER_PINS"
+          }
+          PIN_KSUD_SHA=$(loader_pin ksud_sha256)
+          PIN_KSUD_SIZE=$(loader_pin ksud_size)
+          PIN_NEXT_SHA=$(loader_pin ksudnext_sha256)
+          PIN_NEXT_SIZE=$(loader_pin ksudnext_size)
+          for pin_value in "$PIN_KSUD_SHA" "$PIN_KSUD_SIZE" "$PIN_NEXT_SHA" "$PIN_NEXT_SIZE"; do
+            if [ -z "$pin_value" ]; then
+              echo "::error::Loader pin is missing from $LOADER_PINS"
+              bad=1
+            fi
+          done
+
+          # 1. checked-out source is exactly the publishing commit.
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$HEAD_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::git HEAD $HEAD_SHA != GITHUB_SHA $GITHUB_SHA"
+            bad=1
+          fi
+
+          # 2. every native cache has the KO hash gate enabled (skip OFF).
+          caches=$(find app/.cxx -type f -name CMakeCache.txt 2>/dev/null || true)
+          if [ -z "$caches" ]; then
+            echo "::error::No CMakeCache.txt found under app/.cxx"
+            bad=1
+          fi
+          while IFS= read -r cache; do
+            [ -n "$cache" ] || continue
+            if ! grep -qs '^DFROOT_SKIP_KO_HASH_CHECK:BOOL=OFF$' "$cache"; then
+              echo "::error::DFROOT_SKIP_KO_HASH_CHECK not OFF in $cache"
+              bad=1
+            fi
+          done <<< "$caches"
+
+          # 3. ALL source-KO manifests are verified and pinned; no first-match
+          # selection, so a stray unverified cache cannot hide in the set.
+          source_manifests=0
+          source_hashes=""
+          while IFS= read -r -d '' koman; do
+            source_manifests=$((source_manifests + 1))
+            if ! grep -q '^status: verified$' "$koman"; then
+              echo "::error::KO gate manifest is not verified: $koman"
+              bad=1
+            fi
+            ko_hash=$(field sha256 "$koman")
+            if ! in_pins "$ko_hash"; then
+              echo "::error::KO manifest hash '$ko_hash' is not in the reviewed pins ($koman)"
+              bad=1
+            fi
+            source_hashes="$source_hashes $ko_hash"
+          done < <(find app/.cxx -type f -name 'dfroot-ko.sha256.manifest' -print0 2>/dev/null)
+          if [ "$source_manifests" -eq 0 ]; then
+            echo "::error::No dfroot-ko.sha256.manifest found"
+            bad=1
+          fi
+
+          # 4. ALL provenance records are present; identity was checked in the
+          # dedicated required step above. No -print -quit selection here.
+          provenance_records=0
+          while IFS= read -r -d '' rec; do
+            provenance_records=$((provenance_records + 1))
+            rec_ko=$(field ko_sha256 "$rec")
+            if ! in_pins "$rec_ko"; then
+              echo "::error::Provenance ko_sha256 '$rec_ko' is not pinned ($rec)"
+              bad=1
+            fi
+          done < <(find app/.cxx -type f -name 'dfroot-build-provenance.txt' -print0 2>/dev/null)
+          if [ "$provenance_records" -eq 0 ]; then
+            echo "::error::No dfroot-build-provenance.txt found"
+            bad=1
+          fi
+
+          # 5. EVERY packaged-KO manifest in the native caches must be verified
+          # and pinned, with so_sha256 equal to the SHA-256 of the verified
+          # libdfroot.so whose path the manifest records. No first-match selection, so a stray
+          # unverified cached artifact cannot hide in the set.
+          packaged_manifests=0
+          while IFS= read -r -d '' pman; do
+            packaged_manifests=$((packaged_manifests + 1))
+            if ! grep -q '^status: verified$' "$pman"; then
+              echo "::error::Packaged-KO manifest is not verified: $pman"
+              bad=1
+            fi
+            pkg_ko_hash=$(field sha256 "$pman")
+            if ! in_pins "$pkg_ko_hash"; then
+              echo "::error::Packaged-KO hash '$pkg_ko_hash' is not a reviewed pin ($pman)"
+              bad=1
+            fi
+            verified_so=$(field verified_so "$pman")
+            case "$verified_so" in
+              */app/build/intermediates/*/libdfroot.so) ;;
+              *)
+                echo "::error::Manifest does not name the verified packaged .so: $pman"
+                bad=1
+                ;;
+            esac
+            if [ ! -f "$verified_so" ]; then
+              echo "::error::Verified libdfroot.so missing for manifest: $pman"
+              bad=1
+            else
+              verified_so_sha=$(sha256sum "$verified_so" | awk '{print $1}')
+              man_so_sha=$(field so_sha256 "$pman")
+              if [ "$man_so_sha" != "$verified_so_sha" ]; then
+                echo "::error::Manifest so_sha256 '$man_so_sha' does not match verified libdfroot.so '$verified_so_sha' ($pman)"
+                bad=1
+              fi
+            fi
+          done < <(find app/.cxx -type f -name 'dfroot-packaged-ko.manifest' -print0 2>/dev/null)
+          if [ "$packaged_manifests" -eq 0 ]; then
+            echo "::error::No dfroot-packaged-ko.manifest found under app/.cxx"
+            bad=1
+          fi
+
+          # 6. One evidence row per APK in the gate index (i.e. per upload).
+          if [ ! -s "$INDEX" ]; then
+            echo "::error::APK gate index is empty; no verified artifact to document"
+            bad=1
+          fi
+          rows=0
+          while IFS=$'\t' read -r name apk_sha so_sha pman man_so_sha; do
+            rows=$((rows + 1))
+            staged="$STAGE/$name"
+            if [ ! -f "$staged" ]; then
+              echo "::error::Staged APK missing: $staged"
+              bad=1
+              continue
+            fi
+            if [ "$(sha256sum "$staged" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK hash changed after the gate: $name"
+              bad=1
+            fi
+            # The packaged release APK is the exact file the upload step uses.
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Packaged release APK hash changed after the gate: $name"
+              bad=1
+            fi
+            if [ ! -f "$pman" ] || ! grep -q '^status: verified$' "$pman"; then
+              echo "::error::Packaged-KO manifest for $name is missing or not verified"
+              bad=1
+              continue
+            fi
+            pkg_hash=$(field sha256 "$pman")
+            if ! in_pins "$pkg_hash"; then
+              echo "::error::Packaged KO hash '$pkg_hash' for $name is not a reviewed pin"
+              bad=1
+            fi
+            if [ "$man_so_sha" != "$so_sha" ]; then
+              echo "::error::Manifest so_sha256 for $name does not match the extracted .so"
+              bad=1
+            fi
+            case " $source_hashes " in
+              *" $pkg_hash "*) ;;
+              *)
+                echo "::error::Packaged KO hash for $name matches no verified source-KO manifest"
+                bad=1
+                ;;
+            esac
+            printf 'apk: %s\tapk_sha256: %s\tso_sha256: %s\tpackaged_ko_sha256: %s\tprovenance_records: %s\tgit_sha: %s\n' \
+                "$name" "$apk_sha" "$so_sha" "$pkg_hash" "$provenance_records" "$HEAD_SHA" >> "$EVIDENCE"
+          done < "$INDEX"
+          if [ "$rows" -eq 0 ]; then
+            echo "::error::No APK evidence rows produced"
+            bad=1
+          fi
+          staged_count=$(find "$STAGE" -maxdepth 1 -type f -name 'DFRoot_*.apk' 2>/dev/null | wc -l)
+          if [ "$rows" -ne "$staged_count" ]; then
+            echo "::error::Evidence rows ($rows) != staged APK count ($staged_count)"
+            bad=1
+          fi
+
+          # 7. Bundled loader bytes: every build-time loader manifest must be
+          # verified and pinned (three-way binding with the reviewed pins), and
+          # every APK in the loader gate index must re-hash to the staged and
+          # packaged APK, match the KO gate index, and carry pinned hashes that
+          # agree with its own manifest and with a verified build-time manifest.
+          loader_manifests=0
+          build_loader_hashes=""
+          while IFS= read -r -d '' lman; do
+            loader_manifests=$((loader_manifests + 1))
+            if ! grep -q '^status: verified$' "$lman"; then
+              echo "::error::Loader gate manifest is not verified: $lman"
+              bad=1
+            fi
+            for pair in \
+                "ksud_sha256|$PIN_KSUD_SHA" \
+                "ksud_size|$PIN_KSUD_SIZE" \
+                "ksudnext_sha256|$PIN_NEXT_SHA" \
+                "ksudnext_size|$PIN_NEXT_SIZE"; do
+              key=${pair%%|*}
+              want=${pair#*|}
+              got=$(field "$key" "$lman")
+              if [ "$got" != "$want" ]; then
+                echo "::error::Loader manifest $key '$got' is not the reviewed pin '$want' ($lman)"
+                bad=1
+              fi
+            done
+            build_loader_hashes="$build_loader_hashes $(field ksud_sha256 "$lman")/$(field ksudnext_sha256 "$lman")"
+          done < <(find app/.cxx -type f -name 'loader-hashes.manifest' -print0 2>/dev/null)
+          if [ "$loader_manifests" -eq 0 ]; then
+            echo "::error::No loader-hashes.manifest found under app/.cxx"
+            bad=1
+          fi
+
+          if [ ! -s "$LINDEX" ]; then
+            echo "::error::APK loader index is empty; no verified loader artifact to document"
+            bad=1
+          fi
+          loader_rows=0
+          while IFS=$'\t' read -r name apk_sha ksud_sha next_sha lman; do
+            loader_rows=$((loader_rows + 1))
+            staged="$STAGE/$name"
+            if [ ! -f "$staged" ]; then
+              echo "::error::Staged APK missing for loader evidence: $staged"
+              bad=1
+              continue
+            fi
+            if [ "$(sha256sum "$staged" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Staged APK hash changed after the loader gate: $name"
+              bad=1
+            fi
+            if [ "$(sha256sum "release/$name" | awk '{print $1}')" != "$apk_sha" ]; then
+              echo "::error::Packaged release APK hash changed after the loader gate: $name"
+              bad=1
+            fi
+            if ! awk -F '\t' -v n="$name" -v s="$apk_sha" \
+                   '$1 == n && $2 == s { found = 1 } END { exit(found ? 0 : 1) }' "$INDEX"; then
+              echo "::error::APK $name loader evidence does not match the KO gate index"
+              bad=1
+            fi
+            if [ ! -f "$lman" ] || ! grep -q '^status: verified$' "$lman"; then
+              echo "::error::Loader manifest for $name is missing or not verified"
+              bad=1
+              continue
+            fi
+            for pair in \
+                "ksud_sha256|$PIN_KSUD_SHA" \
+                "ksud_size|$PIN_KSUD_SIZE" \
+                "ksudnext_sha256|$PIN_NEXT_SHA" \
+                "ksudnext_size|$PIN_NEXT_SIZE"; do
+              key=${pair%%|*}
+              want=${pair#*|}
+              got=$(field "$key" "$lman")
+              if [ "$got" != "$want" ]; then
+                echo "::error::Loader manifest $key '$got' for $name is not the reviewed pin '$want'"
+                bad=1
+              fi
+            done
+            if [ "$ksud_sha" != "$PIN_KSUD_SHA" ] || [ "$next_sha" != "$PIN_NEXT_SHA" ]; then
+              echo "::error::Loader hashes for $name are not the reviewed pins"
+              bad=1
+            fi
+            if [ "$(field ksud_sha256 "$lman")" != "$ksud_sha" ] ||
+               [ "$(field ksudnext_sha256 "$lman")" != "$next_sha" ]; then
+              echo "::error::Loader manifest for $name does not match the indexed APK hashes"
+              bad=1
+            fi
+            case " $build_loader_hashes " in
+              *" $ksud_sha/$next_sha "*) ;;
+              *)
+                echo "::error::Loader hashes for $name match no verified build-time manifest"
+                bad=1
+                ;;
+            esac
+            printf 'apk: %s\tloader_ksud_sha256: %s\tloader_ksudnext_sha256: %s\tloader_manifest: %s\n' \
+                "$name" "$ksud_sha" "$next_sha" "$lman" >> "$EVIDENCE"
+          done < "$LINDEX"
+          if [ "$loader_rows" -eq 0 ]; then
+            echo "::error::No APK loader evidence rows produced"
+            bad=1
+          fi
+          if [ "$loader_rows" -ne "$staged_count" ]; then
+            echo "::error::Loader evidence rows ($loader_rows) != staged APK count ($staged_count)"
+            bad=1
+          fi
+          cat "$EVIDENCE"
+
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::Release evidence checks failed; blocking upload/release"
+            exit 1
+          fi
+          echo "release-evidence-ok" > "$RUNNER_TEMP/marker-release-evidence"
+
+      # Single pre-upload gate: no artifact can be published unless every
+      # required verification step ran and the gate index is populated.
+      - name: Assert distributable evidence before upload
+        run: |
+          set -euo pipefail
+          missing=0
+          for marker in marker-apk-gate marker-provenance-identity \
+                        marker-release-evidence; do
+            if [ ! -s "$RUNNER_TEMP/$marker" ]; then
+              echo "::error::Distributable evidence marker missing: $marker"
+              missing=1
+            fi
+          done
+          if [ ! -s "$RUNNER_TEMP/apk-gate-index.tsv" ]; then
+            echo "::error::APK gate index is empty or missing"
+            missing=1
+          fi
+          if [ ! -s "$RUNNER_TEMP/apk-loader-index.tsv" ]; then
+            echo "::error::APK loader index is empty or missing"
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "distributable-evidence-ok" > "$RUNNER_TEMP/marker-distributable-evidence"
+          echo "All distributable evidence gates reached (3/3 markers + nonempty KO/loader indexes)"
+
+      # Upload ONLY the gated release APKs plus the exact checksum/licence set.
+      # This step is unreachable when any required gate above failed.
       - name: Upload signed release
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -421,6 +1328,53 @@ jobs:
           # Signed APKs are consumed by the publish job in the same run; keep
           # the sensitive artifact available only as long as it is needed.
           retention-days: 1
+
+      # Informational audit bundle only: no new pins, not an attestation, never
+      # a release gate. The required identity check above gates publication.
+      - name: Generate APK provenance manifest (informational)
+        run: |
+          set -uo pipefail
+          OUT="$RUNNER_TEMP/dfroot-apk-provenance.txt"
+          hash_one() {
+            if [ -f "$1" ]; then
+              sha256sum "$1" || echo "unavailable (sha256sum failed): $1"
+            else
+              echo "unavailable (missing): $1"
+            fi
+          }
+          {
+            echo "# DFRoot APK provenance (informational audit bundle; not an attestation, not an independent reproducible-build proof, not a release gate)"
+            echo "git_sha: $GITHUB_SHA"
+            echo "generated_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "cmake: $(cmake --version 2>/dev/null | head -1 || echo unavailable)"
+            echo "java: $(java -version 2>&1 | head -1 || echo unavailable)"
+            echo "clang: $(clang --version 2>/dev/null | head -1 || echo unavailable)"
+            if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -f "$ANDROID_NDK_HOME/source.properties" ]; then
+              grep '^Pkg.Revision=' "$ANDROID_NDK_HOME/source.properties" || true
+            else
+              echo "ndk: unavailable (ANDROID_NDK_HOME not set)"
+            fi
+            echo "--- artifacts (staged, gate-verified) ---"
+            for apk in "$RUNNER_TEMP"/dfroot-release-apks/DFRoot_*.apk; do hash_one "$apk"; done
+            hash_one app/src/main/jni/ko/dfroot-android13-5.15.ko
+            hash_one app/src/main/jniLibs/arm64-v8a/libksud.so
+            hash_one app/src/main/jniLibs/arm64-v8a/libksudnext.so
+            find app/.cxx -type f -name splicehelper -print0 2>/dev/null |
+              while IFS= read -r -d '' f; do hash_one "$f"; done
+            echo "--- KO gate manifest ---"
+            find app/.cxx -type f -name 'dfroot-ko.sha256.manifest' -print0 2>/dev/null |
+              while IFS= read -r -d '' f; do echo "file: $f"; cat "$f"; done
+          } > "$OUT"
+          cat "$OUT"
+
+      # Informational artifact: its contents are audit evidence, not a claim
+      # that the APK was reproduced or device-validated.
+      - name: Upload APK provenance manifest (informational)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: DFRoot-provenance
+          path: ${{ runner.temp }}/dfroot-apk-provenance.txt
+          if-no-files-found: error
 
       - name: Clean up signing material
         if: ${{ always() }}

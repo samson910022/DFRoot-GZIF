@@ -17,15 +17,23 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 37)
 public class BootConfigurationPolicyTest {
     private Context context;
     private Context deContext;
     private ComponentName bootReceiver;
+    private Path marker;
 
     @Before
-    public void setUp() {
+    public void setUp() throws Exception {
+        marker = Files.createTempFile("dfroot-boot-integrity", ".marker");
+        Files.deleteIfExists(marker);
+        PreferenceIntegrity.resetForTest();
+        PreferenceIntegrity.init(marker.toFile());
         ConfigurationRepository.resetForTesting();
         context = RuntimeEnvironment.getApplication();
         deContext = context.createDeviceProtectedStorageContext();
@@ -35,10 +43,12 @@ public class BootConfigurationPolicyTest {
     }
 
     @After
-    public void tearDown() {
+    public void tearDown() throws Exception {
         context.getPackageManager().setComponentEnabledSetting(bootReceiver,
                 PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP);
         ConfigurationRepository.resetForTesting();
+        PreferenceIntegrity.resetForTest();
+        Files.deleteIfExists(marker);
     }
 
     @Test

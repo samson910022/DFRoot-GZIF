@@ -93,6 +93,10 @@ public final class ConfigurationRepository {
         }
         synchronized (ConfigurationRepository.class) {
             if (instance == null) {
+                // The store brackets every commit with PreferenceIntegrity's
+                // write-ahead marker. Initialize the durable latch/gate before
+                // the first load or migration can write anything.
+                PreferenceIntegrity.init(context);
                 instance = create(SharedPreferencesConfigurationStore.forDeviceProtectedStorage(context));
                 instance.start();
             }
