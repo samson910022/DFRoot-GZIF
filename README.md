@@ -51,7 +51,7 @@ R2-14 and R2-16 remain OPEN gates.
 ## Seventh repair round (R7.1–R7.3) — consolidated summary (2026-11-26)
 
 Final local HEAD `57df54c` (R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`)
-on top of the R6 close `92572ea` (R6 code head `9e1aff7`). This round addresses
+on top of the R6 close sequence (`92572ea` → `528568d` → `f954cbb`; R6 code head `9e1aff7`). This round addresses
 Re-review 6. The three dispositions are:
 
 - **R2-24 — FIXED in the reviewed host scope (R7.1, `985fa71`).** Notification
@@ -100,7 +100,7 @@ packaged-pin gate inherited from PR #1 policy, no in-app recovery UI,
 `BOOT_COUNT` diagnostic only, `/dev` marker-root trust, and the OPEN
 abnormal-death publication window.
 
-**Final comprehensive reviews are PENDING at the current HEAD `57df54c`:**
+**Final comprehensive reviews all APPROVE at the R7 final head `020175b`** (R7 code head `57df54c`):
 the main agent runs four fresh independent reviews after this consolidation.
 Historical APPROVE outcomes (including R6 Final 6.1–6.6 at `92572ea`) are
 scoped to their own heads and are **not** an approval of the current HEAD.

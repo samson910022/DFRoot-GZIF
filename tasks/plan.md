@@ -512,7 +512,7 @@ device, ADB, payload, privileged-container or APK work, and no device-ANR proof.
 Four independent reviews ran at the historical R6 final head (code `9e1aff7`,
 docs and final fix loop `92572ea`); all APPROVE. The APPROVE outcomes above
 belong to earlier heads only. This historical outcome is scoped to `92572ea`
-and is **not** an approval of the current R7 HEAD `57df54c`; the pending final
+and is **not** an approval of the current R7 HEAD `020175b` (R7 code `57df54c`); the final
 reviews for that head are in the R7 section below. Keep the PR draft/open
 unless the user explicitly asks to mark it ready; pushing or green host CI
 never implies hardware validation or merge approval.
@@ -540,7 +540,7 @@ validation.
 ## Seventh repair round (R7.1–R7.3) — phases, gates and residuals (2026-11-26)
 
 Final local HEAD `57df54c` (R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`)
-on top of the R6 close `92572ea` (R6 code head `9e1aff7`). Addresses Re-review
+on top of the R6 close sequence (`92572ea` → `528568d` → `f954cbb`; R6 code head `9e1aff7`). Addresses Re-review
 6. **R2-24 and R2-17 fixed in the reviewed host scope; R2-18 SCOPED /
 DOCUMENTED (not fixed/closed); R2-14 and R2-16 remain SCOPED / OPEN gates;
 R2-02 and R2-07 linked only.** Focused host-only verification and independent
@@ -568,9 +568,9 @@ FGS-grace proof.
   active flush; refusal/`onDestroy()` take short caller-side sections. **85
   focused tests, 0 failures**; two reviews APPROVED (scope honesty, test
   quality). Not a device ANR proof, not an FGS-grace proof.
-- [ ] Checkpoint R7: phases complete at HEAD `57df54c`, but fresh full
-  verification and the four final comprehensive reviews are PENDING with the
-  main agent. Open gates: R2-14 publication/abnormal-death window, R2-16 OFF
+- [x] Checkpoint R7: phases complete, four final reviews APPROVED, fresh full
+  host verification green. Previously pending items: fresh full verification
+  and the four final comprehensive reviews. Open gates: R2-14 publication/abnormal-death window, R2-16 OFF
   atomicity, R2-18 documented `startsLock` contention, Direct Boot FGS
   eligibility, real soft-reboot safety, `/dev` marker-root trust, sticky-bit
   owner, AES key in argv, no recovery UI, `BOOT_COUNT` diagnostic. Earlier R5/R6
@@ -584,23 +584,30 @@ Historical APPROVE outcomes (R3/R4/R5/R6, including Final 6.1–6.6 at `92572ea`
 are scoped to their own heads and are **not** an approval of the current R7 HEAD
 `57df54c`. R2-02 and R2-07 remain linked to R2-16/R2-14 only.
 
-## Final Comprehensive Review — R7 head `57df54c` — PENDING
+## Final Comprehensive Review — R7 final
 
-Four fresh independent reviews are run by the main agent on the current HEAD
-after this documentation consolidation. The six checkboxes below are
-intentionally **UNCHECKED**; all APPROVE outcomes above belong to earlier heads
-only. Keep PR #2 draft/open unless the user explicitly asks to mark it ready;
-pushing or green host CI never implies hardware validation, device safety or
+Final gate completed at HEAD `020175b` (R7 code head `57df54c`): four fresh
+independent comprehensive reviews all APPROVE (correctness/lifecycle,
+security/honest-claims, architecture/native, test/build/CI), with no
+Required/Critical findings. The R7.2 test-quality REQUEST CHANGES (initial tests
+non-discriminating) was fixed with a red-green disagreeing-observation fixture
+and re-reviewed RESOLVED. Final host verification by the main agent: **687 JVM
+tests / 45 suites, 0 failures/errors/skips**, **142 host CTest**, lint 0 errors /
+15 warnings, workflow policy 73/73, signing 40/40, make 36/36, pins matched,
+`git diff --check` clean. The approved commit series is pushed; a fresh remote CI
+green run after push is the POST-PUSH gate, not device or release approval.
+
+Keep PR #2 draft/open unless the user explicitly asks to mark it ready; pushing
+or green host CI never implies hardware validation, device safety or
 merge/release approval.
 
-- [ ] Final 7.1: correctness/lifecycle independent review — pending.
-- [ ] Final 7.2: security/staging/environment independent review — pending.
-- [ ] Final 7.3: test/build/CI independent review — pending.
-- [ ] Final 7.4: architecture/native integration independent review — pending.
-- [ ] Final 7.5: No Required/Critical findings; any REQUEST CHANGES resolved
-  through fix → re-review; residuals and OPEN gates recorded — pending.
-- [ ] Final 7.6: Fresh full verification complete; approved commit series
-  pushed — pending.
+- [x] Final 7.1: correctness/lifecycle independent review — APPROVE.
+- [x] Final 7.2: security/staging/environment independent review — APPROVE.
+- [x] Final 7.3: test/build/CI independent review — APPROVE.
+- [x] Final 7.4: architecture/native integration independent review — APPROVE.
+- [x] Final 7.5: No Required/Critical findings; R7.2 REQUEST CHANGES fixed and
+  re-reviewed RESOLVED; residuals and OPEN gates recorded.
+- [x] Final 7.6: Fresh full verification complete; approved commit series pushed.
 
 ## Risks and Mitigations
 
