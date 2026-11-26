@@ -75,6 +75,30 @@ watch tests are unchanged. Focused verification: `df.root.MainActivityTest`
 only. No commit/stage/push, no device/full-suite/native work. Host-only evidence,
 **not** a device proof; R2-14 and R2-16 remain OPEN, R2-18/R2-24 untouched.
 
+## 2026-11-26 — R7.3: residual `startsLock` contention — SCOPED / DOCUMENTED (R2-18) — short note (R7.4 consolidates)
+
+Finding R2-18 is **SCOPED / DOCUMENTED, not fixed or closed**. Zero production
+behavior change: only deterministic host fixtures and this honest scope note.
+Residual stated explicitly: the main-thread start branch checks
+`flushInProgress` once, so a duplicate start arriving while the express worker
+is inside foreground attach under `startsLock` (with **no** active flush) can
+still enter `registerStart`/duplicate checking and briefly contend on that
+monitor. The refused-express fallback and `onDestroy()` pending-work
+bookkeeping also take short caller-side `startsLock` sections, which a slow
+platform call under the monitor can delay. No broad refactor was attempted;
+delayed foreground setup and UI-thread blocking remain ordinary Android
+lifecycle/ANR risks. New harmless fixtures pin the safety gate under those
+interleavings: one correlated `REJECTED`/`CANCELLED` publication, one lease
+close and one lifetime resolution, no second lease, no submit/engine, no
+barrier, no duplicate `stopForeground`, `START_NOT_STICKY`, and graceful
+shutdown/drain of the owned express worker. Existing main-thread flush
+deferral, express-priority and post-winner-sweep fixtures are unchanged.
+This is **bounded HOST-ONLY evidence, NOT a device ANR proof and NOT an FGS-grace
+proof**; the safety gate is retained, authorization is never weakened, and
+foreground-ownership uncertainty never leads to continued work. R2-14 and
+R2-16 remain **OPEN** gates; R2-24 untouched. No commit/stage/push, no
+device/full-suite/native work in this phase.
+
 ## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **sixth repair round** (final local HEAD

@@ -76,6 +76,28 @@ is inert in production (no seam installed). Watch bound (25 × 200 ms), ledger
 positive/unchanged run-button semantics are preserved. R2-14/R2-16 remain OPEN;
 R2-18 and R2-24 are untouched. No device/ADB/payload/privileged work was done.
 
+### R7.3 (2026-11-26) — residual `startsLock` contention — SCOPED / DOCUMENTED, short note (R7.4 consolidates)
+
+Re-review 6 finding **R2-18 is SCOPED / DOCUMENTED here, NOT fixed or closed**:
+no production behavior changed in this phase (tests/docs only). The residual is
+stated explicitly. The main-thread start branch checks `flushInProgress` once;
+a duplicate start arriving while the express worker is inside foreground attach
+under `startsLock` **without an active flush** can still enter
+`registerStart`/duplicate checking and briefly contend on that monitor. The
+refused-express fallback and `onDestroy()` pending-work bookkeeping likewise
+take short caller-side `startsLock` sections; a slow platform call under that
+monitor can delay them. Harmless host-only fixtures pin the fail-closed
+outcome of those interleavings (one correlated `REJECTED`/`CANCELLED`, one
+lease close and lifetime resolution, no second lease, no submit/engine, no
+barrier, no duplicate `stopForeground`, `START_NOT_STICKY`) and the graceful
+drain of the owned express worker. This is **bounded HOST-ONLY evidence of the
+residual and the safety gate, NOT a device ANR proof and NOT a foreground-service
+grace-timing proof**. Treat delayed foreground setup and UI-thread blocking as
+ordinary Android lifecycle/ANR risks: the safety gate is retained, authorization
+is never weakened, and uncertainty about foreground ownership never leads to
+continued work. R2-14 and R2-16 remain **OPEN** safety gates; R2-24 is untouched.
+No device/ADB/payload/privileged work was done.
+
 ## Sixth repair round (R6.1–R6.4) — consolidated summary (2026-11-26)
 
 Final local HEAD `9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`,
