@@ -8,6 +8,8 @@
 // Modified 2026-11-26 (DFRoot GZIF, R6.1): cover the bounded, lifecycle-scoped read-only outcome watch on a continuously visible Activity. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.2): pin that an evicted/absent ledger record stays explicitly unconfirmed on the watch and a later start, with no replay, fabricated reason or durable mutation. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.4): install the deterministic inline foreground-host seam at every service creation so existing synchronous Activity assertions stay valid. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R7.2): pin one ledger observation per watch tick with a deterministic host-only lookup seam, including a late final-tick outcome and the unconfirmed case. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R7.2 repair): add a disagreeing-observation regression test so the final tick cannot use a second ledger read that leaves the UI blank. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -57,6 +59,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -70,6 +73,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 37)
@@ -99,6 +103,7 @@ public class MainActivityTest {
         RunCoordinator.resetForTesting();
         MainActivity.resetResultToastForTesting();
         MainActivity.resetAvailabilityEnvironmentForTesting();
+        MainActivity.resetRequestOutcomeLookupForTesting();
         // Deterministic seam: the diagnostic runs inline on the test caller so
         // existing synchronous assertions are unchanged; async behavior is
         // covered separately with controlled executors.
@@ -135,6 +140,7 @@ public class MainActivityTest {
         MainActivity.resetAvailabilityEnvironmentForTesting();
         MainActivity.resetDiagnosticExecutorsForTesting();
         MainActivity.resetOutcomeWatchSchedulerForTesting();
+        MainActivity.resetRequestOutcomeLookupForTesting();
         RunCoordinator.resetForTesting();
         ConfigurationRepository.resetForTesting();
         ShadowLooper.idleMainLooper();
@@ -803,6 +809,250 @@ public class MainActivityTest {
                 occurrences(output(activity), unconfirmed));
         assertEquals(0, attemptStore.clears);
         assertEquals(beforeAttempt, attemptStore.load());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
+    }
+
+    /**
+     * R7.2 (final-tick half of R2-17): a correlated outcome that lands between
+     * the old two reads is now seen by the SINGLE observation that also decides
+     * the final tick. The watch reconciles that honest, evidence-backed record
+     * and emits no unconfirmed status. Nothing is replayed, authorized or
+     * durably cleared.
+     */
+    @Test
+    public void finalTickSingleObservationReconcilesLateOutcome()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 78), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 50L, Runnable::run);
+        ActivityController<MainActivity> controller = launchController();
+        MainActivity activity = controller.get();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        RecordingStarter starter = new RecordingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        OperationAttempt beforeAttempt = attemptStore.load();
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        // 24 absent observations, then the late REJECTED outcome on the 25th.
+        ScriptedOutcomeLookup lookup = new ScriptedOutcomeLookup();
+        for (int i = 0; i < 24; i++) {
+            lookup.script.add(null);
+        }
+        lookup.script.add(new RunCoordinator.RequestOutcomeRecord(requestId,
+                RunCoordinator.RequestOutcome.REJECTED, "late correlated rejection", 99L));
+        MainActivity.installRequestOutcomeLookupForTesting(lookup);
+
+        outcomeWatch.runAll();
+
+        assertTrue(output(activity).contains("Operation request rejected"));
+        assertTrue(output(activity).contains("late correlated rejection"));
+        assertFalse("the single late observation is reconciled, not called unconfirmed",
+                output(activity).contains("outcome unconfirmed"));
+        assertFalse(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertNull(ReflectionHelpers.getField(activity, "mPendingRequestId"));
+        assertTrue("the cleared, rejected request no longer blocks the UI control",
+                activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals("one observation per tick", 25, lookup.calls);
+        assertEquals(25, outcomeWatch.ticks);
+        for (String observedId : lookup.requestIds) {
+            assertEquals(requestId, observedId);
+        }
+        assertNull("the scripted observation is read-only: no ledger record was written",
+                coordinator.getRequestOutcome(requestId));
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame("read-only reconciliation leaves the snapshot identity unchanged",
+                beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
+        assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
+        assertFalse("the correlated outcome cancelled the watch", outcomeWatch.hasPending());
+    }
+
+    /**
+     * R7.2 (null half of R2-17): if the SINGLE final-tick observation still sees
+     * no record, the request stays pending and the one-per-token unconfirmed
+     * status is shown. A forced extra tick stays silent and inert.
+     */
+    @Test
+    public void finalTickSingleObservationNullReportsUnconfirmedOnce()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 79), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 51L, Runnable::run);
+        MainActivity activity = launch();
+        RecordingStarter starter = new RecordingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        OperationAttempt beforeAttempt = attemptStore.load();
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        // 25 window observations plus one for the forced extra tick below.
+        ScriptedOutcomeLookup lookup = new ScriptedOutcomeLookup();
+        for (int i = 0; i < 26; i++) {
+            lookup.script.add(null);
+        }
+        MainActivity.installRequestOutcomeLookupForTesting(lookup);
+        outcomeWatch.runAll();
+
+        String unconfirmed = "Operation request outcome unconfirmed: no acknowledgement "
+                + "was received; no automatic retry or recovery is available in this app.";
+        assertEquals("one honest unconfirmed status for the whole window", 1,
+                occurrences(output(activity), unconfirmed));
+        assertFalse(output(activity).contains("Operation request rejected"));
+        assertFalse(output(activity).contains("Operation request cancelled"));
+        assertFalse(output(activity).contains("no reason supplied"));
+        assertTrue("absence keeps the click pending",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(requestId, ReflectionHelpers.getField(activity, "mPendingRequestId"));
+        assertFalse("the unconfirmed run control stays disabled",
+                activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals("one observation per tick", 25, lookup.calls);
+        assertEquals(25, outcomeWatch.ticks);
+        assertFalse(outcomeWatch.hasPending());
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame(beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+
+        // A forced extra tick re-observes once but cannot duplicate the status.
+        ReflectionHelpers.callInstanceMethod(activity, "runOutcomeWatchTick");
+        assertEquals(26, lookup.calls);
+        assertEquals(1, occurrences(output(activity), unconfirmed));
+        assertTrue(ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame(beforeSnapshot, coordinator.getSnapshot());
+        assertEquals(0, immediateEngine.calls.get());
+        assertNull(Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                .getNextStartedService());
+        assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
+    }
+
+    /** R7.2: lookups equal ticks across the bounded window, at the unchanged interval. */
+    @Test
+    public void oneLedgerObservationPerTick() {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 80), true);
+        installIdleCoordinator();
+        MainActivity activity = launch();
+        MainActivity.installServiceStarterForTesting(activity, new RecordingStarter());
+
+        ScriptedOutcomeLookup lookup = new ScriptedOutcomeLookup();
+        int cap = (Integer) ReflectionHelpers.getStaticField(
+                MainActivity.class, "OUTCOME_WATCH_MAX_TICKS");
+        long intervalMs = (Long) ReflectionHelpers.getStaticField(
+                MainActivity.class, "OUTCOME_WATCH_INTERVAL_MS");
+        assertEquals(25, cap);
+        assertEquals(200L, intervalMs);
+        for (int i = 0; i < cap; i++) {
+            lookup.script.add(null);
+        }
+        MainActivity.installRequestOutcomeLookupForTesting(lookup);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        assertEquals("a click only arms the watch; it does not read the ledger", 0, lookup.calls);
+
+        outcomeWatch.runAll();
+
+        assertEquals("exactly one lookup per tick", cap, lookup.calls);
+        assertEquals(cap, outcomeWatch.ticks);
+        assertEquals(cap, outcomeWatch.schedules);
+        assertEquals("the window stays bounded at the same interval", cap, outcomeWatch.delays.size());
+        for (Long delay : outcomeWatch.delays) {
+            assertEquals(Long.valueOf(intervalMs), delay);
+        }
+        assertFalse(outcomeWatch.hasPending());
+        assertEquals(0, immediateEngine.calls.get());
+    }
+
+    /**
+     * R7.2 repair (R2-17): the final tick must reuse the SAME single observation
+     * that reconciliation used. The scripted lookup deliberately disagrees on its
+     * first and second result: first null, then a fabricated REJECTED record.
+     * The fixed code observes only null on tick 25, so it emits the honest
+     * per-token unconfirmed status and keeps the request pending. The old
+     * two-observation algorithm sees null in reconcilePendingRequest() and then a
+     * non-null record in the expiry branch's independent read, so NEITHER status
+     * is emitted and the UI stays blank; this test fails there.
+     */
+    @Test
+    public void finalTickDisagreeingObservationsNeverLeaveBlankUi()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 81), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 52L, Runnable::run);
+        MainActivity activity = launch();
+        assertTrue(activity.findViewById(R.id.btnRun).isEnabled());
+        RecordingStarter starter = new RecordingStarter();
+        MainActivity.installServiceStarterForTesting(activity, starter);
+
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        OperationAttempt beforeAttempt = attemptStore.load();
+        RunCoordinator.Snapshot beforeSnapshot = coordinator.getSnapshot();
+
+        // 24 absent observations, then two DISAGREEING observations available at
+        // the final tick. Only a one-observation implementation can consume 25 of
+        // these 26 entries and still report the honest null-based status.
+        ScriptedOutcomeLookup lookup = new ScriptedOutcomeLookup();
+        for (int i = 0; i < 24; i++) {
+            lookup.script.add(null);
+        }
+        lookup.script.add(null); // final tick's single, honest observation
+        String fabricatedReason = "disagreeing second observation must not be reported";
+        lookup.script.add(new RunCoordinator.RequestOutcomeRecord(requestId,
+                RunCoordinator.RequestOutcome.REJECTED, fabricatedReason, 99L));
+        MainActivity.installRequestOutcomeLookupForTesting(lookup);
+
+        outcomeWatch.runAll();
+
+        String unconfirmed = "Operation request outcome unconfirmed: no acknowledgement "
+                + "was received; no automatic retry or recovery is available in this app.";
+        assertEquals("the single null final observation still yields an honest status", 1,
+                occurrences(output(activity), unconfirmed));
+        assertFalse("the disagreeing second read must not fabricate a rejection",
+                output(activity).contains("Operation request rejected"));
+        assertFalse("the unobserved record's reason must never reach the UI",
+                output(activity).contains(fabricatedReason));
+        assertFalse(output(activity).contains("Operation request cancelled"));
+        assertFalse(output(activity).contains("no reason supplied"));
+        assertTrue("an unconfirmed request stays pending",
+                ReflectionHelpers.getField(activity, "mManualStartPending"));
+        assertEquals(requestId, ReflectionHelpers.getField(activity, "mPendingRequestId"));
+        assertFalse("the run control stays disabled while unconfirmed",
+                activity.findViewById(R.id.btnRun).isEnabled());
+        assertEquals("one observation per tick: the disagreeing second entry is unread",
+                25, lookup.calls);
+        assertEquals("the second, disagreeing observation remains unobserved", 1,
+                lookup.script.size());
+        assertEquals(25, outcomeWatch.ticks);
+        for (String observedId : lookup.requestIds) {
+            assertEquals(requestId, observedId);
+        }
+        assertFalse(outcomeWatch.hasPending());
+        assertNull("the scripted record was never written to the ledger",
+                coordinator.getRequestOutcome(requestId));
+        assertEquals(0, attemptStore.clears);
+        assertEquals(beforeAttempt, attemptStore.load());
+        assertSame("read-only reconciliation leaves the snapshot identity unchanged",
+                beforeSnapshot, coordinator.getSnapshot());
         assertEquals(0, immediateEngine.calls.get());
         assertNull("no replayed service request",
                 Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
@@ -2190,6 +2440,25 @@ public class MainActivityTest {
                 runNext();
                 assertTrue("watch tick cap was exceeded", ++guard <= 100);
             }
+        }
+    }
+
+    /**
+     * R7.2 HOST-ONLY read-only lookup: one scripted observation per call. An
+     * empty script fails loudly, so an accidental extra ledger read is a test
+     * failure rather than a silently passing assertion.
+     */
+    private static final class ScriptedOutcomeLookup
+            implements Function<String, RunCoordinator.RequestOutcomeRecord> {
+        final Queue<RunCoordinator.RequestOutcomeRecord> script = new LinkedList<>();
+        final List<String> requestIds = new ArrayList<>();
+        int calls;
+
+        @Override
+        public RunCoordinator.RequestOutcomeRecord apply(String requestId) {
+            calls++;
+            requestIds.add(requestId);
+            return script.remove();
         }
     }
 

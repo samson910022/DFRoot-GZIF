@@ -54,6 +54,27 @@ Focused verification: `ExploitServiceTest` + `ExploitServiceAsyncTest`; no
 full suite or native tests in this phase. No commit/stage/push. Host-only
 evidence, **not** a device proof; R2-14 and R2-16 remain OPEN.
 
+## 2026-11-26 — R7.2: one ledger observation per watch tick (R2-17) — short note (R7.4 consolidates)
+
+The final watch tick previously read the ledger twice: reconciliation could see
+`null` while the expiry branch independently saw a late record, leaving neither
+an unconfirmed status nor reconciliation and a blank/disabled pending UI. Now
+`runOutcomeWatchTick()` makes exactly one read-only observation and passes it to
+an overloaded `reconcilePendingRequest(record)`; the final-tick unconfirmed
+decision uses that same record and never re-reads. The lifecycle no-arg path
+still performs its own single observation and delegates unchanged. A
+`Function<String, RequestOutcomeRecord>` host-only seam (null in production,
+installed/reset ForTesting) lets deterministic fixtures script each observation
+and count lookups; it writes nothing. No record still means UNCONFIRMED only —
+never an outcome, admission, completion or permission to retry. Ledger 32,
+reporter 64, watch 25 × 200 ms, snapshot/button semantics, 32 KiB UI buffer and
+the no-main-thread-locking/read-only contract are unchanged. Three deterministic
+host-only fixtures cover late final-tick reconciliation, the null/unconfirmed
+case with one-per-token status, and one lookup per tick; existing R6.1/R6.2
+watch tests are unchanged. Focused verification: `df.root.MainActivityTest`
+only. No commit/stage/push, no device/full-suite/native work. Host-only evidence,
+**not** a device proof; R2-14 and R2-16 remain OPEN, R2-18/R2-24 untouched.
+
 ## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **sixth repair round** (final local HEAD

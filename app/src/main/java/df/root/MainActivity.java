@@ -5,6 +5,7 @@
 // Modified 2026-11-25 (DFRoot GZIF): mint a request ID per click and clear pending only on that request's correlated outcome. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R5.1): reconcile an owned request outcome from the replayable ledger on start; read-only, no replay or privileged effect. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R6.1): add a bounded, lifecycle-scoped read-only outcome watch so a visible Activity reconciles its own outcome without a best-effort notification; unconfirmed stays uncertified. See NOTICE.
+// Modified 2026-11-26 (DFRoot GZIF, R7.2): take exactly ONE ledger observation per watch tick so reconciliation and the final-tick unconfirmed decision cannot disagree; host-only deterministic lookup seam, no replay or durable change. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -39,6 +40,7 @@ import java.util.UUID;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Function;
 
 /**
  * Request-and-observe UI only. The foreground service supplies process lifetime
@@ -66,6 +68,14 @@ public class MainActivity extends Activity {
 
     /** Test-only seam; unset means each Activity owns a main-looper Handler. */
     private static volatile OutcomeWatchScheduler sOutcomeWatchScheduler;
+
+    /**
+     * HOST-ONLY read-only lookup seam; null in production, where the coordinator
+     * ledger is read directly. A test can script one result per observation and
+     * count lookups; this seam never writes, starts, retries or clears anything.
+     */
+    private static volatile Function<String, RunCoordinator.RequestOutcomeRecord>
+            sRequestOutcomeLookupForTesting;
 
     private Button btnRun;
     private ScrollView outputScroll;
@@ -209,8 +219,21 @@ public class MainActivity extends Activity {
                 || mCoordinator == null) {
             return;
         }
-        RunCoordinator.RequestOutcomeRecord record =
-                mCoordinator.getRequestOutcome(mPendingRequestId);
+        // Lifecycle entry performs its own single observation and delegates.
+        reconcilePendingRequest(observeRequestOutcome(mPendingRequestId));
+    }
+
+    /**
+     * Reconcile from ONE already-observed ledger record. This method never reads
+     * the ledger again, so the observation used here is also the one the watch
+     * uses for its final-tick unconfirmed decision. Nothing is replayed, retried,
+     * cleared or started.
+     */
+    private void reconcilePendingRequest(RunCoordinator.RequestOutcomeRecord record) {
+        if (mDestroyed || !mManualStartPending || mPendingRequestId == null
+                || mCoordinator == null) {
+            return;
+        }
         if (record == null) {
             return; // unconfirmed: keep the pending state honest, do not replay
         }
@@ -232,6 +255,14 @@ public class MainActivity extends Activity {
         updateRunButton();
     }
 
+    /** One read-only observation; no ledger re-read on this call path. */
+    private RunCoordinator.RequestOutcomeRecord observeRequestOutcome(String requestId) {
+        Function<String, RunCoordinator.RequestOutcomeRecord> lookup =
+                sRequestOutcomeLookupForTesting;
+        return lookup != null ? lookup.apply(requestId)
+                : mCoordinator.getRequestOutcome(requestId);
+    }
+
     /** One bounded, read-only tick: reconcile only, never act on the operation. */
     private void runOutcomeWatchTick() {
         String requestId = mOutcomeWatchRequestId;
@@ -239,16 +270,20 @@ public class MainActivity extends Activity {
             return; // lifecycle ended or pending cleared
         }
         mOutcomeWatchTicks++;
-        reconcilePendingRequest(); // unchanged, ledger-only
+        // Exactly ONE observation per tick feeds BOTH decisions below. A late
+        // correlated outcome seen by that observation is reconciled here; an
+        // absent record is the only basis for the final-tick unconfirmed status.
+        RunCoordinator.RequestOutcomeRecord record = observeRequestOutcome(requestId);
+        reconcilePendingRequest(record);
         if (!isPendingRequest(requestId) || !requestId.equals(mOutcomeWatchRequestId)) {
             return; // a correlated outcome cleared pending; clearPendingRequest cancelled us
         }
         if (mOutcomeWatchTicks >= OUTCOME_WATCH_MAX_TICKS) {
-            if (mCoordinator != null && mCoordinator.getRequestOutcome(requestId) == null
+            if (mCoordinator != null && record == null
                     && !requestId.equals(mUnconfirmedReportedRequestId)) {
-                // No record after the whole window: honest UI-only status. No
-                // rejection is fabricated, no attempt/lease/state is cleared and
-                // btnRun stays disabled because pending was never cleared.
+                // No observation of a record after the whole window: honest
+                // UI-only status. No rejection is fabricated, no attempt/lease/
+                // state is cleared and btnRun stays disabled while pending.
                 mUnconfirmedReportedRequestId = requestId;
                 appendUiMessage(UNCONFIRMED_OUTCOME_MESSAGE);
                 updateRunButton();
@@ -661,6 +696,16 @@ public class MainActivity extends Activity {
 
     static void resetOutcomeWatchSchedulerForTesting() {
         sOutcomeWatchScheduler = null;
+    }
+
+    /** HOST-ONLY: script read-only ledger observations; never installed in production. */
+    static void installRequestOutcomeLookupForTesting(
+            Function<String, RunCoordinator.RequestOutcomeRecord> lookup) {
+        sRequestOutcomeLookupForTesting = Objects.requireNonNull(lookup, "lookup");
+    }
+
+    static void resetRequestOutcomeLookupForTesting() {
+        sRequestOutcomeLookupForTesting = null;
     }
 
     static TextView availabilityViewForTesting(MainActivity activity) {

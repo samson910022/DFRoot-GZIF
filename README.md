@@ -62,6 +62,20 @@ host-only fixtures cover the boundary and an unrelated request's outcome.
 R2-14 and R2-16 remain OPEN safety gates; no device/ADB/payload/privileged work
 was performed.
 
+### R7.2 (2026-11-26) — one ledger observation per watch tick — short note (R7.4 consolidates)
+
+The bounded UI watch now takes exactly **one** read-only ledger observation per
+tick. That same record feeds both reconciliation and the final-tick unconfirmed
+decision, so a correlated outcome arriving between the old two reads can no
+longer leave the pending UI blank/disabled: the observed record is reconciled,
+and only an observed absence produces the one-per-token honest unconfirmed
+status. A `null` or host-only scripted observation still means UNCONFIRMED —
+never admission, rejection or completion. A host-only deterministic lookup seam
+is inert in production (no seam installed). Watch bound (25 × 200 ms), ledger
+32, reporter 64, no replay/retry/cancel/authorize/durable clear, and the
+positive/unchanged run-button semantics are preserved. R2-14/R2-16 remain OPEN;
+R2-18 and R2-24 are untouched. No device/ADB/payload/privileged work was done.
+
 ## Sixth repair round (R6.1–R6.4) — consolidated summary (2026-11-26)
 
 Final local HEAD `9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`,
