@@ -212,10 +212,11 @@ historical implementations or pre-rebase heads, not this head.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
-- **Validation status at the literal/current head (`7e18b13`; host-only).**
-  Its immediate parent is the docs commit `74b12df`; the Phase B / P2-14 code
-  head is `0ea022f` and the round-8 reviewed head is `36a11bc` — none of those
-  is the literal head. The round-8 review covered `36a11bc`; the post-review
+- **Validation status at the literal/current head (`376f5e2`; host-only).**
+  Its immediate parent is `0f0a2ad` (the pre-fix device-run head); the P2-15 fix
+  code head is `7e18b13`, the Phase B / P2-14 code head is `0ea022f` and the
+  round-8 reviewed head is `36a11bc` — none of those is the literal head. The
+  round-8 review covered `36a11bc`; the post-review
   increments were `0832331` (`fix(cmake): invalidate loader evidence before
   argument validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes
   inside every distributable APK`, Phase B). Producer `2b59684` and loader
@@ -231,8 +232,9 @@ historical implementations or pre-rebase heads, not this head.
   **45697296267** (`bb83849`) are also completed `success` but are **earlier
   heads**. The counts below are confirmed by the Phase B code-head log; no
   literal-head count is asserted from an earlier log and no completed-green CI
-  conclusion is claimed for `7e18b13` (a run had started but not concluded at
-  documentation time). No device run validates the literal head; no tag was
+  conclusion is claimed for `7e18b13` or `376f5e2` (a run had started but not
+  concluded at documentation time; no new CI run number is claimed for
+  `376f5e2`). No device run validates the literal head; no tag was
   created and no release was published.
 - **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
   DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
@@ -357,6 +359,33 @@ historical implementations or pre-rebase heads, not this head.
   unverified privileged content; device timing and quiescence around the
   privileged payload stay UNVALIDATED. run6/run8 and all earlier runs are
   historical. See `CHANGELOG.md` round 8 for the current disposition.
+- **P2-16 (native cleanup-time helper re-apply; `376f5e2`) — addressed, host-only,
+  pending S23 retest.** Two S23 attempts on 2026-11-26 at the pre-fix head
+  `0f0a2ad` (evidence at `/mnt/240G_SSD/opencode_tmp/s23-final/`) reached a full
+  root chain — `su -v` = `3.4.2:KernelSU`, `su -c id` =
+  `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, SELinux
+  Enforcing, KSU Next daemon + modules loaded, no panic evidence — but the
+  `/vendor/lib64/AIAwbModel_v2.2.tflite` restore FAILED
+  (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`) with app rc
+  **66** = 2 + recovery bit 64; the device rebooted cleanly both times. These
+  are **attempts, not device validation of any head**. Decisive `logcat2.txt`
+  timeline: 19:58:38 helper patch applied (writes/capture worked), 19:58:40
+  bootstrap set partitions ro / started the SU daemon, and at 19:59:49 cleanup
+  logged `F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected
+  6)` immediately before the 0-byte read. Conclusion: the page-cache-only
+  splicehelper patch was gone by cleanup so the **original** `crash_dump64`
+  ran; the **exact discard mechanism is NOT proven** and is not overclaimed.
+  Fix at `376f5e2`: a pure `df_helper_block_matches()` predicate above
+  `DF_HELPER_TEST_ONLY`, and `ensure_helper_patch()` called at the start of
+  `cleanup()` before helper-backed restores — re-applying the same patched
+  helper with the same verification, no second restore record, fail-closed;
+  helper-size host suite **7 → 30 cases**, no pin/workflow/CMake/marker-count
+  change. Counts otherwise unchanged (policy 92; CMake 23/25/3/7/6/16; native
+  61 + `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40;
+  JVM 39; markers 7/7 + 3/3). **Limits: HOST-TESTED ONLY, pending S23 retest;
+  not device-verified, not independently merge-ready and not release-ready;
+  no tag or publish.** P1-02, P1-07 and P1-08 remain OPEN — rc 66 is concrete
+  evidence that **P1-07 is still open**. See `CHANGELOG.md` round 12.
 
 References
 ----------

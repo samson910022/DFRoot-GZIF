@@ -25,15 +25,17 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 - **Only `S9180ZHU8GZIF` is tested.** No other build/model/One UI version is claimed. Not registered in any update feed.
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
+- **P2-16 fix (`376f5e2`, host-only, pending S23 retest):** the two S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). **Host-tested only**; no device retest, no tag, no publish. See `CHANGELOG.md` round 12.
 
 > [!WARNING]
 > **Validation boundary.** The literal/current head of
-> `fix/native-exploit-robustness` is `7e18b13` (Phase 1 packaging fix for P2-15).
-> Its immediate parent is the docs commit `74b12df`; the Phase B / P2-14 code
-> head is `0ea022f` (`fix(ci): verify loader bytes inside every distributable
-> APK`) and the round-8 reviewed head is `36a11bc` — none of these is the
-> literal head. The producer change `2b59684` and loader integration `413a5cb`
-> are earlier/mid-increment points. **Round-10 scope (not retroactively
+> `fix/native-exploit-robustness` is `376f5e2` (Phase 1 native cleanup-time
+> helper re-apply for P2-16). Its immediate parent is `0f0a2ad` (the pre-fix
+> device-run head); the P2-15 fix code head is `7e18b13`, the Phase B / P2-14
+> code head is `0ea022f` (`fix(ci): verify loader bytes inside every
+> distributable APK`) and the round-8 reviewed head is `36a11bc` — none of
+> these is the literal head. The producer change `2b59684` and loader
+> integration `413a5cb` are earlier/mid-increment points. **Round-10 scope (not retroactively
 > changed):** consolidated review comment **7126155178** at `74b12df` reported
 > **0 new findings, 0 P2 open and 3 P1 open (P1-02 / P1-07 / P1-08)**, left the
 > head unchanged and completed CI run **45710535038** with `success`. **P2-15
@@ -45,12 +47,16 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
 > completed `success` but are **earlier heads**; no literal-head count is
 > asserted from an earlier log and no completed-green CI conclusion is claimed
-> for `7e18b13` (a run had started but not concluded at documentation time).
+> for `7e18b13` or `376f5e2` (a run had started but not concluded at
+> documentation time; no new CI run number is claimed for `376f5e2`).
 > run6/run8 happened on 2026-11-17 against the
 > **historical implementation** (old multi-marker protocol, then-current KO
-> pins, old preference path); no hardware run validates the literal head.
-> That head is **host-tested only and UNVALIDATED on device**; a successful
-> build does not certify safe privileged execution.
+> pins, old preference path). **Two S23 attempts on 2026-11-26 at the pre-fix
+> head `0f0a2ad` reached a full root chain but FAILED the vendor restore (app
+> rc 66 = 2 + recovery bit 64); they are attempts, not validations** (evidence:
+> `/mnt/240G_SSD/opencode_tmp/s23-final/`). No hardware run validates the
+> literal head `376f5e2`. That head is **host-tested only and UNVALIDATED on
+> device**; a successful build does not certify safe privileged execution.
 > An **unconditional** `host-gates` job runs **all** host suites as required
 > gates on **every** event, including protected `v*` tag pushes, with a
 > checkout-SHA assertion; both `build-dfroot` and `build-release` require it,
@@ -82,11 +88,13 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > (see `CHANGELOG.md` round 11).
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
-> Host suites at the Phase B code head (`0ea022f`, local verification; unchanged
-> at the literal head except the workflow policy count below): **61**
+> Host suites at the Phase B code head (`0ea022f`, local verification; at the
+> literal head only the workflow policy count below and the helper-size count
+> change): **61**
 > status + `final_publish` + 13 proc-scan + **28 ELF** + 16/14/10 device-version
 > + **40 loader-stage** cases (`tests/native/loader_stage_test.c`) and the
-> helper-size suite (`tests/native/helper_size_test.c`), CMake **23/25/3/7/6/16**
+> helper-size suite (`tests/native/helper_size_test.c`, **30 cases at `376f5e2`,
+> was 7**), CMake **23/25/3/7/6/16**
 > cases (KO policy / packaged-KO / APK packaging / APK content **7** cases /
 > target graph / loader hash **16** cases), JVM **39 tests** (4/10/12/13 in
 > LaunchGate / ListenerLifecycle / PreferenceIntegrity / PreferencePersister)
@@ -129,16 +137,20 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > on-device full-chain validation**: documentation is not a fix and unverified
 > privileged content must not be consumed or distributed. run6/run8 are
 > historical and validate only the old loaders. **P1-02 and P1-07 also remain
-> OPEN safety/release gates**; P2-13 and P2-14 are unchanged (Phase A/B,
-> pending final comprehensive review). **P2-15 was addressed in Phase 1
-> (`7e18b13`) and is pending final comprehensive review** — not claimed
-> finally closed. Auto Soft Reboot and Start on Boot
+> OPEN safety/release gates**; **rc 66 from the two S23 attempts is concrete
+> evidence that P1-07 is still open** (verified restoration is not achieved).
+> P2-13 and P2-14 are unchanged (Phase A/B, pending final comprehensive
+> review). **P2-15 was addressed in Phase 1 (`7e18b13`) and is pending final
+> comprehensive review** — not claimed finally closed. **P2-16 was addressed at
+> the native-source level in `376f5e2` and is pending S23 device retest and
+> final comprehensive review** — not claimed finally closed and **not
+> device-verified**. Auto Soft Reboot and Start on Boot
 > remain disabled and unvalidated; no device run validates the literal head,
 > no tag was created and no release was published, and this head is **not
 > device-verified, not independently merge-ready and not release-ready**. The
 > only new local APK used a disposable local test key, is not official signing
 > material and was never tagged, uploaded or published; the release job remains
-> unexecuted. See `CHANGELOG.md` round 11 and round 8 (2026-11-26) and
+> unexecuted. See `CHANGELOG.md` round 12, round 11 and round 8 (2026-11-26) and
 > `PORTING-GZIF.md` §19 for the test/lifecycle detail.
 
 > [!NOTE]

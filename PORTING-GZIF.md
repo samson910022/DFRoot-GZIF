@@ -15,10 +15,11 @@
 
 > [!WARNING]
 > **Literal head is UNVALIDATED on device.** The literal/current head of
-> `fix/native-exploit-robustness` is `7e18b13` (Phase 1 P2-15 packaging fix,
-> 2026-11-26, rebased onto the merged PR #1 head). Its immediate parent is the
-> docs commit `74b12df`; the Phase B / P2-14 code head is `0ea022f` and the
-> round-8 reviewed head is `36a11bc` — neither is the literal head. **Round-10
+> `fix/native-exploit-robustness` is `376f5e2` (Phase 1 native cleanup-time
+> helper re-apply for P2-16, 2026-11-26). Its immediate parent is `0f0a2ad`
+> (the pre-fix device-run head); the P2-15 fix code head is `7e18b13`, the Phase
+> B / P2-14 code head is `0ea022f` and the round-8 reviewed head is `36a11bc`
+> — none of these is the literal head. **Round-10
 > scope (not retroactively changed):** consolidated review comment
 > **7126155178** at `74b12df` reported **0 new findings, 0 P2 open and 3 P1
 > open (P1-02 / P1-07 / P1-08)**, left the head unchanged and completed CI run
@@ -37,8 +38,9 @@
 > conclusion `success`** (host-only, not device validation); runs
 > **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
 > **45697296267** (`bb83849`) also completed `success` but are **earlier
-> heads**; no completed-green CI conclusion is claimed for `7e18b13` (a run had
-> started but not concluded at documentation time). Counts below are confirmed
+> heads**; no completed-green CI conclusion is claimed for `7e18b13` or
+> `376f5e2` (a run had started but not concluded at documentation time; no new
+> CI run number is claimed for `376f5e2`). Counts below are confirmed
 > by the Phase B code-head log; no exact literal-head count is asserted from an
 > earlier log. The hardware
 > results in §5 and §12 (run6/run8, 2026-11-17) and all earlier CI runs were
@@ -129,7 +131,7 @@
 
 > [!NOTE]
 > **Round 11 / P2-15 (2026-11-26) — release-JNI byte preservation (host-only).**
-> The literal head is `7e18b13`; its immediate parent is `74b12df`. The
+> The round-11 head was `7e18b13`; its immediate parent was `74b12df`. The
 > round-10 consolidated review (comment **7126155178**, head `74b12df`) had
 > **0 new findings, 0 P2 open, 3 P1 open** and CI **45710535038** `success`;
 > it did **not** find P2-15 (author-local release build did; non-tag CI is
@@ -169,6 +171,48 @@
 > unexecuted and no completed-green CI conclusion is claimed for `7e18b13`.
 > P2-15 is **addressed pending final comprehensive review**; P1-02 / P1-07 /
 > P1-08 stay OPEN and P2-13 / P2-14 are unchanged.
+
+> [!NOTE]
+> **Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (native source,
+> host-only, pending S23 retest).** The literal head is
+> `376f5e277713c1008386624f85ef74f200f14f2c`; its immediate parent is `0f0a2ad`
+> (the pre-fix device-run head), with P2-15 fix head `7e18b13`, Phase B / P2-14
+> head `0ea022f` and round-8 reviewed head `36a11bc`. Round-10 totals (0 new /
+> 0 P2 / 3 P1) and round-11 totals are **not retroactively changed**.
+>
+> Two S23 attempts on 2026-11-26 at the pre-fix head `0f0a2ad` (evidence at
+> `/mnt/240G_SSD/opencode_tmp/s23-final/`) are **attempts, not validations**:
+>
+> | Observation | Run 1 (`logcat.txt`, `root-probes.txt`, `post-reboot.txt`) | Run 2 (`logcat2.txt`, `app-result2.txt`, `root-probes2.txt`, `post-reboot2.txt`) |
+> |---|---|---|
+> | Root chain | full chain succeeded | full chain succeeded |
+> | Oracle | `su -v` = `3.4.2:KernelSU`; `su -c id` = `uid=0(root) … context=u:r:ksu:s0`; SELinux **Enforcing**; KSU Next daemon + modules loaded | same |
+> | Panic evidence | none | none |
+> | Vendor restore | `read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`; `restore FAILED for /vendor/lib64/AIAwbModel_v2.2.tflite` | identical |
+> | App result / reboot | rc **66** = 2 + recovery bit 64; clean reboot | rc 66; clean reboot |
+>
+> Decisive timeline (`logcat2.txt`): **19:58:38** helper patch applied
+> (`patch: crash_dump64 <- splicehelper (1408 bytes)`, `patched 1408 bytes …`;
+> vendor write also succeeded at 19:58:39) — writes/capture worked; **19:58:40**
+> bootstrap set partitions ro / started the SU daemon; **19:59:49** cleanup
+> logged `F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected
+> 6)` immediately before the 0-byte read, then `cleanup failure: setting
+> recovery-failed bit (64) on rc 2`. **Conclusion:** the page-cache-only
+> splicehelper patch was gone by cleanup so the **original** `crash_dump64`
+> ran. The **exact discard mechanism is NOT proven** — do not overclaim a
+> specific cause.
+>
+> **Fix (`376f5e2`, host-only):** a pure `df_helper_block_matches()` predicate
+> above `DF_HELPER_TEST_ONLY`, and `ensure_helper_patch()` called at the start
+> of `cleanup()` before helper-backed restores — re-applying the same patched
+> helper with the same verification, no second restore record, fail-closed;
+> helper-size host suite **7 → 30 cases**, all other counts unchanged (policy
+> 92; CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28,
+> version 16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3). **Limits:**
+> **HOST-TESTED ONLY, pending S23 retest**; **not device-verified, not
+> merge-ready and not release-ready**; no tag or publish; P1-02 / P1-07 /
+> P1-08 remain OPEN and rc 66 is concrete evidence P1-07 is still open. See
+> `CHANGELOG.md` round 12.
 
 ---
 
@@ -714,15 +758,18 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 Rows 1–20 are evidence for the **historical implementation** (old marker
 protocol, historical KO pins, old preference write path). run6/run8 and all
 earlier CI runs predate the post-PR #1 rebase and do not validate the current
-head of `fix/native-exploit-robustness` (`7e18b13`, Phase 1 P2-15 fix), which is
-host-tested only; the Phase B code head is `0ea022f`. Rows 21+ describe that
+head of `fix/native-exploit-robustness` (`376f5e2`, Phase 1 P2-16 native fix),
+which is host-tested only; the P2-15 fix head is `7e18b13` and the Phase B code
+head is `0ea022f`. Rows 21–28 describe that
 host evidence explicitly, with code-head counts locally verified at the final
 Phase B increment and tabulated in `CHANGELOG.md` round 8
-(current-increment host test shape; at the literal head only the workflow
-policy count changes to 92). CI run 45708004129 at `0ea022f` completed with
-conclusion `success` at re-check (host-only evidence, not device validation);
-no completed-green CI conclusion is claimed for `7e18b13`. A green build does
-not certify safe privileged execution.
+(current-increment host test shape; at the literal head the workflow policy
+count is 92 and the helper-size count is 30, was 7). CI run 45708004129 at
+`0ea022f` completed with conclusion `success` at re-check (host-only evidence,
+not device validation); no completed-green CI conclusion is claimed for
+`7e18b13` or `376f5e2`. Rows 29–30 record the failed S23 attempts at the
+pre-fix head and the P2-16 fix that is still pending device retest. A green
+build does not certify safe privileged execution.
 Provenance manifests are informational, not independent
 reproducible-build proofs or attestations. **The byte gate rejects unknown
 bytes but accepts the two known obsolete pins**: release is withheld by policy
@@ -764,7 +811,10 @@ Passing the gate is not device validation.
 | 27 | Current-increment loader-stage / helper-size host suites and per-APK loader-byte gate (Phase A/B) | **UNVALIDATED on device** — host-only: **40** loader-stage cases (`tests/native/loader_stage_test.c`) plus the helper-size suite (`tests/native/helper_size_test.c`); Phase B extracts both bundled loaders from every final signed APK and checks SHA-256 + size against the CMakeLists.txt pins via the real verifier, with a required nonempty per-APK loader index at the pre-upload choke (release markers 3/3, host markers 7/7). No device run validates the current head | `tests/native/loader_stage_test.c`, `tests/native/helper_size_test.c`, `.github/workflows/build.yml`; `CHANGELOG.md` round 8 |
 | 28 | Release APK preserves the reviewed bundled loader bytes (P2-15, Phase 1 `7e18b13`) | **UNVALIDATED on device** — host-only packaging evidence: AGP 9.5 stripped debug symbols from bundled release JNI libs by default, so a release build from `74b12df` packaged `ecac0d2b…` (3,737,888 B) and `ea0505cd…` (4,728,320 B, same size, SHA-only difference) instead of the pins. `packaging.jniLibs` `keepDebugSymbols` for both loaders plus policy regression tests (90 → 92); local release rebuild with a **disposable local test key** produced `DFRoot_4.8-gzif.apk` (`33c3742d…`) with both loader entries exactly once, extracted bytes matching `731c3fa1…` / `7f28f1fb…` and sizes 5,127,584 / 4,728,320 B, real verifier manifest `verified`, and the verbatim P2-14 gate script passing with the pins file and one index row. **Not a signed release**, no tag/publish, no device validation, release job unexecuted; addressed pending final comprehensive review | `/mnt/240G_SSD/opencode_tmp/p2-15-evidence`; `app/build.gradle.kts`; `tests/workflow/test_policy.py`; `CHANGELOG.md` round 11 |
 
-Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; every other CVE/module/persistence aspect remains unverified, and the current head has no device run at all.** A successful host build does not certify safe privileged execution.
+| 29 | Two S23 attempts (2026-11-26) at the pre-fix head `0f0a2ad` reached full root but failed the vendor restore | **Device-observed attempt, NOT a validation of any head** — `su -v` = `3.4.2:KernelSU`, `su -c id` = `uid=0(root) … context=u:r:ksu:s0`, SELinux Enforcing, KSU Next daemon + modules loaded, no panic evidence; `/vendor/lib64/AIAwbModel_v2.2.tflite` restore FAILED (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`), app rc **66** = 2 + 64 recovery bit; clean reboot both times. Decisive `logcat2.txt`: helper patch applied 19:58:38, bootstrap ro / SU daemon 19:58:40, cleanup 19:59:49 `F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected 6)` then the 0-byte read — page-cache-only patch gone by cleanup so the original `crash_dump64` ran; **exact discard mechanism NOT proven** | `/mnt/240G_SSD/opencode_tmp/s23-final/` (`logcat.txt`, `logcat2.txt`, `app-result2.txt`, `root-probes.txt`, `root-probes2.txt`, `post-reboot.txt`, `post-reboot2.txt`); `CHANGELOG.md` round 12 |
+| 30 | P2-16 cleanup-time helper re-apply at the literal head `376f5e2` | **UNVALIDATED on device — HOST-TESTED ONLY, pending S23 retest** — pure `df_helper_block_matches()` predicate above `DF_HELPER_TEST_ONLY`; `ensure_helper_patch()` called at start of `cleanup()` before helper-backed restores, re-applying the same patched helper with the same verification, no second restore record, fail-closed; helper-size suite **7 → 30** cases, all other counts unchanged. **Not device-verified, not merge-ready, not release-ready**; no tag/publish. P1-02/P1-07/P1-08 remain OPEN; rc 66 is concrete evidence P1-07 is still open | `CHANGELOG.md` round 12; `NOTICE` P2-16 bullet |
+
+Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; the two 2026-11-26 S23 attempts reached a full root chain but failed the vendor restore (rc 66). No device run validates the current head `376f5e2`, and every other CVE/module/persistence aspect remains unverified.** A successful host build does not certify safe privileged execution.
 
 ---
 
@@ -796,6 +846,15 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
    Auto Soft Reboot / Start on Boot also stay disabled by default and
    unvalidated. No device run validates the literal head; no tag was created
    and no release was published.
+10. **P2-16 remains pending S23 device retest (open item).** The two 2026-11-26
+    S23 attempts at the pre-fix head `0f0a2ad` reached a full root chain but
+    failed the `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (rc 66); the
+    cleanup-time helper re-apply at `376f5e2` is **host-tested only** and
+    **not device-verified, not merge-ready and not release-ready**. The exact
+    page-cache patch-discard mechanism is not proven. P1-02, P1-07 and P1-08
+    stay OPEN (rc 66 is concrete evidence P1-07 is still open); no tag, no
+    publish and no device run validates the literal head. See `CHANGELOG.md`
+    round 12 and the round-12 note at the top of this file.
 
 ---
 
@@ -1117,7 +1176,8 @@ not certify safe privileged execution.**
 > then-current docs head (`0ea022f`; producer `2b59684`, loader integration
 > `413a5cb`, post-review Phase A/B increments `0832331` / `0ea022f`) is covered
 > by the round-8/P1-08 note at the top of this file and by `CHANGELOG.md`
-> round 8; the literal head is `7e18b13` (round 11 note at the top).
+> round 8; the literal head is `376f5e2` (round 12 note at the top; round 11
+> for `7e18b13`).
 > Counts in §19.1 below are historical counts for the round-6 head, **not**
 > literal-head counts.
 
@@ -1208,8 +1268,9 @@ top of `CHANGELOG.md`.
 *Original port document produced read-only; §17 (round-4) added 2026-11-25 as a
 documentation-only update, §18 (round-5) added 2026-11-25 to match the rebased
 head, and §19 (round-6) added 2026-11-25 to match the then-current head and PR #3.
-The current-head ledger above was updated to `0ea022f` (post-review Phase A/B)
-and then to the literal head `7e18b13` (round 11 / P2-15) on 2026-11-26.
+The current-head ledger above was updated to `0ea022f` (post-review Phase A/B),
+then to the literal head `7e18b13` (round 11 / P2-15), and then to the literal
+head `376f5e2` (round 12 / P2-16, host-only, pending S23 retest) on 2026-11-26.
 Sections §16–§19 are historical. No adb was run and no commit was made for
 these documents. Log contents referenced by line range only. **Do not commit
 host logs or this device's raw dumps anywhere public.***

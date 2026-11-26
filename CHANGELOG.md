@@ -1,11 +1,101 @@
 # Changelog — DFRoot GZIF
 
-## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
+## Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (host-only, pending S23 retest)
 
 This section is authoritative for the **literal/current head** of
 `fix/native-exploit-robustness`,
+`376f5e277713c1008386624f85ef74f200f14f2c` (Phase 1 native fix
+`fix(native): re-arm crash_dump64 helper patch during cleanup`). Its
+immediate parent is `0f0a2ad4b8546b07b8ec0e82a88e84449d03a7ed`, the **pre-fix
+device-run head**. The P2-15 fix code head is `7e18b13`, the Phase B / P2-14
+code head is `0ea022f` and the round-8 reviewed head was `36a11bc`; none of
+these is the literal head. The round-11 section below is authoritative for
+`7e18b13` and round 8 for the Phase B code head `0ea022f`; all earlier sections
+are historical. Round-10 totals (**0 new findings, 0 P2 open, 3 P1 open**) and
+round-11 totals are **not retroactively changed**.
+
+### Two S23 device attempts at the pre-fix head (`0f0a2ad`)
+
+Two runs on 2026-11-26 at the pre-fix head `0f0a2ad` reached a full root chain
+but **FAILED** the vendor-file restore. Evidence is archived at
+`/mnt/240G_SSD/opencode_tmp/s23-final/`; these are **attempts, not validations
+of any head**.
+
+| Observation | Run 1 (`logcat.txt`, `root-probes.txt`, `post-reboot.txt`, `vendor-before-reboot.txt`) | Run 2 (`logcat2.txt`, `app-result2.txt`, `root-probes2.txt`, `post-reboot2.txt`, `poll-crashdump.txt`) |
+|---|---|---|
+| Root chain | Full chain succeeded | Full chain succeeded |
+| Oracle | `su -v` = `3.4.2:KernelSU`; `su -c id` = `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`; SELinux **Enforcing**; KSU Next daemon + modules loaded | same root identity (`root-probes2.txt`; `logcat2.txt` `KernelSU Next` ksud + `/data/adb/modules/*/service.sh`); Enforcing observed post-reboot in `post-reboot2.txt` |
+| Panic evidence | none | none |
+| Vendor restore | `restore FAILED for /vendor/lib64/AIAwbModel_v2.2.tflite`; `read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0 (Success): short read` (`logcat.txt:4405-4406`) | identical (`app-result2.txt`; `logcat2.txt:13004`) |
+| App result | rc **66** = 2 (unknown) + 64 recovery-failed bit; `timeout waiting for final status` | same (`app-result2.txt`) |
+| Reboot | clean reboot, SELinux Enforcing, no `/dev/df`, no `/dev/dffinal`, no `ksud` (`post-reboot.txt`) | clean reboot, same absence checks; vendor file still 529568 B, mtime 2022-01-01 (`post-reboot2.txt`); `poll-crashdump.txt` (Run 2 only) shows only the ELF magic `7f 45 4c 46` in the first 16 bytes |
+
+### Decisive logcat and root-cause conclusion
+
+In `logcat2.txt`, `patch: crash_dump64 <- splicehelper (1408 bytes)` and
+`patched 1408 bytes to …/crash_dump64+0x0` at **19:58:38** (lines 2424–2425)
+show the splice writes and the capture path worked; the vendor write also
+succeeded at 19:58:39 (`patched 13504 bytes to
+/vendor/lib64/AIAwbModel_v2.2.tflite+0x0`, line 2532). At **19:58:40** bootstrap
+set partitions ro and started the SU daemon (lines 2611–2612). At **19:59:49**
+cleanup logged
+`F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected 6)`
+(line 12995) immediately before the 0-byte `read_vendor_splice` (line 13004)
+and `cleanup failure: setting recovery-failed bit (64) on rc 2` (line 13038).
+
+**Conclusion:** the page-cache-only splicehelper patch was gone by cleanup
+time, so the **original** `crash_dump64` ran during the vendor-backed restore
+(it received 3 arguments instead of the 6 the patched helper expects) and the
+vendor read returned 0 bytes. **The exact mechanism of that discard is NOT
+proven here** — do not claim a specific cause (page eviction, re-exec from
+disk, page invalidation, etc.). Run 1 shows the same 0-byte read and `wrong
+number of args` signature (`logcat.txt:4399,4405`), so the two attempts are
+consistent. The Phase 1 commit message states the discard causally; per the
+caveat above that phrasing is **provisional** and is not a proven mechanism.
+
+### Fix (Phase 1, `376f5e2`)
+
+- Added a pure `df_helper_block_matches()` predicate above the
+  `DF_HELPER_TEST_ONLY` boundary, with a host test for it.
+- `ensure_helper_patch()` is now called at the **start of `cleanup()`**, before
+  any helper-backed restore, re-applying the same patched helper with the same
+  verification as the initial patch. There is **no second restore record**.
+  On failure the outcome is still **fail-closed**: the remaining restores are
+  attempted and reported truthfully, but the recovery-failed bit (64) is set
+  on the final rc; the restore is not silently reported as successful.
+- Helper-size host suite goes **7 → 30 cases**. No pin, workflow,
+  `.github/workflows/build.yml`, CMake, marker-count or other native-source
+  change.
+
+### Counts (all other counts unchanged)
+
+Policy **92**; six CMake suites **23 / 25 / 3 / 7 / 6 / 16**; native **61**
+status cases plus `final_publish`, **13** proc-scan, **28** ELF, **16 + 14 +
+10** version, **40** loader-stage; helper-size **30** cases (was 7); JVM **39**;
+markers **7/7** host + **3/3** release. No new CI run number is claimed for
+`376f5e2`.
+
+### Limits and disposition
+
+- **HOST-TESTED ONLY, pending S23 retest.** The fix is **not device-verified**;
+  no tag was created, nothing was published, and no completed-green CI
+  conclusion is claimed for `376f5e2`.
+- **P2-16 is addressed at the native-source level in `376f5e2`, pending device
+  retest and final comprehensive review** — not claimed finally closed.
+- **P1-02, P1-07 and P1-08 remain OPEN.** rc **66** is concrete evidence that
+  **P1-07 is still open** (verified restoration is not achieved). P2-13/P2-14/
+  P2-15 are unchanged from the round-8/10/11 ledgers.
+- This head is **not device-verified, not independently merge-ready and not
+  release-ready**; no device, merge or release claim. **Auto Soft Reboot and
+  Start on Boot remain disabled by default and unvalidated.**
+
+## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
+
+This section is authoritative for head
 `7e18b138090abfd6c0af5cc02cb031938e6ace2a` (Phase 1 fix
-`fix(app): preserve reviewed loader bytes in release APK`). Its immediate
+`fix(app): preserve reviewed loader bytes in release APK`); the round-12
+section above is now authoritative for the **literal/current head**
+`376f5e277713c1008386624f85ef74f200f14f2c`. Its immediate
 parent is the docs commit `74b12df` (`docs: refresh round-8 validation ledger
 and evidence scope`). The **Phase B / P2-14 code head** remains `0ea022f`
 (`fix(ci): verify loader bytes inside every distributable APK`), and the
@@ -228,9 +318,9 @@ Locally verified at the final increment (`0ea022f`; host-only):
 
 ## Round-6 repair (2026-11-25) — historical (round-6 head `d72838d`)
 
-> **Historical section.** The round-11 section above is authoritative for the
-> literal head (round 8/P1-08 for the Phase B code head `0ea022f`); this section
-> describes the round-6 head only.
+> **Historical section.** The round-12 section above is authoritative for the
+> literal head (round 11 for `7e18b13`; round 8/P1-08 for the Phase B code head
+> `0ea022f`); this section describes the round-6 head only.
 
 This section was authoritative for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). **Every section below is
