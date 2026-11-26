@@ -12,7 +12,6 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-#include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -328,45 +327,18 @@ static int io_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
     return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
 }
 
-/* The app-owned dfinv file's SELinux context is the trusted template for the
- * final token's label. A bounded, well-formed app-data context is required:
- * anything else means no normal final token may be published. */
-static int read_app_context(char out[DF_FINAL_LABEL_CAP])
-{
-    ssize_t n;
-
-    n = getxattr(DF_NONCE_PATH, DF_FINAL_LABEL_ATTR, out, DF_FINAL_LABEL_CAP);
-    if (n <= 0 || n >= DF_FINAL_LABEL_CAP)
-        return -1;
-    out[n] = '\0';
-    if (strncmp(out, "u:object_r:", strlen("u:object_r:")) != 0)
-        return -1;
-    return 0;
-}
-
 /* Atomically publish one canonical, nonce-bound final token via
- * df_publish_final_labeled(): O_EXCL|O_NOFOLLOW temp, mode DF_FINAL_MODE
- * (0644, fchmod-pinned against umask), the app-readable SELinux label copied
- * from dfinv, fsync, rename. rename(2) is atomic, so the consumer sees either
- * the old token or the new one, never a partial write. A context that cannot
- * be read means no normal final token is published. Failure leaves the
- * previous final status untouched. */
+ * df_publish_final(): O_EXCL|O_NOFOLLOW temp, mode DF_FINAL_MODE (0644,
+ * fchmod-pinned against umask), fsync, rename. rename(2) is atomic, so the
+ * consumer sees either the old token or the new one, never a partial write.
+ * Failure leaves the previous final status untouched. */
 static int io_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
 {
     char token[DF_FINAL_TOKEN_CAP];
-    char label_ctx[DF_FINAL_LABEL_CAP];
     (void)ctx;
     if (df_format_final_token(token, sizeof(token), nonce, outcome) < 0)
         return -1;
-    if (read_app_context(label_ctx) != 0) {
-        printf("bootstrap: app-readable label unavailable; no normal final token\n");
-        return -1;
-    }
-    if (df_publish_final_labeled(DF_FINAL_TMP, DF_FINAL_PATH, token,
-                                 label_ctx) != 0)
-        return -1;
-    printf("bootstrap: final token published to /dev/dffinal with label copied from dfinv\n");
-    return 0;
+    return df_publish_final(DF_FINAL_TMP, DF_FINAL_PATH, token);
 }
 
 /* SIGKILL the child and reap it with WNOHANG against a short secondary
@@ -590,17 +562,6 @@ static int publish_bootstrap_failure_bounded(void)
     return rc;
 }
 
-/* A producer that reached no outcome published nothing on the normal channel.
- * Publish the reserved-nonce bootstrap failure once so the consumer does not
- * wait out its budget for a token that will never arrive, then report rc=2.
- * DF_OUTCOME_NONE is never itself published as a normal token. */
-static int finish(enum df_outcome o)
-{
-    if (o == DF_OUTCOME_NONE)
-        (void)publish_bootstrap_failure_bounded();
-    return df_outcome_to_rc(o);
-}
-
 /* Build the injected IO and let the pure protocol decide + publish the one
  * final outcome. The strictly-read nonce is passed to the recovery gate, so a
  * stale "ok\n" cannot satisfy it. All progress markers are informational;
@@ -644,7 +605,7 @@ int main(void)
     touch("/dev/dfm1");
     if (read_prefs(su_manager, sizeof(su_manager), &soft_reboot, &disable_mods) != 0) {
         touch("/dev/dfme0");
-        return finish(decide_and_publish(-1, 0, nonce));
+        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
     }
 
     touch("/dev/dfm2");
@@ -659,7 +620,7 @@ int main(void)
         touch("/dev/dfm4");
         if (disable_modules()) {
             touch("/dev/dfme1");
-            return finish(decide_and_publish(-1, 0, nonce));
+            return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
         }
     }
 
@@ -670,9 +631,9 @@ int main(void)
      * style, so a failed mkdir here needs no recovery action of its own. */
     if (df_stage_file(KSUD_STAGE_SRC, KSUD_STAGE_DIR, KSUD_STAGE_NAME,
                       NULL, NULL) != 0)
-        return finish(decide_and_publish(-1, 0, nonce));
+        return df_outcome_to_rc(decide_and_publish(-1, 0, nonce));
 
     late_load_rc = run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load",
                                             "--package-name", su_manager, NULL });
-    return finish(decide_and_publish(late_load_rc, soft_reboot, nonce));
+    return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot, nonce));
 }
