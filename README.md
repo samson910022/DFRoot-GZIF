@@ -48,6 +48,20 @@ separate `outcomeLock` and the strict `lock -> outcomeLock` order are unchanged;
 this phase adds Javadoc and tests only, with no executable production change.
 R2-14 and R2-16 remain OPEN gates.
 
+### R7.1 (2026-11-26) — notification setup failure boundary — short note (R7.4 consolidates)
+
+Notification construction in the foreground host now runs inside the same fail-closed
+setup boundary as a foreground-start failure. A `RuntimeException` from
+`PendingIntent`/`Notification.Builder` produces one request-correlated `REJECTED`
+with an honest "notification setup failed" reason and resolves that start's own
+lifetime with exactly one `stopSelf`. It stays outside `startsLock`, so R5.4 attach
+serialization is unchanged; no WakeLock, admission command, barrier change,
+owner-token change, foreground attach/removal claim or second `stopForeground`
+occurs on this path, and `START_NOT_STICKY` is unchanged. Two deterministic
+host-only fixtures cover the boundary and an unrelated request's outcome.
+R2-14 and R2-16 remain OPEN safety gates; no device/ADB/payload/privileged work
+was performed.
+
 ## Sixth repair round (R6.1–R6.4) — consolidated summary (2026-11-26)
 
 Final local HEAD `9e1aff7` (R6.1 `13ee65f`, R6.2 `731e88c`, R6.3 `cdf76e7`,

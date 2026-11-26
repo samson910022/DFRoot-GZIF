@@ -33,6 +33,27 @@ verification: `ExploitServiceAsyncTest` 34 + `ExploitServiceTest` 47 = **81 test
 0 failures**. No commit/stage/push. Host-only evidence, **not a device ANR
 proof**; R2-14 and R2-16 remain OPEN.
 
+## 2026-11-26 — R7.1: notification setup failure boundary (R2-24) — short note (R7.4 consolidates)
+
+Re-review 6 found a new P2 regression: `buildNotification()` had moved outside
+the guarded foreground-start failure path, so a `RuntimeException` from
+`PendingIntent`/`Notification.Builder` escaped the background task with no
+correlated `REJECTED` and no lifetime resolution.
+
+Fix: notification construction stays outside `startsLock` (preserving R5.4
+epoch/attach serialization) but inside its own `try/catch`. On failure it logs,
+reports `REJECTED` for that request with the distinct honest reason
+`"notification setup failed: " + e.getMessage()`, resolves that start's lifetime
+and returns. No WakeLock, `RequestWork`, submit, owner-token change, barrier
+publish/clear, foreground attach/removal claim or second `stopForeground` is on
+this path; `START_NOT_STICKY` is unchanged. One HOST-ONLY throwing seam
+(`notificationSetupFailureForTesting`) is null in production and cleared on
+create/destroy. Two deterministic fixtures pin the correlated rejection /
+single-stop lifetime and the isolation of an unrelated `ACCEPTED` outcome.
+Focused verification: `ExploitServiceTest` + `ExploitServiceAsyncTest`; no
+full suite or native tests in this phase. No commit/stage/push. Host-only
+evidence, **not** a device proof; R2-14 and R2-16 remain OPEN.
+
 ## 2026-11-26 — Sixth repair round (R6.1–R6.4) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **sixth repair round** (final local HEAD
