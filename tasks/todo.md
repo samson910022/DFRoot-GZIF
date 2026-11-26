@@ -11,6 +11,7 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Phase 5 review-fix test round, deterministic finish assertions, real DE-store restart coverage, and mutation evidence; Checkpoint 5 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the re-review 1 repair round (R2-10..R2-16), findings closure, verification numbers, and open post-push/hardware gates. Round checkpoint and final comprehensive review remain unchecked. See NOTICE. -->
 <!-- Modified 2026-11-26 (DFRoot GZIF, R7.4): record R7.1–R7.3 phases and an UNCHECKED Checkpoint R7; add the PENDING Final 7.1–7.6 gate; scope historical APPROVE statements to their own heads. Documentation/coverage consolidation only, no behavior change. See NOTICE. -->
+<!-- Modified 2026-11-27 (DFRoot GZIF, R8) — documentation/coverage only, no behavior change. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -970,3 +971,67 @@ merge/release approval.
 - [x] Final 7.5: No Required/Critical findings; R7.2 REQUEST CHANGES fixed and
   re-reviewed RESOLVED; residuals and OPEN gates recorded.
 - [x] Final 7.6: Fresh full verification complete; approved commit series pushed.
+
+## Eighth repair round (R8.1–R8.4, 2026-11-27) — documentation phases and checkpoint
+
+Current local HEAD `4002b39` (R8.2 `fde6b73`, R8.3 `4002b39`) on top of the
+unchanged PR head `be9201c`. Addresses Re-review 8 (a status recheck of the
+identical head `be9201c`, **not** a fresh verification) and the supporting-only
+2026-11-27 device evidence. **No production code change and no gate closure:**
+R2-14 / R2-16 / R2-18 remain SCOPED / OPEN (not closed, not proved safe);
+R2-02 and R2-07 remain linked only; R2-17 and R2-24 remain closed only in the
+previously reviewed scope; no new finding IDs. Verdict REQUEST CHANGES / keep
+draft; PR #2 stays draft/open.
+
+- [x] R8.1 (PR description correction — GitHub-side only): replace the stale
+  claim that base CI fails without `signing.properties` with the actual
+  outstanding limitations. GitHub-side operation, no git commit and no code
+  change.
+- [x] R8.2 (`fde6b73`, README): record R8 supporting device evidence and the
+  still-open gates; documentation only.
+- [x] R8.3 (`4002b39`, CHANGELOG): record the 2026-11-27 R8 documentation
+  round; documentation only.
+- [x] R8.4 (plan/todo — this phase): mirror the R7 structure for R8.1–R8.4 and
+  leave Checkpoint R8 / Final 8.1–8.4 UNCHECKED for the main agent; no behavior
+  change.
+
+All four documentation implementation phases involve no builds, no test-suite
+runs and no device runs. The 2026-11-27 device observations were collected
+separately under the owner's explicit R8 authorization (including soft-reboot /
+crash): no payload rebuild, no APK assembly, no privileged container or guard
+change, and the installed APK was unchanged. Those observations are SUPPORTING
+ONLY — not gate closure, not device-safety, merge or release approval. CI
+`45787525701` is host-only evidence and is not device evidence.
+
+- [ ] Checkpoint R8: **documentation-accuracy reviews only; does NOT change any
+  gate disposition.** To be checked by the main agent after the final
+  comprehensive reviews pass. Open gates (identical to R7): R2-14
+  publication/abnormal-death window, R2-16 OFF atomicity, R2-18 documented
+  `startsLock` contention, Direct Boot FGS eligibility, real soft-reboot safety,
+  `/dev` marker-root trust, sticky-bit owner, AES key in argv, no recovery UI,
+  `BOOT_COUNT` diagnostic. Earlier R5/R6 residuals remain (per-session watch
+  budget, no explicit `onPause()` cancel, one-shot sweep, four-slot terminal
+  replay drops, rare caller-side `startsLock` sections); signed-release
+  packaged-pin gate inherited from PR #1 policy; abnormal-death publication
+  window OPEN. No device ANR proof and no CI-green claim. Supporting device
+  evidence (2026-11-27) is fail-closed/observational only and closes none of
+  R2-14 / R2-16 / R2-18; no new finding IDs; verdict REQUEST CHANGES / keep
+  draft and PR #2 draft/open.
+
+Historical APPROVE outcomes (R3/R4/R5/R6/R7, including Final 7.1–7.6 at
+`020175b`) are scoped to their own heads and are **not** an approval of the
+current HEAD `4002b39`. R2-02 and R2-07 remain linked to R2-16/R2-14 only.
+
+## Final Comprehensive Review — R8 final
+
+Final gate pending at current HEAD `4002b39` (PR head `be9201c`). These are
+**documentation-accuracy reviews only** and do NOT change any gate disposition:
+Re-review 8 is a status recheck of identical head `be9201c`, not fresh
+verification, and the 2026-11-27 device observations are supporting evidence
+only (not device-safety, merge or release approval). Keep PR #2 draft/open. To
+be checked by the main agent after the final comprehensive reviews pass.
+
+- [ ] Final 8.1: correctness/lifecycle documentation-accuracy review — PENDING.
+- [ ] Final 8.2: security/staging/environment documentation-accuracy review — PENDING.
+- [ ] Final 8.3: test/build/CI documentation-accuracy review — PENDING.
+- [ ] Final 8.4: architecture/native integration documentation-accuracy review — PENDING.
