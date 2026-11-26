@@ -2,6 +2,12 @@
 
 ## R9 (2026-11-27) — R2-14 honest fail-closed policy for ambiguous outcomes — SCOPED / OPEN
 
+The two residual items handled in R9 (unattended Start at Boot and experimental
+soft reboot, both made unavailable in production) are recorded in
+[issue #6](https://github.com/samson910022/DFRoot-GZIF/issues/6) with explicit
+owner acceptance. That issue does not close, weaken or reclassify R2-14, R2-16
+or R2-18.
+
 **Finite policy.** An unconfirmed completion is never a confirmed outcome. Native
 rc=7, unrecognized exits, engine exceptions, supervision timeout/interruption and
 absent/evicted ledger observations resolve only to INDETERMINATE / UNCONFIRMED.
@@ -19,6 +25,40 @@ work; the privileged mechanism is neither improved nor exercised. **R2-14 remain
 SCOPED / OPEN — not closed, not proved safe on device, no merge or release
 approval, and no reviewer approval claimed.** The master PR #3 ledger below is
 preserved verbatim.
+
+### R2-18 bounded ordinary app lifecycle (R9.4) — SCOPED / OPEN
+
+**Finite requirement.** On the main-thread start path, when a foreground flush
+holds the guard, the whole start handling is posted as ONE task to the owned
+express worker and `onStartCommand` returns `START_NOT_STICKY` without entering
+`startsLock` or waiting on a platform call. Attach/flush platform calls run on
+owned workers; a main-thread flush contender never waits and queues one bounded
+host re-decision, while an off-main loser waits only to a finite 200 ms monotonic
+deadline and then defers. Under a simulated slow call the offloaded caller
+returns within a finite 1 s bounded wait and the owned worker drains within the
+5 s `TEST_TIMEOUT_MS`; under a simulated throwing attach the only effects are one
+correlated REJECTED and one lifetime retirement. In every case: one admission decision, at most one WakeLock lease, no
+second start/engine run, no new barrier, no manager-config freeze, no duplicate
+stopForeground, no unbounded caller-side wait. This is a bounded host-scope
+contract, **not** an absolute no-ANR-on-every-device claim, not a foreground-
+service-grace proof and not device safety.
+
+**Evidence scope.** Host-only fixtures reuse the existing attach/flush gates
+and executor seams to pin bounded offload under a slow attach (with the
+single-flight gate rejecting the duplicate), fail-closed handling of a throwing
+`startForeground`, and retirement of every immutable-snapshot start ID when
+`stopForeground` throws. The offloaded caller is asserted with a 1 s bounded
+`Future.get`; owned-worker drain uses the 5 s `TEST_TIMEOUT_MS`. R9.4 makes ONE
+narrow production change: the guarded `stopForeground` call is wrapped in a
+`RuntimeException` catch with one honest `Log.w` so the immutable `stopSelf`
+loop always runs and no start ID is stranded; a host-only, null-in-production
+`stopForegroundFailureForTesting` seam injects the failure and is reset in the
+service lifetime paths. All three fixtures assert no second effect and graceful
+owned-worker shutdown. R6.4 deadlines/constants and the R7.3 `startsLock`
+contention residual are unchanged. No device/ADB/payload/privileged work.
+**R2-18 stays SCOPED / OPEN — not closed, not device-proved, no merge/release or
+reviewer approval claimed.** Device-specific behavior remains an explicit release
+gate if the feature is distributed.
 
 ## Round 13 / P2-17 (2026-11-27) — final-status observability moved to Android property `dfroot.final` (device retest passed for the final-status-observability scope only)
 

@@ -280,7 +280,9 @@ host-only seam proves the host algorithm change, **not** device behavior.
 (publication/acknowledgement observation window and abnormal-death window) and
 **R2-16** (non-atomic OFF authorization) remain **SCOPED / OPEN** — neither is
 closed or proved safe. **R2-02 and R2-07 remain linked to those gates only.**
-The R2-18 `startsLock` contention is documented, not fixed. Earlier R5/R6
+The R2-18 `startsLock` contention is documented, not fixed; the R9.4 section
+below adds only finite host-only responsiveness evidence and does not close it.
+Earlier R5/R6
 residuals remain: per-session 25-tick watch budget, no explicit `onPause()`
 cancel, one-shot post-winner sweep, four-slot terminal replay drops, and rare
 short caller-side `startsLock` sections. Also unchanged: signed-release job
@@ -554,6 +556,12 @@ still apply, no device safety is implied, and R2-14 remains OPEN.
 
 ### R2-14 fail-closed policy for ambiguous outcomes (R9.3, 2026-11-27) — SCOPED / OPEN
 
+The two residual items handled in R9 — unattended Start at Boot and experimental
+soft reboot, both made unavailable in production — are recorded in
+[issue #6](https://github.com/samson910022/DFRoot-GZIF/issues/6) with explicit
+owner acceptance. That issue does not close, weaken or reclassify R2-14, R2-16
+or R2-18.
+
 The finite policy is: **an unconfirmed completion is never a confirmed outcome**.
 Native rc=7 (writer/reader deadline, unconfirmed or contradictory terminal
 markers), an unrecognized exit, an engine exception, a supervision
@@ -572,6 +580,48 @@ across the mapper, the coordinator/barrier and the coordinator→result→UI
 boundary. The privileged mechanism is neither improved nor exercised; no device
 safety is implied. **R2-14 remains SCOPED / OPEN — not closed, not proved safe,
 and not a merge, release or reviewer approval.**
+
+### R2-18 bounded ordinary app lifecycle (R9.4, 2026-11-27) — SCOPED / OPEN
+
+**Finite requirement (host-scope behavior contract, not a device guarantee).**
+On the main-thread start path, when a foreground flush already holds the guard,
+the entire start handling is posted as **one** task to the owned express worker
+and `onStartCommand` returns `START_NOT_STICKY` without entering `startsLock` or
+waiting on any platform call. Foreground attach and flush platform calls run on
+owned workers; a main-thread flush contender never waits on the flush monitor
+and instead queues one bounded host re-decision, while an off-main loser waits
+only to a finite **200 ms monotonic deadline** and then defers without claiming
+a result. Under a simulated **slow** platform call the offloaded caller returns
+within a finite **1 s** bounded wait and the owned worker drains within the
+fixture's 5 s `TEST_TIMEOUT_MS`; under a simulated **throwing** attach the only
+effect is exactly one correlated `REJECTED` and one lifetime retirement. In
+every case there is **one** admission decision, **at most one** owned WakeLock
+lease, **no second** start/engine run, **no new** durable barrier, **no freeze**
+of manager configuration, **no duplicate** `stopForeground`, and **no unbounded
+caller-side wait**. This is a finite, defined responsiveness requirement; it is
+**not** a claim of no ANR on every device, **not** a foreground-service-grace
+timing proof and **not** device safety. Absolute proof of no ANR on every device
+is not offered.
+
+**Evidence scope.** R9.4 adds host-only fixtures that reuse the existing
+attach/flush gates and executor seams: a slow attach pins `startsLock` while a
+main-thread start is offloaded and rejected as a single claim; a throwing
+`startForeground` fails closed on the owned express worker; and a throwing
+`stopForeground` still retires every start ID in the immutable snapshot. They
+assert no second lease/admission/engine, no barrier or manager-config change,
+no duplicate foreground claim, and graceful owned-worker shutdown. The
+offloaded caller is asserted with a 1 s bounded `Future.get`; owned-worker
+drain uses the 5 s `TEST_TIMEOUT_MS`. R9.4 also makes ONE narrow production
+change: the guarded `stopForeground` call is wrapped in a `RuntimeException`
+catch with one honest `Log.w`, so the immutable `stopSelf` loop always runs and
+no start ID is stranded when that platform call throws. A host-only, null-in-
+production `stopForegroundFailureForTesting` seam injects that failure; it is
+reset in the service lifetime paths and has no production caller. The documented
+R6.4 deadline/offload constants and the R7.3 `startsLock` contention residual
+are unchanged. No device/ADB/payload/privileged work was done. **R2-18 stays
+SCOPED / OPEN — not closed, not device-proved, and not a merge, release or
+reviewer approval.** If the affected feature is to be distributed, its
+device-specific behavior remains an explicit release gate.
 
 ## Operation ownership, boot, and soft reboot
 
