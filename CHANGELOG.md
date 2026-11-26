@@ -1,15 +1,17 @@
 # Changelog — DFRoot GZIF
 
-## Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (host-only, pending S23 retest)
+## Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (device retest passed for the restore scope; rc=2 timeout separate and OPEN)
 
 This section is authoritative for the **literal/current head** of
-`fix/native-exploit-robustness`,
-`376f5e277713c1008386624f85ef74f200f14f2c` (Phase 1 native fix
-`fix(native): re-arm crash_dump64 helper patch during cleanup`). Its
-immediate parent is `0f0a2ad4b8546b07b8ec0e82a88e84449d03a7ed`, the **pre-fix
-device-run head**. The P2-15 fix code head is `7e18b13`, the Phase B / P2-14
-code head is `0ea022f` and the round-8 reviewed head was `36a11bc`; none of
-these is the literal head. The round-11 section below is authoritative for
+`fix/native-exploit-robustness`: the documentation commit that adds the
+"Device retest" subsection below. Its immediate parent is
+`7a855c51c8c48e4882a0c715164898ad0bcfd272` (the round-12 docs commit), and the
+**code head** remains `376f5e277713c1008386624f85ef74f200f14f2c` (Phase 1 native
+fix `fix(native): re-arm crash_dump64 helper patch during cleanup`); that code
+head's own immediate parent is `0f0a2ad4b8546b07b8ec0e82a88e84449d03a7ed`, the
+**pre-fix device-run head**. The P2-15 fix code head is `7e18b13`, the Phase B /
+P2-14 code head is `0ea022f` and the round-8 reviewed head was `36a11bc`; none
+of these is the literal head. The round-11 section below is authoritative for
 `7e18b13` and round 8 for the Phase B code head `0ea022f`; all earlier sections
 are historical. Round-10 totals (**0 new findings, 0 P2 open, 3 P1 open**) and
 round-11 totals are **not retroactively changed**.
@@ -75,19 +77,76 @@ status cases plus `final_publish`, **13** proc-scan, **28** ELF, **16 + 14 +
 markers **7/7** host + **3/3** release. No new CI run number is claimed for
 `376f5e2`.
 
+### Device retest (pass for P2-16 scope) — S23, 2026-11-26
+
+A retest of an APK built from the **code head `376f5e2`** was run on the S23.
+The APK sha256 is
+`bd8a17836effcac027b719b61bff0abfea4b309289e47c4d6d9732947e0bcbd9`; it was
+installed with a **disposable local test key** — no tag, no publish and no
+official signing claim. Evidence is archived at
+`/mnt/240G_SSD/opencode_tmp/s23-final/` (`pre3.txt`, `logcat3.txt`,
+`logcat3-key.txt`, `root-probes3.txt`, `app-result3.txt`, `post-reboot3.txt`).
+
+**Preconditions (`pre3.txt`, clean):** SELinux **Enforcing**; no `su`; no
+`/dev/df`; no `/dev/dffinal`; no `ksud`; `persist.log.tag` empty; vendor file
+size **529568** B, mtime **2022-01-01**.
+
+**Run at 15:20:48Z (device-local 23:20:48):** full root chain — `su -v` =
+`3.4.2:KernelSU`, `su -c id` =
+`uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, SELinux
+**Enforcing** (`root-probes3.txt`, `logcat3.txt`). Decisive `logcat3` lines:
+
+- **23:21:59.947** `cleanup: crash_dump64 helper patch missing; re-applying`
+- **23:21:59.956** `cleanup: crash_dump64 helper patch re-established (verified)`
+- **23:21:59.958 / .959** `restore OK (verified) for /system/lib64/libbase.so` (both writes)
+- **23:22:01.570** `restore OK (verified) for /vendor/lib64/AIAwbModel_v2.2.tflite`
+- **23:22:01.578** `restore OK (verified) for /apex/com.android.runtime/bin/crash_dump64`
+
+Counts in `logcat3.txt`: `wrong number of args` **0**, `got 0 bytes` **0**,
+`restore FAILED` **0**, `recovery-failed bit` **0**, `helper patch
+re-established` **1**, vendor `restore OK` **1**. The final rc therefore has
+**no bit 64**. This closes the P2-16 restore defect **on device**: the pre-fix
+`got 0 bytes` / `wrong number of args` / rc **66** signature did not recur, and
+the vendor and crash_dump64 restores are verified OK.
+
+**Separate, pre-existing OPEN item.** The run **still** ended with
+`status: timeout waiting for final status (rc=2)` and
+`cleanup: unbound observation; recovery gate stays closed`; `/dev/dffinal`
+was absent. This same rc=2 / unbound-observation outcome was present in both
+pre-fix attempts, so it is **not caused by P2-16**. It remains a **separate
+OPEN item**. Consequently **P1-02** (actual invocation identity) remains OPEN;
+**P1-07** restore verification is now device-confirmed, but quiescence and
+failure-interruption remain unproven, so **P1-07 stays OPEN**; **P1-08 stays
+OPEN**.
+
+**Post-reboot (15:23:08Z, `post-reboot3.txt`):** SELinux Enforcing, uptime
+**62.73**, no `su`, all checked `/dev/df*` paths and `ksud` absent, vendor size/mtime
+unchanged (529568 B, 2022-01-01); the S23 remained connected. No panic evidence
+(pstore empty).
+
+**Counts and CI:** all counts are unchanged — policy **92**, helper-size **30**,
+six CMake suites **23 / 25 / 3 / 7 / 6 / 16**, native **61** status +
+`final_publish`, 13 proc-scan, 28 ELF, 16+14+10 version, 40 loader-stage, JVM
+**39**, markers **7/7** host + **3/3** release. **No new CI run number** is
+claimed for `376f5e2`. The APK used a disposable local test key; no tag was
+created, nothing was published and the release job remains unexecuted.
+
 ### Limits and disposition
 
-- **HOST-TESTED ONLY, pending S23 retest.** The fix is **not device-verified**;
-  no tag was created, nothing was published, and no completed-green CI
-  conclusion is claimed for `376f5e2`.
-- **P2-16 is addressed at the native-source level in `376f5e2`, pending device
-  retest and final comprehensive review** — not claimed finally closed.
-- **P1-02, P1-07 and P1-08 remain OPEN.** rc **66** is concrete evidence that
-  **P1-07 is still open** (verified restoration is not achieved). P2-13/P2-14/
-  P2-15 are unchanged from the round-8/10/11 ledgers.
-- This head is **not device-verified, not independently merge-ready and not
-  release-ready**; no device, merge or release claim. **Auto Soft Reboot and
-  Start on Boot remain disabled by default and unvalidated.**
+- **Device retest passed for the P2-16 restore scope** (code head `376f5e2`,
+  S23, subsection above): the restore defect is **closed on device** — no bit
+  64, verified vendor/crash_dump64 restores. This is a **scoped** pass only.
+- **A separate rc=2 timeout / unbound-observation item remains OPEN** (also
+  present in the two pre-fix attempts, not caused by P2-16). No `/dev/dffinal`
+  final-status publication was observed.
+- **P1-02, P1-07 and P1-08 remain OPEN.** P1-07 restore verification is now
+  device-confirmed, but quiescence and failure-interruption remain unproven.
+  P2-13/P2-14/P2-15 are unchanged from the round-8/10/11 ledgers.
+- **The PR as a whole is not device-verified, not independently merge-ready
+  and not release-ready**; no device, merge or release claim for the whole PR.
+  No tag was created, nothing was published, and no completed-green CI
+  conclusion is claimed for `376f5e2`. **Auto Soft Reboot and Start on Boot
+  remain disabled by default and unvalidated.**
 
 ## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
 

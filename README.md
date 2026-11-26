@@ -15,7 +15,8 @@ This fork ports the DFRoot chain to the S23 Ultra (`dm3q`) build
 **`S9180ZHU8GZIF`** (Android 17 / One UI 9.0 / SPL 2026-10-05 /
 kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`). It was
 hardware-validated on 2026-11-17 against the **historical** implementation only;
-the current head is host-tested and UNVALIDATED on device (boundary below).
+the current code head is host-tested with a device retest for the **P2-16
+restore scope only**; the PR as a whole is not device-verified (boundary below).
 
 - **Validated 2026-11-17 (historical loaders only)** (volatile, late-load root only):
   - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
@@ -25,13 +26,14 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 - **Only `S9180ZHU8GZIF` is tested.** No other build/model/One UI version is claimed. Not registered in any update feed.
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
-- **P2-16 fix (`376f5e2`, host-only, pending S23 retest):** the two S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). **Host-tested only**; no device retest, no tag, no publish. See `CHANGELOG.md` round 12.
+- **P2-16 fix (`376f5e2`; device retest passed for the restore scope; rc=2 timeout / unbound observation separate and OPEN):** the two pre-fix S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). On the retest S23 run the helper patch was re-established (verified) at cleanup and the vendor / `crash_dump64` restores were `restore OK (verified)` with **no recovery-failed bit** — P2-16's restore defect is **closed on device** for that scope. The run **still** ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed` with `/dev/dffinal` absent — a **separate, pre-existing OPEN item** (also present in the two pre-fix attempts). P1-02 / P1-07 / P1-08 remain OPEN; no tag, no publish (disposable local test key). See `CHANGELOG.md` round 12.
 
 > [!WARNING]
-> **Validation boundary.** The literal/current head of
+> **Validation boundary.** The current **code head** of
 > `fix/native-exploit-robustness` is `376f5e2` (Phase 1 native cleanup-time
-> helper re-apply for P2-16). Its immediate parent is `0f0a2ad` (the pre-fix
-> device-run head); the P2-15 fix code head is `7e18b13`, the Phase B / P2-14
+> helper re-apply for P2-16); the literal head is this documentation update
+> (immediate parent `7a855c5`). The code head's immediate parent is `0f0a2ad`
+> (the pre-fix device-run head); the P2-15 fix code head is `7e18b13`, the Phase B / P2-14
 > code head is `0ea022f` (`fix(ci): verify loader bytes inside every
 > distributable APK`) and the round-8 reviewed head is `36a11bc` — none of
 > these is the literal head. The producer change `2b59684` and loader
@@ -54,9 +56,16 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > pins, old preference path). **Two S23 attempts on 2026-11-26 at the pre-fix
 > head `0f0a2ad` reached a full root chain but FAILED the vendor restore (app
 > rc 66 = 2 + recovery bit 64); they are attempts, not validations** (evidence:
-> `/mnt/240G_SSD/opencode_tmp/s23-final/`). No hardware run validates the
-> literal head `376f5e2`. That head is **host-tested only and UNVALIDATED on
-> device**; a successful build does not certify safe privileged execution.
+> `/mnt/240G_SSD/opencode_tmp/s23-final/`). A later S23 retest of the APK built
+> from code head `376f5e2` **passed for the P2-16 restore scope** (`cleanup:
+> crash_dump64 helper patch re-established (verified)`, vendor and
+> `crash_dump64` `restore OK (verified)`, no bit 64), but **still** ended
+> `status: timeout waiting for final status (rc=2)` / `cleanup: unbound
+> observation; recovery gate stays closed` with `/dev/dffinal` absent — a
+> **separate pre-existing OPEN item**, not caused by P2-16. The PR as a whole
+> is **not device-verified, not independently merge-ready and not
+> release-ready**; a successful build does not certify safe privileged
+> execution.
 > An **unconditional** `host-gates` job runs **all** host suites as required
 > gates on **every** event, including protected `v*` tag pushes, with a
 > checkout-SHA assertion; both `build-dfroot` and `build-release` require it,
@@ -137,21 +146,25 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > on-device full-chain validation**: documentation is not a fix and unverified
 > privileged content must not be consumed or distributed. run6/run8 are
 > historical and validate only the old loaders. **P1-02 and P1-07 also remain
-> OPEN safety/release gates**; **rc 66 from the two S23 attempts is concrete
-> evidence that P1-07 is still open** (verified restoration is not achieved).
+> OPEN safety/release gates**; the two pre-fix S23 attempts returned rc 66,
+> but **P1-07 remains OPEN** even though restore verification is now
+> device-confirmed on the retest run — quiescence and failure-interruption
+> remain unproven, and the rc=2 unbound-observation timeout is a separate OPEN
+> item.
 > P2-13 and P2-14 are unchanged (Phase A/B, pending final comprehensive
 > review). **P2-15 was addressed in Phase 1 (`7e18b13`) and is pending final
-> comprehensive review** — not claimed finally closed. **P2-16 was addressed at
-> the native-source level in `376f5e2` and is pending S23 device retest and
-> final comprehensive review** — not claimed finally closed and **not
-> device-verified**. Auto Soft Reboot and Start on Boot
-> remain disabled and unvalidated; no device run validates the literal head,
-> no tag was created and no release was published, and this head is **not
+> comprehensive review** — not claimed finally closed. **P2-16's restore defect
+> was addressed in `376f5e2` and is device-confirmed closed on S23 for the
+> restore scope** (retest passed: helper patch re-established and verified
+> restores of vendor file and `crash_dump64`, no bit 64); the separate rc=2
+> timeout / unbound-observation item remains OPEN. Auto Soft Reboot and Start on
+> Boot remain disabled and unvalidated; no device run validates the PR as a
+> whole, no tag was created and no release was published, and this PR is **not
 > device-verified, not independently merge-ready and not release-ready**. The
-> only new local APK used a disposable local test key, is not official signing
-> material and was never tagged, uploaded or published; the release job remains
-> unexecuted. See `CHANGELOG.md` round 12, round 11 and round 8 (2026-11-26) and
-> `PORTING-GZIF.md` §19 for the test/lifecycle detail.
+> only new local APK used a **disposable local test key**, is not official
+> signing material and was never tagged, uploaded or published; the release job
+> remains unexecuted. See `CHANGELOG.md` round 12, round 11 and round 8
+> (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
