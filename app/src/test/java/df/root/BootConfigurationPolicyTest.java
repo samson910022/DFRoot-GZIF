@@ -76,9 +76,17 @@ public class BootConfigurationPolicyTest {
 
         RunConfig confirmed = loadSynchronously().getConfirmedSnapshot();
 
-        assertTrue(confirmed.isSoftRebootAllowedFor(RunConfig.ExecutionMode.MANUAL));
+        // Current manual consent is migrated OFF on load: the acknowledged value
+        // cannot make soft reboot available in either execution mode. The config
+        // policy is safe-off, but production unattended execution is refused at
+        // the coordinator seam regardless of the configuration state.
+        assertFalse(confirmed.isSoftReboot());
+        assertEquals(0, confirmed.getSoftRebootAcknowledgementVersion());
+        assertFalse(confirmed.isSoftRebootAllowedFor(RunConfig.ExecutionMode.MANUAL));
         assertFalse(confirmed.isSoftRebootAllowedFor(RunConfig.ExecutionMode.UNATTENDED_BOOT));
-        assertFalse(confirmed.isUnattendedBootAllowed());
+        assertTrue(confirmed.isUnattendedBootAllowed());
+        assertFalse("production must refuse unattended work even for a safe-off config",
+                RunCoordinator.PRODUCTION_UNATTENDED_REFUSAL.isUnattendedEnabled());
     }
 
     @Test

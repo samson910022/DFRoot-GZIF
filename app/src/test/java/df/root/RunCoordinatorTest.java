@@ -125,8 +125,14 @@ public class RunCoordinatorTest {
                 service.contains("defense in depth and READ-ONLY"));
         assertTrue("component recheck must not be an atomic transition",
                 service.contains("NOT an atomic transition"));
-        assertTrue("OFF write must be outside the coordinator monitor",
-                settings.contains("OUTSIDE the coordinator monitor"));
+        // R9.2: the component-derived authorization is gone. The UI presents
+        // the feature as unavailable and production wires an unconditional
+        // refusal; no component write or readback can authorize boot work.
+        assertTrue("settings must present Start at Boot as unavailable",
+                settings.contains("Start at Boot is unavailable in this build"));
+        assertTrue("production must wire the unconditional unattended refusal",
+                coordinator.contains(
+                        "UnattendedAuthorization authorization = PRODUCTION_UNATTENDED_REFUSAL;"));
         assertTrue("claim-time read must not be an atomic transition",
                 bootClaim.contains("NOT an atomic transition"));
         assertTrue("README must state the monitor boundary",

@@ -552,6 +552,27 @@ device crash/power-loss validation of `/dev` marker durability remains required.
 The safety policy is unchanged: rc7 precedence and indeterminate ownership
 still apply, no device safety is implied, and R2-14 remains OPEN.
 
+### R2-14 fail-closed policy for ambiguous outcomes (R9.3, 2026-11-27) — SCOPED / OPEN
+
+The finite policy is: **an unconfirmed completion is never a confirmed outcome**.
+Native rc=7 (writer/reader deadline, unconfirmed or contradictory terminal
+markers), an unrecognized exit, an engine exception, a supervision
+timeout/interruption, and an absent or evicted ledger record resolve only to
+**INDETERMINATE / UNCONFIRMED**. From that state the app makes no success claim
+(no success toast, no terminal-success log line, no fabricated rejection),
+starts no replay, retry or further potentially unsafe action, keeps the run and
+manager controls disabled, and retains the owner token, resource lease,
+configuration freeze and durable attempt barrier. A `null` ledger observation
+is uncertainty, never evidence of admission or completion. Only an explicit,
+checked recovery by a trusted caller outside the UI can release the barrier;
+nothing in the UI, service or a timer authorizes it automatically.
+
+This is demonstrated with harmless host-only mocked outcome/failure stand-ins
+across the mapper, the coordinator/barrier and the coordinator→result→UI
+boundary. The privileged mechanism is neither improved nor exercised; no device
+safety is implied. **R2-14 remains SCOPED / OPEN — not closed, not proved safe,
+and not a merge, release or reviewer approval.**
+
 ## Operation ownership, boot, and soft reboot
 
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. Each UI request carries a click-time ID: the coordinator publishes `ACCEPTED`, `REJECTED` or `CANCELLED` for that ID, and the UI clears its pending state only on a matching outcome (never on an unrelated snapshot). `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death. Service destruction publishes `CANCELLED` **only** for unclaimed service-local work and never replays it; accepted work stays coordinator-owned.

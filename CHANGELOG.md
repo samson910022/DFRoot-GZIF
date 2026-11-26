@@ -1,5 +1,25 @@
 # Changelog — DFRoot GZIF
 
+## R9 (2026-11-27) — R2-14 honest fail-closed policy for ambiguous outcomes — SCOPED / OPEN
+
+**Finite policy.** An unconfirmed completion is never a confirmed outcome. Native
+rc=7, unrecognized exits, engine exceptions, supervision timeout/interruption and
+absent/evicted ledger observations resolve only to INDETERMINATE / UNCONFIRMED.
+From that state there is no success claim (no success toast, no terminal-success
+line, no fabricated rejection), no replay, retry or next potentially unsafe
+action; run/manager controls stay disabled and the owner token, resource lease,
+configuration freeze and durable attempt barrier are retained. Only an explicit,
+checked recovery by a trusted caller outside the UI may release them; no UI,
+service or timer does so automatically.
+
+**Evidence scope.** Harmless host-only mocked outcome/failure stand-ins now pin
+this at the coordinator→result→UI boundary in addition to the existing mapper,
+coordinator and ledger tests. No device/ADB/payload/privileged-container/APK
+work; the privileged mechanism is neither improved nor exercised. **R2-14 remains
+SCOPED / OPEN — not closed, not proved safe on device, no merge or release
+approval, and no reviewer approval claimed.** The master PR #3 ledger below is
+preserved verbatim.
+
 ## Round 13 / P2-17 (2026-11-27) — final-status observability moved to Android property `dfroot.final` (device retest passed for the final-status-observability scope only)
 
 **Head model.** This section is authoritative for the **committed literal head `e823fb4`** on `fix/native-exploit-robustness` — commit `fix(native): publish final status via app-readable property`, which landed the D2 native property channel **and the round-13 documentation in ONE commit**. Its immediate parent is `d39a278` (historical); the earlier device retest recorded below was run on the **pre-commit working tree on `d39a278`**. PR #3 base is `9f60e16251f5856ee1ae720eaea84b41d7992920` and the CI merge SHA for the exact-head run is `69054f5be1a278d88c19164444a7590e3c5bc2c0`. The round-12 documentation head is `39a376f`; earlier code heads are `376f5e2` (P2-16), `7e18b13` (P2-15), `0ea022f` (Phase B / P2-14) and `36a11bc` (round-8 reviewed). `0f9bf69` is a reverted historical attempt (below); `d39a278` is its revert. All earlier sections are historical; round-10 totals (0 new / 0 P2 / 3 P1) and the round-11/round-12 totals are **not retroactively changed**. **Independent-review accounting (R11, comment 7126155178): 29 IDs, 23 closed, 4 open (3 P1 + 1 P2) and 2 author-reported addressed / pending independent validation.** The author changelog rounds 11–13 are **not** independent review rounds R1–R11; P2-15, P2-16 and P2-17 are **author-reported, not discovered by R10**, and remain pending independent validation.

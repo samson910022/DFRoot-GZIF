@@ -59,7 +59,7 @@ public class NativeResultMapperTest {
                 "native rc=7 indeterminate publication"});
         for (int unknown : new int[] {8, 255, -1, Integer.MIN_VALUE, Integer.MAX_VALUE}) {
             cases.add(new Object[] {unknown, ExploitRunner.RESULT_UNKNOWN, RunResult.Type.UNKNOWN,
-                    RunResult.Detail.NATIVE_EXIT, "native exit code " + unknown});
+                    RunResult.Detail.NATIVE_EXIT, reasonFor(unknown)});
         }
         // The recovery bit is additive: every base keeps its type while the
         // stable code carries bit 64 so the UI warning stays reachable.
@@ -106,11 +106,18 @@ public class NativeResultMapperTest {
         return base == 0 ? RunResult.Detail.LATE_LOAD_COMPLETED : RunResult.Detail.NATIVE_EXIT;
     }
 
+    /** Authoritative expected reason, including the additive bit-64 warning. */
     private static String reasonFor(int nativeCode) {
         int base = StatusRc.base(nativeCode);
         String baseReason = base == 5 ? SKIPPED_REASON
                 : base == 7 ? "native rc=7 indeterminate publication"
-                : base > 7 ? "native exit code " + nativeCode : null;
+                : base > 7 || base < 0 ? "native exit code " + nativeCode : null;
+        // Negative ints are unrecognized Java-style codes, not native codes with
+        // the additive bit: the mapper never claims a recovery failure for them.
+        boolean recoveryFailed = nativeCode >= 0 && StatusRc.recoveryFailed(nativeCode);
+        if (!recoveryFailed) {
+            return baseReason;
+        }
         String bitReason = "native rc=" + nativeCode + " recovery verification failed (bit 64)";
         return baseReason == null ? bitReason : baseReason + "; " + bitReason;
     }
@@ -148,8 +155,12 @@ public class NativeResultMapperTest {
     public void unknownExitsNeverClaimNativeRc7Publication() {
         for (int unknown : new int[] {8, 73, 255, -1}) {
             RunResult result = NativeResultMapper.map(unknown);
-            assertEquals("native exit code " + unknown, result.getReason());
-            assertFalse(result.getReason().contains("rc=7"));
+            // Exact authoritative reason: rc=73 is an unrecognized exit with the
+            // additive recovery bit, so it carries both the honest exit reason
+            // and the bit-64 warning -- never the rc=7 publication label.
+            assertEquals(reasonFor(unknown), result.getReason());
+            assertFalse("unknown exit " + unknown + " claimed the rc=7 publication label",
+                    result.getReason().contains("native rc=7 indeterminate publication"));
             assertTrue(result.isOutcomeUnverified());
         }
         RunResult rc7 = NativeResultMapper.map(7);
@@ -190,12 +201,24 @@ public class NativeResultMapperTest {
 
             assertTrue("native rc=" + withBit + " lost the recovery bit",
                     StatusRc.recoveryFailed(result.getCode()));
-            assertEquals("native rc=" + withBit + " changed the base outcome",
-                    plain.getCode(), StatusRc.base(result.getCode()));
+            int stableCode = baseCode(base);
+            assertEquals("native rc=" + withBit + " changed the stable code",
+                    stableCode | StatusRc.RECOVERY_FAILED_BIT, result.getCode());
+            if (stableCode >= 0) {
+                assertEquals("native rc=" + withBit + " changed the base outcome",
+                        plain.getCode(), StatusRc.base(result.getCode()));
+            } else {
+                // Java's negative result codes already contain bit 64 in two's
+                // complement, so StatusRc.base() cannot strip it from them. The
+                // authoritative folded code must stay identical and the bit-64
+                // warning must remain in the reason for these bases.
+                assertEquals("native rc=" + withBit + " changed a negative base outcome",
+                        plain.getCode(), result.getCode());
+            }
             assertEquals(plain.getType(), result.getType());
             assertEquals(plain.getDetail(), result.getDetail());
             assertEquals(plain.isOutcomeUnverified(), result.isOutcomeUnverified());
-            assertTrue(result.getReason().contains("bit 64"));
+            assertEquals(reasonFor(withBit), result.getReason());
             assertTrue("no mapped result may hide the recovery failure behind UNKNOWN",
                     result.getType() != RunResult.Type.UNKNOWN || base == 8);
         }

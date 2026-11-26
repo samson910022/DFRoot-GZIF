@@ -130,7 +130,11 @@ public class SettingsFragmentTest {
         assertFalse(softReboot.isChecked());
         assertFalse(softReboot.isEnabled());
         assertNull(ShadowAlertDialog.getLatestAlertDialog());
-        assertEquals(0, store.writes.size());
+        // The legacy ON value is migrated OFF by one checked write on load; the
+        // switch itself is hard-disabled and no consent dialog is offered.
+        assertEquals(1, store.writes.size());
+        assertFalse(store.writes.get(0).isSoftReboot());
+        assertEquals(0, store.writes.get(0).getSoftRebootAcknowledgementVersion());
     }
 
     @Test
@@ -513,7 +517,9 @@ public class SettingsFragmentTest {
         assertFalse(softReboot.isChecked());
         assertFalse(softReboot.isEnabled());
         assertNull(ShadowAlertDialog.getLatestAlertDialog());
-        assertEquals(0, store.writes.size());
+        assertEquals(1, store.writes.size());
+        assertFalse(store.writes.get(0).isSoftReboot());
+        assertEquals(0, store.writes.get(0).getSoftRebootAcknowledgementVersion());
     }
 
     @Test
@@ -524,7 +530,9 @@ public class SettingsFragmentTest {
 
         assertFalse(softReboot.isChecked());
         assertFalse(softReboot.isEnabled());
-        assertEquals(0, store.writes.size());
+        assertEquals(1, store.writes.size());
+        assertFalse(store.writes.get(0).isSoftReboot());
+        assertEquals(0, store.writes.get(0).getSoftRebootAcknowledgementVersion());
         assertNull(ShadowAlertDialog.getLatestAlertDialog());
     }
 
@@ -804,7 +812,8 @@ public class SettingsFragmentTest {
 
     /** The only boot component action left in the UI: explicit safe OFF. */
     private void clickBootDisable() {
-        assertTrue(Shadows.shadowOf(preference("boot_disable")).click());
+        Preference bootDisable = preference("boot_disable");
+        assertTrue(Shadows.shadowOf(bootDisable).click());
     }
 
     private Preference retryPreference() {

@@ -10,6 +10,7 @@
 // Modified 2026-11-26 (DFRoot GZIF, R6.4): install the deterministic inline foreground-host seam at every service creation so existing synchronous Activity assertions stay valid. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R7.2): pin one ledger observation per watch tick with a deterministic host-only lookup seam, including a late final-tick outcome and the unconfirmed case. See NOTICE.
 // Modified 2026-11-26 (DFRoot GZIF, R7.2 repair): add a disagreeing-observation regression test so the final tick cannot use a second ledger read that leaves the UI blank. See NOTICE.
+// Modified 2026-11-27 (DFRoot GZIF, R9.3): pin the full fail-closed boundary from an ambiguous native result through the visible UI. See NOTICE.
 package df.root;
 
 import static org.junit.Assert.assertEquals;
@@ -1058,6 +1059,76 @@ public class MainActivityTest {
                 Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
                         .getNextStartedService());
         assertEquals("no replayed click through the retained starter", 1, starter.requests.size());
+    }
+
+    /**
+     * R9.3 (R2-14): the FULL fail-closed invariant at the coordinator→result→UI
+     * boundary. A harmless mocked native rc=7 (unconfirmed terminal publication)
+     * must yield no success claim, no replay/retry, no next unsafe action, and
+     * must retain every owned resource. Mapper/coordinator tests already pin rc7
+     * ownership and the ledger tests already pin absent/contradictory
+     * observations; this single test joins the two layers. No device, no APK and
+     * no privileged mechanism is involved.
+     */
+    @Test
+    public void ambiguousNativeOutcomeIsFailClosedFromResultThroughUi()
+            throws OperationAttemptStore.Failure {
+        installConfiguration(new RunConfig(SuManager.NEXT.getPackageName(), false, false, 0, 82), true);
+        CountingAttemptStore attemptStore = new CountingAttemptStore();
+        installAttemptCoordinator(attemptStore, () -> 53L, Runnable::run);
+        AmbiguousRc7Engine engine = new AmbiguousRc7Engine();
+        ReflectionHelpers.setField(coordinator, "engine", engine);
+        MainActivity activity = launch();
+
+        // Use the REAL service starter: deliverServiceRequest consumes the
+        // queued foreground-service intent, so a RecordingStarter here would
+        // intercept it and make nextServiceRequest() fail.
+        activity.findViewById(R.id.btnRun).performClick();
+        String requestId = (String) ReflectionHelpers.getField(activity, "mPendingRequestId");
+        assertNotNull(requestId);
+        deliverServiceRequest(94);
+        coordinatorWorker.runAll(); // the harmless engine returns native rc=7
+        coordinatorObservers.runAll(); // one coordinator snapshot reaches the Activity
+        ShadowLooper.idleMainLooper();
+
+        RunCoordinator.Snapshot held = coordinator.getSnapshot();
+        assertEquals(RunCoordinator.State.INDETERMINATE, held.getState());
+        assertEquals(RunResult.Type.INDETERMINATE, held.getResult().getType());
+        assertEquals(RunResult.Detail.NATIVE_EXIT, held.getResult().getDetail());
+        assertEquals(ExploitRunner.RESULT_INDETERMINATE, held.getResult().getCode());
+        assertFalse(held.getResult().isSuccess());
+        assertTrue(held.getReason().contains("outcome unverified"));
+        assertTrue(output(activity).contains("outcome unverified"));
+        assertFalse("no terminal success line for an ambiguous outcome",
+                output(activity).contains("terminal: SUCCESS"));
+        assertFalse("no success toast for an ambiguous outcome",
+                output(activity).contains("run completed"));
+        assertEquals("an ambiguous outcome is never announced as terminal", 0,
+                ShadowToast.shownToastCount());
+
+        // Ownership is retained: admission, config freeze and the unconfirmed
+        // durable attempt all stay held; no checked clear has run.
+        assertEquals(1, engine.calls.get());
+        assertNotNull(engine.admission);
+        assertTrue(engine.admission.isActive());
+        assertTrue(repository.isFrozen());
+        OperationAttempt retained = attemptStore.load();
+        assertNotNull(retained);
+        assertTrue(retained.isUnconfirmed());
+        assertEquals(0, attemptStore.clears);
+
+        // No replay/retry and no next potentially unsafe action: the bounded
+        // watch, a forced extra tick and a further click are all inert.
+        outcomeWatch.runAll();
+        ReflectionHelpers.callInstanceMethod(activity, "runOutcomeWatchTick");
+        assertFalse(activity.findViewById(R.id.btnRun).isEnabled());
+        assertFalse(activity.findViewById(R.id.spinnerSuManager).isEnabled());
+        activity.findViewById(R.id.btnRun).performClick();
+        assertEquals("no automatic retry or second engine call", 1, engine.calls.get());
+        assertFalse(coordinatorWorker.hasNext());
+        assertNull("no replayed service request",
+                Shadows.shadowOf((Application) RuntimeEnvironment.getApplication())
+                        .getNextStartedService());
     }
 
     /** Destruction before admission cancels only service-local work, never an engine. */
@@ -2593,6 +2664,22 @@ public class MainActivityTest {
             calls.incrementAndGet();
             reporter.report("coordinator log line\n");
             return NativeResultMapper.map(0);
+        }
+    }
+
+    /** Harmless fault-injection stand-in: native rc=7, no privileged work. */
+    private static final class AmbiguousRc7Engine implements RunCoordinator.Engine {
+        final AtomicInteger calls = new AtomicInteger();
+        volatile ConfigurationRepository.RunAdmission admission;
+
+        @Override
+        public RunResult run(Context context, ConfigurationRepository.RunAdmission runAdmission,
+                             RunConfig.ExecutionMode mode, String operationId,
+                             RunEventListener events, IReporter reporter) {
+            calls.incrementAndGet();
+            admission = runAdmission;
+            reporter.report("mocked native rc=7 unconfirmed publication\n");
+            return NativeResultMapper.map(7);
         }
     }
 

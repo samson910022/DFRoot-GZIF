@@ -1033,10 +1033,23 @@ public class ConfigurationRepositoryTest {
                 new FakeStore(manual), new DirectExecutor());
         repository.start();
 
-        assertNull(repository.acquireRunSnapshot(RunConfig.ExecutionMode.UNATTENDED_BOOT));
+        // Load-time safe-off migration clears the acknowledged soft reboot, so
+        // the persisted snapshot is admissible under the config policy. The
+        // unconditional production refusal lives in RunCoordinator, not here.
+        RunConfig confirmed = repository.getConfirmedSnapshot();
+        assertFalse(confirmed.isSoftReboot());
+        assertEquals(0, confirmed.getSoftRebootAcknowledgementVersion());
+        assertEquals("", repository.getRunAdmissionBlockReason(
+                RunConfig.ExecutionMode.UNATTENDED_BOOT));
+        ConfigurationRepository.RunAdmission bootAdmission = repository.acquireRunSnapshot(
+                RunConfig.ExecutionMode.UNATTENDED_BOOT);
+        assertNotNull(bootAdmission);
+        assertEquals(RunConfig.ExecutionMode.UNATTENDED_BOOT, bootAdmission.getExecutionMode());
+        assertTrue(bootAdmission.isActive());
+        bootAdmission.close();
+        assertFalse(bootAdmission.isActive());
         assertFalse(repository.isFrozen());
-        assertTrue(repository.getRunAdmissionBlockReason(
-                RunConfig.ExecutionMode.UNATTENDED_BOOT).contains("soft reboot"));
+
         ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
                 RunConfig.ExecutionMode.MANUAL);
         assertEquals(RunConfig.ExecutionMode.MANUAL, admission.getExecutionMode());
