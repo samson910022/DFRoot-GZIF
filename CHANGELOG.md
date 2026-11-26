@@ -1,10 +1,92 @@
 # Changelog — DFRoot GZIF
 
+## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
+
+This section is authoritative for the **literal/current head** of
+`fix/native-exploit-robustness`,
+`7e18b138090abfd6c0af5cc02cb031938e6ace2a` (Phase 1 fix
+`fix(app): preserve reviewed loader bytes in release APK`). Its immediate
+parent is the docs commit `74b12df` (`docs: refresh round-8 validation ledger
+and evidence scope`). The **Phase B / P2-14 code head** remains `0ea022f`
+(`fix(ci): verify loader bytes inside every distributable APK`), and the
+round-8 reviewed head was `36a11bc`; neither is the literal head. The round-8
+section below is authoritative for the Phase B code head `0ea022f`; all
+earlier sections are historical.
+
+**Round-10 scope (not retroactively changed).** The consolidated round-10
+review comment **7126155178** at head `74b12df` reported **0 new findings,
+0 P2 open and 3 P1 open (P1-02 / P1-07 / P1-08)**, left the head unchanged and
+completed CI run **45710535038** with `success`. **P2-15 was NOT found by that
+review**; it was found by an author-local release build. Non-tag CI builds run
+the Debug variant only, and the tagged release job remained unexecuted, so CI
+never exercised the affected packaging path. Round-10 totals above are not
+revised here.
+
+### Defect — bundled loader bytes changed in the release APK
+
+| Artifact | Reviewed / pinned bytes (`jniLibs` and CMake pins) | Bundled in release APK built from `74b12df` (before fix) | Release rebuild at `7e18b13` after fix (local test key) |
+|---|---|---|---|
+| `libksud.so` | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` — 5,127,584 B | `ecac0d2b1e5930bf69d887eaf4d9fbdc630da524457cb3025d1166d9ac37b7f5` — 3,737,888 B | `731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4` — 5,127,584 B |
+| `libksudnext.so` | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` — 4,728,320 B | `ea0505cd25692f83de17fe2c3a2fcab237050128f84dcd0b68cf9f3705284f40` — 4,728,320 B | `7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414` — 4,728,320 B |
+
+The second loader is the trap: its defective size is **identical** to the
+reviewed size, so only the SHA-256 distinguishes it. **Cause:** AGP 9.5 strips
+debug symbols from bundled release JNI libraries by default. The committed
+inputs and their build-time loader gate stayed correct, but the bytes packaged
+into a release APK did not; only a local release build exposed this because
+non-tag CI is Debug-only and the release job was never run.
+
+### Fix (Phase 1, `7e18b13`) and host verification
+
+- `app/build.gradle.kts` `packaging.jniLibs` now sets
+  `keepDebugSymbols += "**/libksud.so"` and `keepDebugSymbols += "**/libksudnext.so"`
+  so packaged release bytes remain the reviewed bytes.
+- A regression helper plus positive and mutation tests were added in
+  `tests/workflow/test_policy.py`; the workflow policy suite count goes
+  **90 → 92** (it was 90 at rounds 8–10 and 85 earlier). No KO/loader pin,
+  `.github/workflows/build.yml`, CMake, native source or marker-count change:
+  native 61 status + `final_publish`, 13 proc, 28 ELF, 16+14+10 version,
+  40 loader-stage and helper-size; six CMake suites **23 / 25 / 3 / 7 / 6 / 16**;
+  JVM 39; **7/7** host and **3/3** release markers are unchanged.
+- Host verification (evidence archived at
+  `/mnt/240G_SSD/opencode_tmp/p2-15-evidence`): a clean
+  `:app:clean :app:assembleRelease` with a **disposable local test key**
+  (`/home/samson1357924/dfroot-device-test.jks`; KO sha256
+  `94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7`)
+  produced `DFRoot_4.8-gzif.apk` sha256
+  `33c3742dc777f82a9e8f0b61ca1054b198ba9c75ec22b3503125cd184005fec9`.
+  Each loader entry occurs **exactly once** in the APK; extracted bytes are
+  `731c3fa1…` / 5,127,584 B and `7f28f1fb…` / 4,728,320 B. The real
+  `verify_loader_hashes.cmake` manifest status is `verified`, and the **verbatim**
+  P2-14 gate script from `build.yml` (`Verify bundled loader bytes in every
+  distributable APK`) passed with the pins file and one index row (APK name +
+  APK sha256 + both loader sha256 values). The key was never tagged, uploaded
+  or published and is not official signing material.
+
+**Limits.** This is **host-only packaging evidence**: **not a signed release**
+(the APK used a disposable local test key, not release signing material), no
+tag was created, nothing was uploaded or published, no device validation was
+performed, and the release job remains unexecuted. No completed-green CI
+conclusion is claimed for the literal head: a run had started but not concluded
+when this ledger was written.
+
+### Disposition
+
+- **P2-15 is addressed in Phase 1 (`7e18b13`), pending final comprehensive
+  review** — not claimed finally closed here.
+- **P1-02, P1-07 and P1-08 remain OPEN** (the three P1 items still open in the
+  round-10 review).
+- **P2-13 and P2-14 are unchanged** from the round-8/10 ledger (addressed in
+  Phase A/B, pending final comprehensive review).
+- No device, merge or release claim: this head is **not device-verified, not
+  independently merge-ready and not release-ready**; no tag, no publish and no
+  release claim.
+
 ## Round 8 / P1-08 (2026-11-26) — rebuilt loaders integrated; post-review hardening; gate still OPEN
 
-This section is authoritative for the current head of
+This section is authoritative for the **Phase B code head** of
 `fix/native-exploit-robustness` (`0ea022fd4dac054ad37e1cf0809e56a8604eaaba`,
-Phase B). The round-8 review covered head `36a11bc`; two increments landed
+Phase B), not for the literal head (round 11 above). The round-8 review covered head `36a11bc`; two increments landed
 after that review: `0832331` (`fix(cmake): invalidate loader evidence before
 argument validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes
 inside every distributable APK`, Phase B). The producer change `2b59684` and
@@ -65,7 +147,7 @@ At the reviewed round-8 head (`36a11bc`) the host fixture suite
 hash, wrong size, missing file, reused output path) and the six CMake suites
 stood at **23 / 25 / 3 / 3 / 6 / 5** cases (KO policy / packaged-KO / APK
 packaging / APK content / target graph / loader hash). Those are historical
-counts for that head: at the current head the loader-hash suite has **16**
+counts for that head: at the Phase B code head the loader-hash suite has **16**
 cases and the APK-content suite has **7**, giving **23 / 25 / 3 / 7 / 6 / 16**.
 The host-gates marker set stays **7/7** unchanged.
 
@@ -104,15 +186,17 @@ Locally verified at the final increment (`0ea022f`; host-only):
   loader hash **16** cases).
 - JVM: **39 tests, 0 failures, 0 errors, 0 skips** (LaunchGate 4,
   ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13).
-- Workflow policy (`tests/workflow/test_policy.py`): **90 tests** (was 85);
+- Workflow policy (`tests/workflow/test_policy.py`): **90 tests** (was 85) at
+  the Phase B code head; at the round-11 literal head the policy suite is
+  **92 tests** (P2-15 regression added), with every other count unchanged.
   **7/7** host markers and **3/3** release markers unchanged.
 - CI status re-checked before finalizing this ledger: run **45708004129** at
-  the current code head `0ea022f` **completed with conclusion `success`**
+  the Phase B code head `0ea022f` **completed with conclusion `success`**
   (host-only evidence, **not** device validation or a release claim); its log
   confirms 23/25/3/7/6/16 CMake cases, 39 JVM tests and 7/7 markers. Runs
   **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
   **45697296267** (`bb83849`) are also completed `success`, but are **earlier
-  heads**. No exact current-head count is asserted from an earlier log.
+  heads**. No exact code-head count is asserted from an earlier log.
 
 ### Disposition
 
@@ -137,15 +221,16 @@ Locally verified at the final increment (`0ea022f`; host-only):
 - run6 (classic, 2026-11-17) and run8 (Next, 2026-11-17) — and every earlier
   CI run — are **historical**: they validated the previous loaders and earlier
   implementations, never these rebuilt binaries or this head. No device run
-  validates the current head.
+  validates the literal head.
 - **Auto Soft Reboot and Start on Boot remain disabled by default and
   unvalidated.** No tag was created and no release was published; this head is
   not device-verified, not independently merge-ready and not release-ready.
 
 ## Round-6 repair (2026-11-25) — historical (round-6 head `d72838d`)
 
-> **Historical section.** The round-8/P1-08 section above is authoritative for
-> the current head; this section describes the round-6 head only.
+> **Historical section.** The round-11 section above is authoritative for the
+> literal head (round 8/P1-08 for the Phase B code head `0ea022f`); this section
+> describes the round-6 head only.
 
 This section was authoritative for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). **Every section below is
@@ -187,7 +272,7 @@ device validation.
   **14a/14b now actually execute** and pass their strict SHA-256 mismatch and
   recovery assertions.
 - **Round-6-head host results (local, host-only; historical counts — the
-  current head is tabulated in the round-8 section above):** native **61**
+  Phase B code head is tabulated in the round-8 section above):** native **61**
   status cases plus `final_publish` (canonical token / permission / atomicity /
   reader / bootfail / bound + unbound recovery), **13** proc-scan, **26** ELF,
   **16 + 14 + 10** device-version; CMake **23 / 25 / 3 / 3 / 6** cases (KO
@@ -210,7 +295,8 @@ device validation.
 ## Round-5 repair (2026-11-25) — historical (round-5 head)
 
 > **Historical section.** It was authoritative for the pre-round-6 head; the
-> round-8 section at the top is authoritative for the current head. Its counts,
+> round-11 section at the top is authoritative for the literal head (round 8 for
+> the Phase B code head `0ea022f`). Its counts,
 > CI shape and dispositions describe the round-5 implementation only.
 
 ### Stable-ID disposition (round-5, 9 findings carried forward)
@@ -290,7 +376,8 @@ build is not a safety certificate.
 ## Historical — PR #1 hardening (CI build reliability), integrated into the rebased head
 
 > **Historical section.** It describes the PR #1 baseline as integrated before
-> round 6; the round-8 section at the top is authoritative for the current head.
+> round 6; the round-11 section at the top is authoritative for the literal head
+> (round 8 for the Phase B code head `0ea022f`).
 
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
@@ -364,7 +451,8 @@ distribution SHA-256; AGP **9.5.0** effective through
 ### Post-rebase integration
 
 PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
-head. The round-8 section at the top is authoritative for the current head; the
+head. The round-11 section at the top is authoritative for the literal head
+(round 8 for the Phase B code head `0ea022f`); the
 round-5 section above and the host-suite counts, stable-ID disposition table and
 validation boundary in the round-4 section below are historical. run6/run8 and
 every prior CI run predate
@@ -377,8 +465,9 @@ the gated `v*` tag path.
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
 > **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
-> describe the round-4 implementation, not the current head. The round-8
-> section at the top is authoritative for the current head.
+> describe the round-4 implementation, not the literal head. The round-11
+> section at the top is authoritative for the literal head (round 8 for the
+> Phase B code head `0ea022f`).
 
 **All evidence in this section is host-only.** No hardware run validates the
 current head of `fix/native-exploit-robustness`; a green build does not certify
@@ -455,9 +544,10 @@ build does not certify safe privileged execution.
 
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
 
-> Historical section. The round-8 section at the top of this file is
-> authoritative for current counts, cleanup timing, the recovery channel and
-> the current head. This section, the round-4 section above it and the phase
+> Historical section. The round-11 section at the top of this file is
+> authoritative for current counts (workflow policy 92), cleanup timing, the
+> recovery channel and the literal head (round 8 for the Phase B code head
+> `0ea022f`). This section, the round-4 section above it and the phase
 > sections below are kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**

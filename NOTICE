@@ -31,7 +31,19 @@ rebuilds are host-build-attested (classic pair from the successful `pair ksud`
 job of CI run 45674540939, which failed overall in its separate generic job;
 Next generic from CI run 45674545588, which succeeded overall) but are
 **not** device-validated. Build-time sha256 + size pins are enforced by
-`app/src/main/jni/verify_loader_hashes.cmake`:
+`app/src/main/jni/verify_loader_hashes.cmake`.
+
+AGP 9.5 strips debug symbols from bundled release JNI libraries by default.
+Since Phase 1 (`7e18b13`) `app/build.gradle.kts` `packaging.jniLibs` preserves
+both loader entries (`keepDebugSymbols += "**/libksud.so"` and
+`keepDebugSymbols += "**/libksudnext.so"`) so packaged release bytes stay
+identical to the pins below; no pin was changed. Before that fix, a local
+release build from `74b12df` bundled `ecac0d2b…` (3,737,888 B) for
+`libksud.so` and `ea0505cd…` (4,728,320 B — same size as the reviewed bytes,
+so only SHA-256 distinguished it) for `libksudnext.so`. Non-tag CI builds Debug
+only and the tagged release job was unexecuted. See `CHANGELOG.md` round 11.
+
+Pinned artifacts:
 
 1. `libksud.so` — KernelSU userspace loader ("ksud"), Samsung-patched build
    - Upstream:        https://github.com/tiann/KernelSU — tag v3.3.0
@@ -146,8 +158,8 @@ The run6/run8 hardware results recorded in `PORTING-GZIF.md` and `CHANGELOG.md`
 (2026-11-17), and every earlier CI run, belong to the **historical
 implementation only**: the old multi-marker status protocol, the then-current
 `dfroot.ko` pins and the old preference-write path. They predate the rebase
-onto the merged PR #1 head. No hardware run validates the current head of
-`fix/native-exploit-robustness` (round-6 repair, `d72838d`, 2026-11-25); that
+onto the merged PR #1 head. No hardware run validates the round-6 head of
+`fix/native-exploit-robustness` (`d72838d`, 2026-11-25); that
 head is **host-tested only and UNVALIDATED on device**, and a successful build
 does not certify safe privileged execution. run6/run8 and all earlier CI runs,
 including 45523079469 and the RED pre-repair run 45558516540, validate only
@@ -200,20 +212,28 @@ historical implementations or pre-rebase heads, not this head.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
-- **Validation status at the current head (`0ea022f`; host-only).** The
-  round-8 review covered head `36a11bc`; the two post-review increments are
-  `0832331` (`fix(cmake): invalidate loader evidence before argument
-  validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes inside
-  every distributable APK`, Phase B). Producer `2b59684` and loader integration
-  `413a5cb` are earlier/mid-increment points, **not** the head. CI re-check:
-  run **45708004129** at `0ea022f` **completed with conclusion `success`**
-  (host-only, not device validation); runs **45706111735** (`0832331`),
-  **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
-  completed `success` but are **earlier heads**. The counts below are confirmed
-  by the current-head log; no current-head count is asserted from an earlier
-  log. No
-  device run validates the current head; no tag was created and no release was
-  published.
+- **Validation status at the literal/current head (`7e18b13`; host-only).**
+  Its immediate parent is the docs commit `74b12df`; the Phase B / P2-14 code
+  head is `0ea022f` and the round-8 reviewed head is `36a11bc` — none of those
+  is the literal head. The round-8 review covered `36a11bc`; the post-review
+  increments were `0832331` (`fix(cmake): invalidate loader evidence before
+  argument validation`, Phase A) and `0ea022f` (`fix(ci): verify loader bytes
+  inside every distributable APK`, Phase B). Producer `2b59684` and loader
+  integration `413a5cb` are earlier/mid-increment points. **Round-10 scope
+  (not retroactively changed):** consolidated review comment **7126155178** at
+  `74b12df` reported **0 new findings, 0 P2 open and 3 P1 open
+  (P1-02 / P1-07 / P1-08)**, left the head unchanged and completed CI run
+  **45710535038** with `success`. **P2-15 was NOT found by that review**; an
+  author-local release build found it (non-tag CI builds Debug only; the tagged
+  release job was unexecuted). CI re-check: run **45708004129** at `0ea022f`
+  **completed with conclusion `success`** (host-only, not device validation);
+  runs **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
+  **45697296267** (`bb83849`) are also completed `success` but are **earlier
+  heads**. The counts below are confirmed by the Phase B code-head log; no
+  literal-head count is asserted from an earlier log and no completed-green CI
+  conclusion is claimed for `7e18b13` (a run had started but not concluded at
+  documentation time). No device run validates the literal head; no tag was
+  created and no release was published.
 - **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
   DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
   (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
@@ -229,6 +249,21 @@ historical implementations or pre-rebase heads, not this head.
   choke. Release markers remain **3/3** and host markers **7/7**. This is a
   host/CI packaging check, **not** device validation, and it does not close any
   open safety/release gate.
+- **Local release rebuild at `7e18b13` (P2-15 host-only evidence).** A clean
+  `:app:clean :app:assembleRelease` with a **disposable local test key**
+  (`/home/samson1357924/dfroot-device-test.jks`; KO sha256
+  `94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7`)
+  produced `DFRoot_4.8-gzif.apk` sha256
+  `33c3742dc777f82a9e8f0b61ca1054b198ba9c75ec22b3503125cd184005fec9`.
+  Both loader entries occur exactly once; extracted bytes are `731c3fa1…` /
+  5,127,584 B and `7f28f1fb…` / 4,728,320 B, the real
+  `verify_loader_hashes.cmake` manifest status is `verified`, and the verbatim
+  P2-14 gate script (`Verify bundled loader bytes in every distributable APK`)
+  passed with the pins file and one index row (APK + APK sha + both loader
+  shas). Evidence: `/mnt/240G_SSD/opencode_tmp/p2-15-evidence`. This is **host-only
+  packaging evidence, not a signed release**: the key was never tagged,
+  uploaded or published and is not official signing material; there was no
+  device validation, no tag/publish and the release job remains unexecuted.
 - **All CI suites are asserted.** The host suites are **61** status cases plus
   the `final_publish` canonical/permission/atomicity/reader/bootfail/bound+unbound
   recovery checks, 13 proc-scan, **28 ELF**, **40 loader-stage** cases
@@ -242,12 +277,13 @@ historical implementations or pre-rebase heads, not this head.
   skip OFF in every CMakeCache, the complete set of verified KO and packaged
   manifests with matching hashes, and every staged APK hash. The publishing
   path adds 3/3 distributable-evidence gates before a single upload choke point.
-  The workflow policy suite (`tests/workflow/test_policy.py`) runs **90 tests**
-  (was 85). The informational
+  The workflow policy suite (`tests/workflow/test_policy.py`) runs **92 tests**
+  (was 90 at rounds 8–10 and 85 earlier; P2-15 regression added at `7e18b13`).
+  The informational
   provenance upload uses `if-no-files-found: error`; no required gate uses
   `continue-on-error`. The pre-repair head `4a81aa5` was RED at CI run
   45558516540 (mutating-objcopy fixture invoked directly with git mode 100644);
-  the current head runs it via a generated 755 launcher with explicit `python3`,
+  the Phase B code head runs it via a generated 755 launcher with explicit `python3`,
   so cases 14a/14b actually execute and pass.
 
 - **PR #1 build/signing baseline (integrated).** Toolchain: Gradle wrapper
@@ -305,6 +341,11 @@ historical implementations or pre-rebase heads, not this head.
 - **P2-13 / P2-14** were addressed in this round (Phase A `0832331` / Phase B
   `0ea022f`) after the round-8 review; both are **addressed in this round,
   pending final comprehensive review**, not claimed finally closed.
+- **P2-15** (AGP release-JNI debug-symbol stripping) was addressed in Phase 1
+  (`7e18b13`) via `packaging.jniLibs` `keepDebugSymbols` for both loaders plus
+  regression/positive/mutation policy tests (90 → 92). Host-only local-key
+  release evidence is recorded above; **pending final comprehensive review**,
+  not claimed finally closed. No device, merge or release claim.
 - **P1-08 release gate — still OPEN.** Both bundled loaders were rebuilt from
   the patched source to consume a root-owned stage at `/data/adb/.ksud-stage`
   (validated by fd before promotion to `/data/adb/ksud`), and the DFRoot

@@ -27,20 +27,28 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
 
 > [!WARNING]
-> **Validation boundary.** The current head of `fix/native-exploit-robustness`
-> is `0ea022f` (Phase B, `fix(ci): verify loader bytes inside every
-> distributable APK`), landed after the round-8 reviewed head `36a11bc` and
-> Phase A `0832331` (`fix(cmake): invalidate loader evidence before argument
-> validation`). The producer change `2b59684` and loader integration `413a5cb`
-> are earlier/mid-increment points, **not** the head. CI status re-checked
-> before finalizing this ledger: run **45708004129** at `0ea022f` **completed
-> with conclusion `success`** (host-only, not device validation); its log
-> confirms the counts below. Runs **45706111735** (`0832331`),
+> **Validation boundary.** The literal/current head of
+> `fix/native-exploit-robustness` is `7e18b13` (Phase 1 packaging fix for P2-15).
+> Its immediate parent is the docs commit `74b12df`; the Phase B / P2-14 code
+> head is `0ea022f` (`fix(ci): verify loader bytes inside every distributable
+> APK`) and the round-8 reviewed head is `36a11bc` — none of these is the
+> literal head. The producer change `2b59684` and loader integration `413a5cb`
+> are earlier/mid-increment points. **Round-10 scope (not retroactively
+> changed):** consolidated review comment **7126155178** at `74b12df` reported
+> **0 new findings, 0 P2 open and 3 P1 open (P1-02 / P1-07 / P1-08)**, left the
+> head unchanged and completed CI run **45710535038** with `success`. **P2-15
+> was NOT found by that review**; an author-local release build found it
+> because non-tag CI builds Debug only and the tagged release job was never
+> executed. CI status re-checked earlier: run **45708004129** at `0ea022f`
+> **completed with conclusion `success`** (host-only, not device validation);
+> its log confirms the counts below. Runs **45706111735** (`0832331`),
 > **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
-> completed `success` but are **earlier heads**; no current-head count is
-> asserted from an earlier log. run6/run8 happened on 2026-11-17 against the
+> completed `success` but are **earlier heads**; no literal-head count is
+> asserted from an earlier log and no completed-green CI conclusion is claimed
+> for `7e18b13` (a run had started but not concluded at documentation time).
+> run6/run8 happened on 2026-11-17 against the
 > **historical implementation** (old multi-marker protocol, then-current KO
-> pins, old preference path); no hardware run validates the current head.
+> pins, old preference path); no hardware run validates the literal head.
 > That head is **host-tested only and UNVALIDATED on device**; a successful
 > build does not certify safe privileged execution.
 > An **unconditional** `host-gates` job runs **all** host suites as required
@@ -63,9 +71,19 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > a single pre-upload choke point before `publish` can run. This is a host/CI
 > packaging gate, **not** device validation; release markers stay 3/3 and host
 > markers stay 7/7.
+> **Loader-byte preservation (P2-15, Phase 1 `7e18b13`):** the Phase B gate
+> checks bytes inside distributable APKs, but AGP 9.5 strips debug symbols
+> from bundled release JNI libraries by default. A local release build from
+> `74b12df` packaged different loader bytes even though the committed inputs
+> and build-time pins were correct. `app/build.gradle.kts` now sets
+> `packaging.jniLibs` `keepDebugSymbols += "**/libksud.so"` and
+> `keepDebugSymbols += "**/libksudnext.so"` so both entries keep their reviewed
+> bytes in release APKs. Host-only local-key evidence, no release/device claim
+> (see `CHANGELOG.md` round 11).
 > Provenance manifests are informational evidence, **not** an attestation or
 > an independent reproducible-build proof.
-> Host suites at the final increment (`0ea022f`, local verification): **61**
+> Host suites at the Phase B code head (`0ea022f`, local verification; unchanged
+> at the literal head except the workflow policy count below): **61**
 > status + `final_publish` + 13 proc-scan + **28 ELF** + 16/14/10 device-version
 > + **40 loader-stage** cases (`tests/native/loader_stage_test.c`) and the
 > helper-size suite (`tests/native/helper_size_test.c`), CMake **23/25/3/7/6/16**
@@ -75,7 +93,8 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > with a strict **39/0/0/0** XML assertion, **7/7** host suite markers on every
 > event and **3/3** release markers (plus the nonempty gate index, the required
 > per-APK loader index and single upload choke point) on the tag path. Workflow
-> policy (`tests/workflow/test_policy.py`): **90 tests** (was 85).
+> policy (`tests/workflow/test_policy.py`): **92 tests** (was 90 at rounds 8–10
+> and 85 earlier; P2-15 regression added at `7e18b13`).
 > No required gate uses `continue-on-error`.
 > **KO pins:** the byte gate rejects unknown bytes but still accepts the two
 > known obsolete pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). Release is
@@ -110,14 +129,17 @@ the current head is host-tested and UNVALIDATED on device (boundary below).
 > on-device full-chain validation**: documentation is not a fix and unverified
 > privileged content must not be consumed or distributed. run6/run8 are
 > historical and validate only the old loaders. **P1-02 and P1-07 also remain
-> OPEN safety/release gates**; P2-13 and P2-14 were addressed in this round
-> (Phase A/B) after the round-8 review and are **pending final comprehensive
-> review**, not claimed finally closed. Auto Soft Reboot and Start on Boot
-> remain disabled and unvalidated; no device run validates the current head,
+> OPEN safety/release gates**; P2-13 and P2-14 are unchanged (Phase A/B,
+> pending final comprehensive review). **P2-15 was addressed in Phase 1
+> (`7e18b13`) and is pending final comprehensive review** — not claimed
+> finally closed. Auto Soft Reboot and Start on Boot
+> remain disabled and unvalidated; no device run validates the literal head,
 > no tag was created and no release was published, and this head is **not
-> device-verified, not independently merge-ready and not release-ready**. See
-> `CHANGELOG.md` round 8 (2026-11-26) and `PORTING-GZIF.md` §19 for the
-> test/lifecycle detail.
+> device-verified, not independently merge-ready and not release-ready**. The
+> only new local APK used a disposable local test key, is not official signing
+> material and was never tagged, uploaded or published; the release job remains
+> unexecuted. See `CHANGELOG.md` round 11 and round 8 (2026-11-26) and
+> `PORTING-GZIF.md` §19 for the test/lifecycle detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into

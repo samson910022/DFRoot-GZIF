@@ -1985,18 +1985,25 @@ def assert_smoke_identity(gradle: str, smoke: str) -> None:
 def assert_loader_keep_debug_symbols(gradle: str) -> None:
     """Check the Gradle source contract for the two reviewed loader blobs.
 
-    Both keepDebugSymbols exemptions must appear exactly once in the whole
-    file and exactly once inside ``packaging { jniLibs { ... } }``, where the
-    exemption is variant-independent.  This is a source-contract check only;
-    it is not a substitute for the tag-time final-APK byte gate that hashes
-    the extracted loader libraries.
+    Both keepDebugSymbols exemptions must be ACTIVE (not commented out)
+    exactly once in the whole file and exactly once inside
+    ``packaging { jniLibs { ... } }``, where the exemption is
+    variant-independent.  This is a source-contract check only; it is not a
+    substitute for the tag-time final-APK byte gate that hashes the extracted
+    loader libraries.
     """
-    block = re.search(r"packaging\s*\{\s*jniLibs\s*\{(?P<body>[^{}]*)\}\s*\}", gradle)
+    # A commented-out exemption is not an exemption: ignore whole-line Kotlin
+    # comments before locating/counting so a "// keepDebugSymbols ..." cannot
+    # silently reintroduce the stripped-bytes defect.
+    active = "\n".join(
+        line for line in gradle.splitlines() if not line.lstrip().startswith("//")
+    )
+    block = re.search(r"packaging\s*\{\s*jniLibs\s*\{(?P<body>[^{}]*)\}\s*\}", active)
     if block is None:
         raise AssertionError("gradle is missing a packaging { jniLibs { ... } } block")
     body = block.group("body")
     for fragment in LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS:
-        whole_count = gradle.count(fragment)
+        whole_count = active.count(fragment)
         if whole_count != 1:
             raise AssertionError(
                 f"{fragment!r} must appear exactly one time in gradle, got {whole_count}"
@@ -3599,6 +3606,11 @@ class MutationDetectionTests(unittest.TestCase):
                 self.assertNotEqual(mutated, gradle)
                 with self.assertRaisesRegex(AssertionError, "exactly one"):
                     assert_loader_keep_debug_symbols(mutated)
+            with self.subTest(mutation=f"comment out {fragment}"):
+                commented = gradle.replace(fragment, f"// {fragment}", 1)
+                self.assertNotEqual(commented, gradle)
+                with self.assertRaisesRegex(AssertionError, "exactly one"):
+                    assert_loader_keep_debug_symbols(commented)
         typo = gradle.replace(
             'keepDebugSymbols += "**/libksudnext.so"',
             'keepDebugSymbols += "**/libksudnextt.so"',
