@@ -10,6 +10,7 @@
 <!-- Modified 2026-11-25 (DFRoot GZIF): record Phase 5 Task 5.1-5.5 progress, durable BOOT_COUNT claim protocol, verification, and mutation evidence; Checkpoint 5 remains unchecked pending independent review. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the Phase 5 review-fix test round, deterministic finish assertions, real DE-store restart coverage, and mutation evidence; Checkpoint 5 remains unchecked. See NOTICE. -->
 <!-- Modified 2026-11-25 (DFRoot GZIF): record the re-review 1 repair round (R2-10..R2-16), findings closure, verification numbers, and open post-push/hardware gates. Round checkpoint and final comprehensive review remain unchecked. See NOTICE. -->
+<!-- Modified 2026-11-26 (DFRoot GZIF, R7.4): record R7.1–R7.3 phases and an UNCHECKED Checkpoint R7; add the PENDING Final 7.1–7.6 gate; scope historical APPROVE statements to their own heads. Documentation/coverage consolidation only, no behavior change. See NOTICE. -->
 # PR #2 Repair Task List
 
 ## Phase 0: Build and Test Foundation
@@ -855,13 +856,16 @@ payload, privileged-container or APK work, and no device-ANR proof.
   `hostExecutorIsOwnedBoundedAndShutdownGracefully` test is unchanged. No device
   ANR proof and no CI-green claim.
 
-## Final Comprehensive Review — R6 head `9e1aff7` — PENDING
+## Historical final comprehensive review — R6 (completed at `92572ea`)
 
-The main agent runs these four reviews after this documentation consolidation.
-All six checkboxes are intentionally **UNCHECKED**; the APPROVE outcomes above
-belong to earlier heads only. Keep the PR draft/open unless the user explicitly
-asks to mark it ready; pushing or green host CI never implies hardware
-validation or merge approval.
+Four independent reviews ran at the historical R6 final head (code `9e1aff7`,
+docs and final fix loop `92572ea`); all APPROVE, so the Final 6.1–6.6 boxes
+below are checked **for that head only**. The APPROVE outcomes above belong to
+earlier heads only. This historical outcome is scoped to `92572ea` and is
+**not** an approval of the current R7 HEAD `57df54c`; the pending final reviews
+for that head are in the R7 section at the end of this file. Keep the PR
+draft/open unless the user explicitly asks to mark it ready; pushing or green
+host CI never implies hardware validation or merge approval.
 
 Final gate completed at HEAD `92572ea` (R6 code `9e1aff7` + final fix loop):
 four fresh independent comprehensive reviews all APPROVE (correctness/lifecycle,
@@ -894,3 +898,69 @@ in the Activity service-start failure catch (responsiveness only; R6 bounded
 the blocked flush wait and offloaded foreground platform calls, but short
 caller-side `startsLock` bookkeeping remains in rare refusal paths). Each is
 fail-closed or low-probability and does not silently lower the review bar.
+
+## Seventh repair round (R7.1–R7.3, 2026-11-26) — phases and checkpoint
+
+Final local HEAD `57df54c` (R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`)
+on top of the R6 close `92572ea` (R6 code head `9e1aff7`). Addresses Re-review
+6. **R2-24 and R2-17 fixed in the reviewed host scope; R2-18 SCOPED /
+DOCUMENTED (not fixed/closed); R2-14 and R2-16 remain SCOPED / OPEN gates;
+R2-02 and R2-07 linked only.** Focused host-only verification and independent
+static reviews only: no fresh full-suite/CI-green, device, ADB, payload,
+privileged-container, crash/power-loss or APK work; no device-ANR proof and no
+FGS-grace proof.
+
+- [x] R7.1 (`985fa71`, R2-24): notification construction inside its own
+  `RuntimeException` boundary, outside `startsLock`; correlated honest
+  `REJECTED` + one `stopSelf`, no admission/barrier/owner/foreground claim;
+  host-only throwing seam null in production. **83 focused tests, 0 failures**;
+  two reviews APPROVED, no Required/Critical.
+- [x] R7.2 (`36076de`, R2-17): exactly one read-only ledger observation per
+  watch tick drives both reconciliation and the final-tick unconfirmed decision;
+  host-only lookup seam inert in production. **52 focused `MainActivityTest`
+  cases, 0 failures.** Required fix loop: test quality first REQUEST CHANGES —
+  initial tests non-discriminating → replaced with a red-green discriminator
+  (red under the old two-read algorithm, green after the fix) and one-lookup
+  assertions, re-reviewed RESOLVED. Correctness APPROVE; both reviews APPROVE
+  otherwise.
+- [x] R7.3 (`57df54c`, R2-18): **SCOPED / DOCUMENTED, not fixed or closed**;
+  zero production behavior change (docs + harmless host fixtures). Residual
+  recorded explicitly: a single `flushInProgress` check lets a duplicate start
+  briefly contend under `startsLock` held by express foreground attach with no
+  active flush; refusal/`onDestroy()` take short caller-side sections. **85
+  focused tests, 0 failures**; two reviews APPROVED (scope honesty, test
+  quality). Not a device ANR proof, not an FGS-grace proof.
+- [ ] Checkpoint R7: phases complete at HEAD `57df54c`, but fresh full
+  verification and the four final comprehensive reviews are PENDING with the
+  main agent. Open gates: R2-14 publication/abnormal-death window, R2-16 OFF
+  atomicity, R2-18 documented `startsLock` contention, Direct Boot FGS
+  eligibility, real soft-reboot safety, `/dev` marker-root trust, sticky-bit
+  owner, AES key in argv, no recovery UI, `BOOT_COUNT` diagnostic. Earlier R5/R6
+  residuals remain (per-session watch budget, no explicit `onPause()` cancel,
+  one-shot sweep, four-slot terminal replay drops, rare caller-side `startsLock`
+  sections); signed-release packaged-pin gate inherited from PR #1 policy;
+  abnormal-death publication window OPEN. No device ANR proof and no CI-green
+  claim.
+
+Historical APPROVE outcomes (R3/R4/R5/R6, including Final 6.1–6.6 at `92572ea`)
+are scoped to their own heads and are **not** an approval of the current R7 HEAD
+`57df54c`. R2-02 and R2-07 remain linked to R2-16/R2-14 only.
+
+## Final Comprehensive Review — R7 head `57df54c` — PENDING
+
+Four fresh independent reviews are run by the main agent on the current HEAD
+after this documentation consolidation. The six checkboxes below are
+intentionally **UNCHECKED**; all APPROVE outcomes above belong to earlier heads
+only (Final 6.1–6.6 were completed at the historical head `92572ea`). Keep
+PR #2 draft/open unless the user explicitly asks to mark it ready; pushing or
+green host CI never implies hardware validation, device safety or merge/release
+approval.
+
+- [ ] Final 7.1: correctness/lifecycle independent review — pending.
+- [ ] Final 7.2: security/staging/environment independent review — pending.
+- [ ] Final 7.3: test/build/CI independent review — pending.
+- [ ] Final 7.4: architecture/native integration independent review — pending.
+- [ ] Final 7.5: No Required/Critical findings; any REQUEST CHANGES resolved
+  through fix → re-review; residuals and OPEN gates recorded — pending.
+- [ ] Final 7.6: Fresh full verification complete; approved commit series
+  pushed — pending.

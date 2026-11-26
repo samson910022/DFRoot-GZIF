@@ -25,8 +25,9 @@
 > repair round (rebase onto PR #1, CI integration, R2-12/13/14/16/17/18/19 and
 > the R2-04 caveat, with current counts and gates); **§19** records the fourth
 > repair round and **§20** is a short dated note on the sixth repair round's
-> host-side bounded UI work. No device or privileged validation was done for
-> any 2026-11-25/2026-11-26 repair revision.
+> host-side bounded UI work; **§21** is a short dated note on the seventh repair
+> round's host-only app correctness work. No device or privileged validation was
+> done for any 2026-11-25/2026-11-26 repair revision.
 
 ---
 
@@ -1052,6 +1053,27 @@ Phase commits, focused verification counts, fix loops and the honest residual
 list are in `README.md` and `CHANGELOG.md`; the final comprehensive reviews at
 this head are the main agent's unchecked gate. No device, ADB, payload,
 privileged-container, crash/power-loss or APK work was done for this round.
+
+## 21. Seventh repair round (R7.1–R7.3, 2026-11-26) — short note
+
+Short dated note only; **§5, §11, §12 and §14 remain the 2026-11-17 historical
+hardware-validation ledger and are unchanged by this round.** Final local HEAD
+`57df54c` (R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`) on top of the R6
+close `92572ea`. This round addresses Re-review 6: **R2-24 fixed in the reviewed
+host scope** (notification-setup exception now fails closed with a correlated
+honest rejection and one lifetime resolution), **R2-17 fixed in the reviewed
+host scope** (one read-only ledger observation per outcome-watch tick, with an
+inert host-only seam and a red-green discriminator), and **R2-18 SCOPED /
+DOCUMENTED, not fixed or closed** (residual main-thread `startsLock` contention
+and OS foreground-deadline gate honestly recorded; zero production behavior
+change in that phase). **R2-14 and R2-16 remain SCOPED / OPEN gates — not closed
+and not proved safe**; R2-02 and R2-07 are linked only. Phase counts, fix loops
+and the full residual list are in `README.md` and `CHANGELOG.md`. All evidence
+is focused host-only and static review — no device, ADB, payload,
+privileged-container, crash/power-loss or APK work, no device-ANR or
+FGS-grace proof, and no claim that green host CI is device safety or release
+approval. The four final comprehensive reviews at the current HEAD are the main
+agent's unchecked gate.
 
 ---
 

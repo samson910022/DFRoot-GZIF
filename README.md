@@ -48,6 +48,65 @@ separate `outcomeLock` and the strict `lock -> outcomeLock` order are unchanged;
 this phase adds Javadoc and tests only, with no executable production change.
 R2-14 and R2-16 remain OPEN gates.
 
+## Seventh repair round (R7.1–R7.3) — consolidated summary (2026-11-26)
+
+Final local HEAD `57df54c` (R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`)
+on top of the R6 close `92572ea` (R6 code head `9e1aff7`). This round addresses
+Re-review 6. The three dispositions are:
+
+- **R2-24 — FIXED in the reviewed host scope (R7.1, `985fa71`).** Notification
+  construction now fails closed inside its own `RuntimeException` boundary,
+  outside `startsLock`: one request-correlated `REJECTED` with an honest
+  "notification setup failed" reason and exactly one `stopSelf` for that start,
+  with no WakeLock, admission, barrier, owner-token or foreground claim.
+  **83 focused host tests, 0 failures**; two independent reviews APPROVED.
+- **R2-17 — FIXED in the reviewed host scope (R7.2, `36076de`).** The bounded
+  outcome watch takes exactly **one** read-only ledger observation per tick; the
+  same record drives reconciliation and the final-tick unconfirmed decision, so
+  a late outcome with a lost observer post can no longer leave the pending UI
+  blank/disabled. A host-only lookup seam, inert and writes-nothing in
+  production, makes a deterministic **red-green** discriminator: red under the
+  old two-read algorithm, green after the fix. **52 focused `MainActivityTest`
+  cases, 0 failures.** Test quality first found the initial tests
+  non-discriminating → replaced with the discriminator and re-reviewed RESOLVED;
+  correctness APPROVE; both reviews APPROVE otherwise.
+- **R2-18 — SCOPED / DOCUMENTED, NOT fixed or closed (R7.3, `57df54c`).** Zero
+  production behavior change: an honest scope note plus harmless host fixtures.
+  The main-thread start checks `flushInProgress` once, so a duplicate arriving
+  while the express worker holds `startsLock` in foreground attach (with **no**
+  active flush) can still briefly contend on that monitor; the
+  refused-express fallback and `onDestroy()` bookkeeping also take short
+  caller-side `startsLock` sections that a slow platform call can delay.
+  **85 focused host tests, 0 failures**; two independent reviews APPROVED. This
+  is bounded host-only evidence of the residual and the safety gate, **not a
+  device ANR proof and not a foreground-service-grace-timing proof**.
+
+**Evidence framing.** All of the above is focused host-only verification plus
+independent static review: no device, ADB, payload, privileged-container,
+crash/power-loss or APK work, no fresh full-suite run, and no device-ANR or
+foreground-service-grace proof. A red/green discriminator built on an inert
+host-only seam proves the host algorithm change, **not** device behavior.
+**Green host CI is not device safety and is not release approval.**
+
+**Still-open gates and residuals (unchanged unless noted).** **R2-14**
+(publication/acknowledgement observation window and abnormal-death window) and
+**R2-16** (non-atomic OFF authorization) remain **SCOPED / OPEN** — neither is
+closed or proved safe. **R2-02 and R2-07 remain linked to those gates only.**
+The R2-18 `startsLock` contention is documented, not fixed. Earlier R5/R6
+residuals remain: per-session 25-tick watch budget, no explicit `onPause()`
+cancel, one-shot post-winner sweep, four-slot terminal replay drops, and rare
+short caller-side `startsLock` sections. Also unchanged: signed-release job
+packaged-pin gate inherited from PR #1 policy, no in-app recovery UI,
+`BOOT_COUNT` diagnostic only, `/dev` marker-root trust, and the OPEN
+abnormal-death publication window.
+
+**Final comprehensive reviews are PENDING at the current HEAD `57df54c`:**
+the main agent runs four fresh independent reviews after this consolidation.
+Historical APPROVE outcomes (including R6 Final 6.1–6.6 at `92572ea`) are
+scoped to their own heads and are **not** an approval of the current HEAD.
+Keep PR #2 draft/open; `tasks/plan.md` and `tasks/todo.md` keep Checkpoint R7
+and Final 7.1–7.6 UNCHECKED.
+
 ### R7.1 (2026-11-26) — notification setup failure boundary — short note (R7.4 consolidates)
 
 Notification construction in the foreground host now runs inside the same fail-closed

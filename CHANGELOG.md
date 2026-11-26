@@ -1,5 +1,39 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-26 — Seventh repair round (R7.1–R7.3) consolidated — PR #2 / branch `fix/app-correctness-safety`
+
+Authoritative record of the **seventh repair round** (final local HEAD
+`57df54c`; R7.1 `985fa71`, R7.2 `36076de`, R7.3 `57df54c`) on top of the R6
+close (`92572ea`, R6 code head `9e1aff7`). It addresses Re-review 6.
+Dispositions: **R2-24 fixed in the reviewed host scope; R2-17 fixed in the
+reviewed host scope; R2-18 SCOPED / DOCUMENTED (NOT fixed and NOT closed).**
+**R2-14 and R2-16 remain SCOPED / OPEN gates — not closed and not proved
+safe.** **R2-02 and R2-07 are linked only** — the owning items remain the
+R2-16 authorization gate and the R2-14 publication gate. All evidence below is
+focused host-only verification plus independent static reviews; no device,
+ADB, payload, privileged-container, crash/power-loss or APK work, no fresh
+full-suite or CI-green result and no device-ANR or foreground-service-grace
+proof is claimed. Older R7.x notes below are historical phase records; the
+counts and gate states in this section are current.
+
+### Phase table — commit (verified via `git log`), finding, fix loop, focused verification, review outcome
+
+| Phase / commit | Finding | Fix loop and focused verification | Review outcome |
+|---|---|---|---|
+| R7.1 `985fa71` | R2-24 (notification-construction exception escape) | `buildNotification()` stays outside `startsLock` (R5.4 serialization unchanged) but moves inside its own `RuntimeException` boundary: on failure it logs, publishes one request-correlated `REJECTED` with the distinct honest reason `"notification setup failed: …"`, resolves that start's lifetime with exactly one `stopSelf`, and starts nothing. No WakeLock, admission command, owner-token change, barrier mutation, foreground attach/removal claim or second `stopForeground`; `START_NOT_STICKY` unchanged. A host-only one-shot throwing seam is null in production. **83 focused tests, 0 failures.** | Two independent reviews APPROVED (exception boundary, test quality), no Required/Critical. |
+| R7.2 `36076de` | R2-17 (final-tick two-observation gap) | Exactly one read-only ledger observation per watch tick now drives both reconciliation and the final-tick unconfirmed decision, so a late correlated record with a lost observer post can no longer leave the pending UI blank/disabled. A host-only lookup seam (null in production, writes nothing) lets a deterministic fixture script disagreeing observations: it goes **red under the old two-read algorithm and green after the fix** (red-green verified), with exact one-lookup-per-tick assertions. Ledger 32, reporter 64, watch 25 × 200 ms, one-per-token unconfirmed status and no replay/retry/authorize/durable-clear unchanged. **52 focused `MainActivityTest` cases, 0 failures.** | Correctness review APPROVE; test quality first REQUEST CHANGES because the initial tests were **non-discriminating** → replaced with the red-green discriminator plus one-lookup assertions and re-reviewed RESOLVED. Both reviews APPROVE otherwise, no Required/Critical outstanding. |
+| R7.3 `57df54c` | R2-18 (residual `startsLock` monitor contention) | **SCOPED / DOCUMENTED, not fixed and not closed; zero production behavior change** (honest scope note + deterministic host fixtures only). Residual named explicitly: the main-thread start checks `flushInProgress` once, so a duplicate arriving while the express worker holds `startsLock` inside foreground attach with **no** active flush can still enter `registerStart`/duplicate checking and briefly contend on that monitor; the refused-express fallback and `onDestroy()` pending-work bookkeeping also take short caller-side `startsLock` sections that a slow platform call can delay. Harmless fixtures pin the fail-closed gate under those interleavings (one correlated `REJECTED`/`CANCELLED`, one lease close and lifetime resolution, no second lease, no submit/engine, no barrier, no duplicate `stopForeground`, `START_NOT_STICKY`) and graceful shutdown/drain of the owned express worker. **85 focused tests, 0 failures.** | Two independent reviews APPROVED (scope honesty, test quality), no Required/Critical. Bounded host-only evidence of the residual and the safety gate — **not** a device ANR proof and **not** an FGS-grace proof. |
+
+### R7 final gate state and residual items
+
+- **R2-24 — fixed in the reviewed host scope.** Notification setup failure fails closed with a correlated, honest rejection and exactly one lifetime resolution; no operation start or misleading pending state on that path.
+- **R2-17 — fixed in the reviewed host scope.** One observation per tick closes the final-tick gap; absence/unconfirmed is still never an outcome, admission, completion or permission to retry. The red-green discriminator relies on an inert host-only seam: it proves the host algorithm change, **not** device behavior.
+- **R2-18 — SCOPED / DOCUMENTED, NOT fixed and NOT closed.** The residual main-thread monitor contention and the OS foreground-deadline gate remain. R7.3 adds honest documentation and harmless fixtures only: no broad refactor, no weakened authorization, and foreground-ownership uncertainty never leads to continued work.
+- **R2-14 — OPEN gate, NOT closed or proved safe.** The publication/acknowledgement observation window and the abnormal-death window are unchanged; linked only here, no new device evidence.
+- **R2-16 — OPEN gate, NOT closed or proved safe.** The final authorization read remains non-atomic with the external `PackageManager` OFF write; linked only here, no new device evidence.
+- **Earlier residuals unchanged, not silently accepted:** the R5/R6 bounded-mechanism residuals (per-session 25-tick watch budget, no explicit `onPause()` cancel, one-shot post-winner sweep, four-slot terminal replay drops, rare short caller-side `startsLock` sections), the signed-release packaged-pin gate inherited from PR #1 policy, no in-app recovery UI, `BOOT_COUNT` diagnostic only, `/dev` marker-root trust, and the OPEN abnormal-death publication window.
+- **Final comprehensive reviews are PENDING at the current R7 HEAD `57df54c`:** the main agent runs four fresh independent reviews after this consolidation. Historical APPROVE outcomes (R3/R4/R5/R6, including Final 6.1–6.6 at `92572ea`) are scoped to their own heads and are **not** an approval of the current HEAD. Keep PR #2 draft/open; green host CI is not device safety and is not release approval. `tasks/plan.md` and `tasks/todo.md` keep Checkpoint R7 and the final 7.1–7.6 checkboxes **UNCHECKED**.
+
 ## 2026-11-26 — Final correctness review fix (PR #2): guaranteed sweep for refused terminals
 
 The FINAL correctness review found one Required stranding gap in the R6.4
