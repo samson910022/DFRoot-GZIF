@@ -10,7 +10,6 @@
 // See NOTICE.
 package df.root;
 
-import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -28,7 +27,10 @@ import df.root.BootUiPolicy.BootComponentState;
 import df.root.BootUiPolicy.BootStatusPresentation;
 
 public class SettingsFragment extends PreferenceFragment {
-    private static final String BOOT_SUMMARY = "Automatically run DFRoot on device boot";
+    private static final String BOOT_UNAVAILABLE =
+            "Unavailable - Start at Boot is disabled in this build";
+    private static final String SOFT_REBOOT_UNAVAILABLE =
+            "Unavailable - experimental Auto Soft Reboot is disabled in this build";
     private static final String BOOT_CHANGE_FAILURE =
             "Could not change Start at Boot - component setting failed: ";
 
@@ -70,9 +72,7 @@ public class SettingsFragment extends PreferenceFragment {
     private Preference mStatusPreference;
     private PreferenceScreen mPreferenceScreen;
     private Preference mRetryPreference;
-    private AlertDialog mConfirmationDialog;
     private String mBootChangeError;
-    private long mPendingSoftRebootGeneration = -1;
 
     private final ConfigurationRepository.Listener mConfigurationListener =
             this::renderConfirmedConfiguration;
@@ -96,6 +96,11 @@ public class SettingsFragment extends PreferenceFragment {
         ComponentName bootReceiver = new ComponentName(ctx, BootReceiver.class);
         mBootStartPreference = (SwitchPreference) findPreference("boot_start");
         mBootStartPreference.setPersistent(false);
+        // Unattended start is unavailable at code level. There is no enable
+        // branch here (and no COMPONENT_ENABLED_STATE_ENABLED write anywhere in
+        // production); every attempted change is rejected defensively. The
+        // explicit safe OFF action below remains available in every state.
+        mBootStartPreference.setOnPreferenceChangeListener((pref, value) -> false);
         // Master: authoritative tri-state observation; DEFAULT/failure is UNKNOWN.
         mBootStatusPreference = findPreference("boot_status");
         mBootDisablePreference = findPreference("boot_disable");
@@ -106,47 +111,6 @@ public class SettingsFragment extends PreferenceFragment {
             });
         }
         applyBootPresentation(readBootComponentState(ctx, bootReceiver));
-        mBootStartPreference.setOnPreferenceChangeListener((pref, value) -> {
-            boolean enabling = (Boolean) value;
-            // Enabling still requires verified configuration and an idle
-            // coordinator. Disabling never does: the owner must always be able
-            // to stop future unattended attempts, even mid-operation or in ERROR.
-            if (enabling && (!areControlsWritable()
-                    || PreferenceIntegrity.isQuarantined()
-                    || !BootUiPolicy.mayChangeTo(true, readBootComponentState(ctx, bootReceiver),
-                            PreferenceIntegrity.isQuarantined()))) {
-                renderConfirmedConfiguration();
-                applyBootPresentation(readBootComponentState(ctx, bootReceiver));
-                return false;
-            }
-            int desired = enabling ? PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                                   : PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
-            int actual;
-            try {
-                // No coordinator call on this path: an active operation keeps its
-                // admission, lease and finish semantics untouched. The OFF write
-                // is a PackageManager operation OUTSIDE the coordinator monitor;
-                // it is not atomic with admission or with the final authorization
-                // re-read, so a not-yet-started action may still observe the old
-                // value at that re-read. OFF always suppresses FUTURE unattended
-                // attempts that observe it; already-started work is never cancelled.
-                actual = mBootComponents.set(ctx, bootReceiver, desired);
-            } catch (RuntimeException e) {
-                showBootChangeFailure(ctx, bootReceiver, describe(e));
-                return false;
-            }
-            if (actual != desired) {
-                showBootChangeFailure(ctx, bootReceiver,
-                        "component remained in state " + actual);
-                return false;
-            }
-            mBootChangeError = null;
-            renderStatusSummary();
-            // Master: the observed state, never the requested value, is truth.
-            applyBootPresentation(readBootComponentState(ctx, bootReceiver));
-            return BootUiPolicy.acceptFrameworkChange(enabling,
-                    BootComponentState.fromPackageManagerState(actual));
-        });
 
         mStatusPreference = findPreference("configuration_status");
         mPreferenceScreen = getPreferenceScreen();
@@ -164,16 +128,10 @@ public class SettingsFragment extends PreferenceFragment {
         mSoftRebootPreference = (SwitchPreference) findPreference(
                 ConfigurationKeys.PREF_SOFT_REBOOT);
         mSoftRebootPreference.setPersistent(false);
-        mSoftRebootPreference.setOnPreferenceChangeListener((pref, value) -> {
-            if (!areControlsWritable() || PreferenceIntegrity.isQuarantined()) return false;
-            if ((Boolean) value) {
-                showSoftRebootAcknowledgement();
-            } else {
-                mConfiguration.setSoftReboot(false);
-            }
-            // The repository observer, not the click, reflects durable state.
-            return false;
-        });
+        mSoftRebootPreference.setSummary(SOFT_REBOOT_UNAVAILABLE);
+        // Experimental soft reboot is unavailable: no consent dialog and no
+        // enable write exist. Every attempted change is rejected defensively.
+        mSoftRebootPreference.setOnPreferenceChangeListener((pref, value) -> false);
 
         mDisableModulesPreference = (SwitchPreference) findPreference(
                 ConfigurationKeys.PREF_DISABLE_MODULES);
@@ -206,7 +164,6 @@ public class SettingsFragment extends PreferenceFragment {
             PreferenceIntegrity.removeListener(mIntegrityListener);
             mIntegrityListener = null;
         }
-        dismissConfirmation();
         super.onPause();
     }
 
@@ -232,20 +189,18 @@ public class SettingsFragment extends PreferenceFragment {
 
     private void renderConfirmedConfiguration() {
         if (!isAdded() || mConfiguration == null) return;
-        if (!isCoordinatorIdle()) {
-            dismissConfirmation();
-        }
         boolean writable = areControlsWritable();
-        // The switch stays reachable so OFF is available during ERROR and while
-        // STARTING/RUNNING/INDETERMINATE. Only the ON direction is gated in the
-        // change listener; dangerous switches keep the full writable gate.
-        mBootStartPreference.setEnabled(true);
-        mSoftRebootPreference.setEnabled(writable);
+        // Both unavailable features stay hard-disabled and unchecked in every
+        // state. The explicit "boot_disable" action (not the boot_start switch)
+        // is the only OFF path and remains available even in ERROR/active runs.
+        mBootStartPreference.setEnabled(false);
+        mBootStartPreference.setChecked(false);
+        mSoftRebootPreference.setEnabled(false);
+        mSoftRebootPreference.setChecked(false);
         mDisableModulesPreference.setEnabled(writable);
 
         RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
         if (confirmed != null) {
-            mSoftRebootPreference.setChecked(confirmed.isSoftReboot());
             mDisableModulesPreference.setChecked(confirmed.isDisableModules());
         }
 
@@ -280,66 +235,18 @@ public class SettingsFragment extends PreferenceFragment {
         }
     }
 
-    /** Surface a rejected component write and restore the state actually applied. */
-    private void showBootChangeFailure(Context ctx, ComponentName bootReceiver, String detail) {
+    /** Surface a rejected OFF component write; never imply an ON state. */
+    private void showBootChangeFailure(String detail) {
         mBootChangeError = detail;
         mBootStartPreference.setSummary(BOOT_CHANGE_FAILURE + detail);
+        mBootStartPreference.setChecked(false);
         renderStatusSummary();
-        try {
-            int actual = mBootComponents.read(ctx, bootReceiver);
-            mBootStartPreference.setChecked(actual == PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
-        } catch (RuntimeException ignored) {
-            // The listener rejected the attempted change, so the previously shown
-            // state is still the best known applied state.
-        }
     }
 
     private static String describe(RuntimeException failure) {
         String message = failure.getMessage();
         return message == null || message.isEmpty()
                 ? failure.getClass().getSimpleName() : message;
-    }
-
-    private void showSoftRebootAcknowledgement() {
-        dismissConfirmation();
-        Context ctx = getActivity();
-        RunConfig confirmed = mConfiguration.getConfirmedSnapshot();
-        if (ctx == null || confirmed == null || !areControlsWritable()) {
-            renderConfirmedConfiguration();
-            return;
-        }
-        mPendingSoftRebootGeneration = confirmed.getGeneration();
-        mConfirmationDialog = new AlertDialog.Builder(ctx)
-                .setTitle("Enable Auto Soft Reboot?")
-                .setMessage("EXPERIMENTAL: on this firmware a soft reboot has caused a full hard reboot. "
-                        + "This setting applies to manual runs only. Start at Boot will not run "
-                        + "while it is enabled, pending separate hardware validation.")
-                .setCancelable(false)
-                .setNegativeButton("Cancel", (dialog, which) -> {
-                    mPendingSoftRebootGeneration = -1;
-                    dialog.dismiss();
-                })
-                .setPositiveButton("Enable anyway", (dialog, which) -> {
-                    dialog.dismiss();
-                    long expectedGeneration = mPendingSoftRebootGeneration;
-                    mPendingSoftRebootGeneration = -1;
-                    RunConfig current = mConfiguration.getConfirmedSnapshot();
-                    if (areControlsWritable() && current != null
-                            && current.getGeneration() == expectedGeneration) {
-                        mConfiguration.setSoftReboot(true);
-                    } else {
-                        renderConfirmedConfiguration();
-                    }
-                })
-                .show();
-    }
-
-    private void dismissConfirmation() {
-        if (mConfirmationDialog != null) {
-            mConfirmationDialog.dismiss();
-            mConfirmationDialog = null;
-        }
-        mPendingSoftRebootGeneration = -1;
     }
 
     /** Master's tri-state bootstrap component observation via the PR#2 controller seam. */
@@ -352,16 +259,21 @@ public class SettingsFragment extends PreferenceFragment {
         }
     }
 
-    /** One choke point for thumb position, switch summary and persistent status row. */
+    /** One choke point: the switch is unavailable; the persistent status row stays truthful. */
     private void applyBootPresentation(BootComponentState actual) {
         if (mBootStartPreference == null) return;
-        mBootStartPreference.setChecked(BootUiPolicy.desiredChecked(actual)); // position only
-        mBootStartPreference.setEnabled(true); // OFF must always be reachable
+        // Hard-disabled and unchecked in every state: this switch can never be
+        // presented (or used) as an ON control. The separate boot_disable row is
+        // the explicit OFF action and stays available.
+        mBootStartPreference.setChecked(false);
+        mBootStartPreference.setEnabled(false);
         BootStatusPresentation presentation = BootUiPolicy.presentation(actual);
         String summary;
         switch (presentation) {
             case ON:
-                summary = "On - automatic startup enable setting is present";
+                // A forced-on component is a fact to report, never permission.
+                summary = "Status unavailable - automatic startup may still be enabled; "
+                        + "Start at Boot is unavailable in this build";
                 break;
             case OFF_VERIFIED:
                 summary = "Off - verified disabled";
@@ -375,7 +287,7 @@ public class SettingsFragment extends PreferenceFragment {
                 }
                 break;
         }
-        mBootStartPreference.setSummary(summary);
+        mBootStartPreference.setSummary(BOOT_UNAVAILABLE + "\n" + summary);
         if (mBootStatusPreference != null) mBootStatusPreference.setSummary(summary);
     }
 
@@ -399,9 +311,17 @@ public class SettingsFragment extends PreferenceFragment {
                     PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
         } catch (RuntimeException e) {
             Log.e("dfroot", "Could not disable boot component setting", e);
+            showBootChangeFailure(describe(e));
+            return;
         }
         BootComponentState actual = readBootComponentState(ctx, receiver);
         applyBootPresentation(actual);
+        if (actual == BootComponentState.DISABLED) {
+            mBootChangeError = null;
+            renderStatusSummary();
+        } else {
+            showBootChangeFailure("component remained in state " + actual);
+        }
         final BootComponentState observed = actual;
         mMain.post(() -> {
             if (!isAdded() || getActivity() == null) return;

@@ -156,6 +156,12 @@ final class RunConfigArtifact {
             throw new IllegalArgumentException("run config manager conflicts with preflight plan");
         }
         config.validateFor(mode);
+        // Unavailable feature: never publish soft_reboot=1, even for a manual
+        // run carrying a legacy acknowledged configuration. Native protocol
+        // semantics are unchanged; this refuses the artifact before publication.
+        if (config.isSoftReboot()) {
+            throw new IllegalArgumentException("soft reboot is unavailable; run_config refused");
+        }
         validateText("fingerprint", fingerprint);
         validateText("kernel", kernel);
     }

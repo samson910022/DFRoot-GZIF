@@ -17,6 +17,8 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
+import java.io.File;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -88,6 +90,31 @@ public class BootConfigurationPolicyTest {
 
         assertTrue(confirmed.isUnattendedBootAllowed());
         assertFalse(confirmed.isSoftRebootAllowedFor(RunConfig.ExecutionMode.UNATTENDED_BOOT));
+    }
+
+    /**
+     * Code-level availability guard: no production writer may enable the boot
+     * component and the coordinator's production gate must not derive authority
+     * from the component setting. Fails if an enable path is reintroduced.
+     */
+    @Test
+    public void productionSourcesContainNoBootEnablePath() throws Exception {
+        for (String name : new String[] {"SettingsFragment.java", "AndroidBootGate.java"}) {
+            File source = TestFixtures.repositoryRoot()
+                    .resolve("app/src/main/java/df/root/" + name).toFile();
+            String code = new String(Files.readAllBytes(source.toPath()), StandardCharsets.UTF_8)
+                    .replaceAll("(?s)/\\*.*?\\*/|//[^\n]*", "");
+            assertFalse(name + " must never write COMPONENT_ENABLED_STATE_ENABLED",
+                    code.contains("COMPONENT_ENABLED_STATE_ENABLED"));
+        }
+        File coordinator = TestFixtures.repositoryRoot()
+                .resolve("app/src/main/java/df/root/RunCoordinator.java").toFile();
+        String code = new String(Files.readAllBytes(coordinator.toPath()), StandardCharsets.UTF_8)
+                .replaceAll("(?s)/\\*.*?\\*/|//[^\n]*", "");
+        assertFalse("production authorization must not read the component setting",
+                code.contains("getComponentEnabledSetting"));
+        assertTrue("production authorization must be an unconditional refusal",
+                code.contains("PRODUCTION_UNATTENDED_REFUSAL = () -> false"));
     }
 
     private void seed(RunConfig config) {

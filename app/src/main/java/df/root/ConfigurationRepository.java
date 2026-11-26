@@ -266,8 +266,17 @@ public final class ConfigurationRepository {
         return setManagerPackage(null);
     }
 
+    /**
+     * Experimental soft reboot is unavailable in production. Refuse the ON
+     * direction without touching the durable snapshot: no write, no generation
+     * bump and no change to the acknowledgement version. OFF remains writable so
+     * a previously persisted value can always be cleared.
+     */
     public boolean setSoftReboot(boolean enabled) {
-        return enqueue(config -> config.withSoftReboot(enabled));
+        if (enabled) {
+            return false;
+        }
+        return enqueue(config -> config.withSoftReboot(false));
     }
 
     public boolean setDisableModules(boolean enabled) {
@@ -404,6 +413,12 @@ public final class ConfigurationRepository {
             if (desired == null || desired.getGeneration() != confirmedSnapshot.getGeneration()) {
                 return false;
             }
+            // Defense in depth: no caller (setSoftReboot, update or a future
+            // writer) may persist soft_reboot=1 in production, even with a
+            // current acknowledgement. Refuse before any state change or write.
+            if (desired.isSoftReboot()) {
+                return false;
+            }
             if (desired.isSoftReboot()
                     && desired.getSoftRebootAcknowledgementVersion()
                     != ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION) {
@@ -441,9 +456,14 @@ public final class ConfigurationRepository {
         String operation = initializing ? "configuration load" : "configuration reload";
         try {
             RunConfig loaded = Objects.requireNonNull(store.load(), "store returned null");
-            if (loaded.isSoftReboot()
-                    && loaded.getSoftRebootAcknowledgementVersion()
-                    != ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION) {
+            // Soft reboot is unavailable in production. Migrate any persisted
+            // soft_reboot=1 to OFF on load/reload regardless of its acknowledgement
+            // version: a legacy acknowledged value cannot be cleared through the
+            // UI (every change is refused), so leaving it intact would strand
+            // manual runs behind the artifact gate. The migration is a checked
+            // write of a new generation behind the same write-ahead/quarantine
+            // boundary; nothing is published as VERIFIED until that commit lands.
+            if (loaded.isSoftReboot()) {
                 RunConfig safeOff = loaded.withoutSoftRebootAcknowledgement().nextGeneration();
                 RunConfig previous;
                 synchronized (lock) {

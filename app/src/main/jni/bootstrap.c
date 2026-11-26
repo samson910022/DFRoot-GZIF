@@ -555,9 +555,16 @@ static int publish_bootstrap_failure_bounded(void)
 /* Build the injected IO and let the pure protocol decide + publish the one
  * final outcome. The strictly-read nonce is passed to the recovery gate, so a
  * stale "ok\n" cannot satisfy it. All progress markers are informational;
- * nothing here reads a marker to derive a result. */
-static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot,
-                                          const char *nonce)
+ * nothing here reads a marker to derive a result.
+ *
+ * Soft reboot is unavailable in production. The Java artifact gate already
+ * refuses to publish soft_reboot=1; this hard 0 is defense in depth so even a
+ * crafted or legacy run_config artifact can never request a reboot. There is
+ * deliberately no soft_reboot parameter on this production decision entry.
+ * The protocol's soft-reboot branch remains exercisable only through the
+ * injected IO seam in producer_decide_and_publish (host/native tests), not
+ * from this path. */
+static enum df_outcome decide_and_publish(int late_load_rc, const char *nonce)
 {
     struct status_io io;
     memset(&io, 0, sizeof(io));
@@ -570,7 +577,7 @@ static enum df_outcome decide_and_publish(int late_load_rc, int soft_reboot,
     io.wait_child      = wait_child_bounded;
     io.report          = io_report;
     io.nonce           = nonce;
-    return producer_decide_and_publish(&io, NULL, late_load_rc, soft_reboot,
+    return producer_decide_and_publish(&io, NULL, late_load_rc, /* soft_reboot */ 0,
                                        LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);
 }
 
@@ -663,5 +670,7 @@ int main(void)
     /* PR #2 owner-visible progress marker only; master's protocol never
      * derives a terminal result from /dev/dfm6. */
     touch("/dev/dfm6");
-    return final_rc(decide_and_publish(late_load_rc, config.soft_reboot, nonce));
+    /* config.soft_reboot is intentionally NOT forwarded: soft reboot is
+     * unavailable and the production decision entry hard-codes 0. */
+    return final_rc(decide_and_publish(late_load_rc, nonce));
 }

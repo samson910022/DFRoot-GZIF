@@ -130,6 +130,12 @@ final class BootClaimCoordinator {
         this.shutdownAfterSubmit = shutdownAfterSubmit;
     }
 
+    /**
+     * Production claim boundary. This is NOT an authorization of unattended
+     * work: even if the component is forced on and a service request is queued,
+     * RunCoordinator's production authorization unconditionally refuses
+     * UNATTENDED_BOOT admission before any durable attempt or engine call.
+     */
     static BootClaimCoordinator production(Context context) {
         Objects.requireNonNull(context, "context");
         return new BootClaimCoordinator(

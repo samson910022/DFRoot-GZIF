@@ -37,6 +37,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLooper;
+import org.robolectric.util.ReflectionHelpers;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -1376,11 +1377,12 @@ public class RunCoordinatorTest {
     }
 
     @Test
-    public void productionGetWiresTheGateToTheRealComponentSetting() throws Exception {
+    public void productionAuthorizationIsUnconditionalRefusalEvenWhenComponentForcedOn()
+            throws Exception {
         Context context = context();
         ComponentName component = new ComponentName(context, BootReceiver.class);
-        context.getPackageManager().setComponentEnabledSetting(component,
-                PackageManager.COMPONENT_ENABLED_STATE_DISABLED, PackageManager.DONT_KILL_APP);
+        setBootComponentState(context, component,
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
         try {
             RunCoordinator production = RunCoordinator.get(context);
             Field field = RunCoordinator.class.getDeclaredField("unattendedAuthorization");
@@ -1388,15 +1390,56 @@ public class RunCoordinatorTest {
             RunCoordinator.UnattendedAuthorization gate =
                     (RunCoordinator.UnattendedAuthorization) field.get(production);
 
-            assertFalse("production gate must read the real Start at Boot component",
-                    gate.isUnattendedEnabled());
-            context.getPackageManager().setComponentEnabledSetting(component,
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED, PackageManager.DONT_KILL_APP);
-            assertTrue("production gate must observe an owner re-enabling the component",
+            assertSame("production must wire the unconditional refusal, not a component reader",
+                    RunCoordinator.PRODUCTION_UNATTENDED_REFUSAL, gate);
+            assertFalse(gate.isUnattendedEnabled());
+
+            setBootComponentState(context, component,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+            assertFalse("a forced-on component must not authorize unattended work",
                     gate.isUnattendedEnabled());
         } finally {
-            context.getPackageManager().setComponentEnabledSetting(component,
-                    PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP);
+            setBootComponentState(context, component,
+                    PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
+            RunCoordinator.resetForTesting();
+        }
+    }
+
+    @Test
+    public void productionCoordinatorRejectsForcedOnUnattendedSubmissionBeforeAnyEffect()
+            throws Exception {
+        ConfigurationRepository.setInstanceForTesting(verifiedRepository());
+        Context context = context();
+        ComponentName component = new ComponentName(context, BootReceiver.class);
+        try {
+            setBootComponentState(context, component,
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+            RunCoordinator production = RunCoordinator.get(context);
+            // Keep the host test harmless: no real engine, no real durable store.
+            ReflectionHelpers.setField(production, "engine",
+                    (RunCoordinator.Engine) (ctx, admission, mode, id, events, reporter) -> {
+                        throw new AssertionError("unattended engine must not start in production");
+                    });
+            OperationAttemptStore store = OperationAttemptStore.inMemory();
+            ReflectionHelpers.setField(production, "attemptStore", store);
+            production.initialize();
+            FakeLease lease = new FakeLease();
+
+            RunCoordinator.Submission rejection = production.submit(context,
+                    RunConfig.ExecutionMode.UNATTENDED_BOOT, lease, "forced-on-boot");
+
+            assertFalse(rejection.isAccepted());
+            assertTrue(rejection.getReason().contains("unattended admission suppressed"));
+            assertEquals(RunCoordinator.State.IDLE, production.getSnapshot().getState());
+            assertEquals("no lease is owned by the coordinator", 0, lease.closeCount.get());
+            RunCoordinator.RequestOutcomeRecord outcome =
+                    production.getRequestOutcome("forced-on-boot");
+            assertNotNull(outcome);
+            assertEquals(RunCoordinator.RequestOutcome.REJECTED, outcome.getOutcome());
+            assertNull("no durable attempt may be published", store.load());
+        } finally {
+            setBootComponentState(context, component,
+                    PackageManager.COMPONENT_ENABLED_STATE_DEFAULT);
             RunCoordinator.resetForTesting();
         }
     }
@@ -1981,6 +2024,12 @@ public class RunCoordinatorTest {
 
     private static Context context() {
         return RuntimeEnvironment.getApplication();
+    }
+
+    /** Host-only component-state stand-in: no device, no PackageManager write to a real component. */
+    private static void setBootComponentState(Context context, ComponentName component, int state) {
+        context.getPackageManager().setComponentEnabledSetting(component, state,
+                PackageManager.DONT_KILL_APP);
     }
 
     private static CountDownLatch terminalLatch(RunCoordinator coordinator) {

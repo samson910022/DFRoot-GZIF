@@ -6,6 +6,7 @@ package df.root;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
@@ -317,7 +318,7 @@ public class ConfigurationRepositoryTest {
         assertCriticalWriteFails(repository -> repository.setManagerPackage(
                 SuManager.NEXT.getPackageName()));
         assertCriticalWriteFails(ConfigurationRepository::clearManager);
-        assertCriticalWriteFails(repository -> repository.setSoftReboot(true));
+        // setSoftReboot(true) is not a write at all: it is refused before enqueue.
         assertCriticalWriteFails(repository -> repository.setSoftReboot(false));
         assertCriticalWriteFails(repository -> repository.setDisableModules(true));
         assertCriticalWriteFails(repository -> repository.setDisableModules(false));
@@ -375,18 +376,40 @@ public class ConfigurationRepositoryTest {
     }
 
     @Test
-    public void enablingSoftRebootWritesValueAndAcknowledgementInOneSnapshot() {
+    public void enablingSoftRebootIsRefusedWithoutAnyWriteOrAcknowledgementChange() {
         FakeStore store = new FakeStore(INITIAL);
         ConfigurationRepository repository = repository(store, new DirectExecutor());
         repository.start();
+        RunConfig before = repository.getConfirmedSnapshot();
+        int beforeGeneration = (int) before.getGeneration();
 
-        assertTrue(repository.setSoftReboot(true));
+        assertFalse("soft reboot must be unavailable in production",
+                repository.setSoftReboot(true));
 
-        RunConfig durable = store.writes.get(0);
-        assertTrue(durable.isSoftReboot());
-        assertEquals(ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION,
-                durable.getSoftRebootAcknowledgementVersion());
-        assertSame(durable, repository.getConfirmedSnapshot());
+        assertEquals(0, store.writes.size());
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        assertSame(before, repository.getConfirmedSnapshot());
+        assertFalse(repository.getConfirmedSnapshot().isSoftReboot());
+        assertEquals(before.getSoftRebootAcknowledgementVersion(),
+                repository.getConfirmedSnapshot().getSoftRebootAcknowledgementVersion());
+        assertEquals(beforeGeneration, repository.getConfirmedSnapshot().getGeneration());
+        assertFalse(repository.isWritePending());
+    }
+
+    @Test
+    public void updateCannotPersistSoftRebootEvenWithCurrentAcknowledgement() {
+        FakeStore store = new FakeStore(INITIAL);
+        ConfigurationRepository repository = repository(store, new DirectExecutor());
+        repository.start();
+        RunConfig desired = new RunConfig(INITIAL.getManagerPackage(), true, false,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, INITIAL.getGeneration());
+
+        assertFalse(repository.update(desired, INITIAL.getGeneration()));
+
+        assertEquals(0, store.writes.size());
+        assertSame(INITIAL, repository.getConfirmedSnapshot());
+        assertEquals(0, repository.getConfirmedSnapshot()
+                .getSoftRebootAcknowledgementVersion());
     }
 
     @Test
@@ -524,15 +547,23 @@ public class ConfigurationRepositoryTest {
     }
 
     @Test
-    public void currentAcknowledgementAndSafeFalseValuesNeedNoMigration() {
+    public void currentAcknowledgementSoftRebootIsMigratedOffAndSafeFalseNeedsNoMigration() {
+        // A current acknowledgement does NOT make soft reboot available: it is a
+        // legacy acknowledged value that the UI cannot clear, so it is migrated
+        // OFF on load just like an unacknowledged one.
         RunConfig acknowledged = new RunConfig(null, true, false,
                 ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 8);
         FakeStore acknowledgedStore = new FakeStore(acknowledged);
         ConfigurationRepository acknowledgedRepository = repository(
                 acknowledgedStore, new DirectExecutor());
         acknowledgedRepository.start();
-        assertSame(acknowledged, acknowledgedRepository.getConfirmedSnapshot());
-        assertEquals(0, acknowledgedStore.writes.size());
+        RunConfig migrated = acknowledgedRepository.getConfirmedSnapshot();
+        assertNotSame(acknowledged, migrated);
+        assertFalse(migrated.isSoftReboot());
+        assertEquals(0, migrated.getSoftRebootAcknowledgementVersion());
+        assertEquals(9, migrated.getGeneration());
+        assertEquals(1, acknowledgedStore.writes.size());
+        assertSame(migrated, acknowledgedStore.writes.get(0));
 
         RunConfig safeFalse = new RunConfig(null, false, true, 0, 9);
         FakeStore safeStore = new FakeStore(safeFalse);
@@ -540,6 +571,46 @@ public class ConfigurationRepositoryTest {
         safeRepository.start();
         assertSame(safeFalse, safeRepository.getConfirmedSnapshot());
         assertEquals(0, safeStore.writes.size());
+    }
+
+    @Test
+    public void legacyAcknowledgedSoftRebootMigrationRestoresManualAdmissionAndStillRefusesEnable() {
+        RunConfig legacy = new RunConfig(SuManager.NEXT.getPackageName(), true, true,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 11);
+        FakeStore store = new FakeStore(legacy);
+        ConfigurationRepository repository = repository(store, new DirectExecutor());
+        repository.start();
+
+        RunConfig confirmed = repository.getConfirmedSnapshot();
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        assertFalse(confirmed.isSoftReboot());
+        assertEquals(0, confirmed.getSoftRebootAcknowledgementVersion());
+        assertTrue(confirmed.isDisableModules());
+        assertEquals(12, confirmed.getGeneration());
+        assertEquals(1, store.writes.size());
+        assertSame(confirmed, store.writes.get(0));
+        assertSame(confirmed, store.cached);
+        assertSame(confirmed, store.durable);
+
+        // The migrated, persisted snapshot is admissible for a normal manual run:
+        // no stale acknowledged soft_reboot=1 can strand it behind the artifact gate.
+        assertEquals("", repository.getRunAdmissionBlockReason(
+                RunConfig.ExecutionMode.MANUAL));
+        ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
+                RunConfig.ExecutionMode.MANUAL);
+        assertNotNull(admission);
+        assertSame(confirmed, admission.getSnapshot());
+        admission.close();
+
+        // The migration does not reopen the ON direction: a NEW request is still
+        // refused unconditionally, with no write, generation bump or ack change.
+        assertFalse(repository.setSoftReboot(true));
+        assertFalse("new enable must not be persisted", store.cached.isSoftReboot());
+        assertEquals(1, store.writes.size());
+        assertSame(confirmed, repository.getConfirmedSnapshot());
+        assertEquals(0, repository.getConfirmedSnapshot()
+                .getSoftRebootAcknowledgementVersion());
+        assertEquals(12, repository.getConfirmedSnapshot().getGeneration());
     }
 
     @Test
@@ -828,8 +899,11 @@ public class ConfigurationRepositoryTest {
     }
 
     @Test
-    public void reloadRepeatsCheckedSafeOffMigration() {
-        RunConfig durable = new RunConfig(SuManager.NEXT.getPackageName(), true, false, 0, 9);
+    public void reloadRepeatsCheckedSafeOffMigrationEvenWhenAcknowledged() {
+        // Reload must migrate soft_reboot=1 regardless of acknowledgement version;
+        // a current acknowledgement is still an unavailability, not permission.
+        RunConfig durable = new RunConfig(SuManager.NEXT.getPackageName(), true, false,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 9);
         FakeStore store = new FakeStore(INITIAL);
         ConfigurationRepository repository = repository(store, new DirectExecutor());
         repository.start();
@@ -843,8 +917,10 @@ public class ConfigurationRepositoryTest {
         RunConfig confirmed = repository.getConfirmedSnapshot();
         assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
         assertFalse(confirmed.isSoftReboot());
+        assertEquals(0, confirmed.getSoftRebootAcknowledgementVersion());
         assertEquals(10, confirmed.getGeneration());
         assertSame(confirmed, store.writes.get(store.writes.size() - 1));
+        assertSame(confirmed, store.durable);
     }
 
     @Test

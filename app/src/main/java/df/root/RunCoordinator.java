@@ -155,14 +155,29 @@ public final class RunCoordinator {
     }
 
     /**
-     * Narrow, read-only authorization seam for unattended runs. Production reads
-     * the Start at Boot component setting; an unreadable/uncertain state must
-     * return {@code false} so unattended work fails closed. Manual consent never
-     * consults this gate.
+     * Narrow authorization seam for unattended runs. Implementations injected
+     * through the package-private constructors are TEST-ONLY stand-ins for host
+     * tests of the OFF/unreadable/mid-admission policy. Production never injects
+     * one: {@link #get(Context)} wires the unconditional
+     * {@link #PRODUCTION_UNATTENDED_REFUSAL}, so no component setting, external
+     * write or readback can authorize unattended work. An unreadable/uncertain
+     * test seam must return {@code false} so admission fails closed. Manual
+     * consent never consults this gate.
      */
     interface UnattendedAuthorization {
         boolean isUnattendedEnabled();
     }
+
+    /**
+     * Production authorization. Start at Boot is unavailable at code level:
+     * this refuses unconditionally, independent of the component setting, an
+     * owner forcing it on, or any later change. It is deliberately not derived
+     * from PackageManager, so a forced-on receiver still cannot admit work.
+     */
+    static final UnattendedAuthorization PRODUCTION_UNATTENDED_REFUSAL = () -> false;
+
+    /** Test-only permissive stand-in; never wired by {@link #get(Context)}. */
+    static final UnattendedAuthorization TEST_ONLY_ALLOW_UNATTENDED = () -> true;
 
     static final int MAX_LOG_ENTRIES = 200;
     static final int MAX_LOG_CHARACTERS = 32 * 1024;
@@ -307,14 +322,14 @@ public final class RunCoordinator {
      * Safe test/default seam: no durable barrier exists and initialization is
      * already complete. The authorization seam is permissive here only so
      * existing pure-contract tests keep exercising explicit manual/boot paths;
-     * production wires the real component gate in {@link #get(Context)} and
-     * fails closed. Production never uses these constructors.
+     * production ALWAYS wires {@link #PRODUCTION_UNATTENDED_REFUSAL} in
+     * {@link #get(Context)}. Production never uses these constructors.
      */
     RunCoordinator(ConfigurationRepository repository, Executor workerExecutor,
                    Executor mainExecutor, Engine engine, long initializationTimeoutMillis) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 OperationAttemptStore.inMemory(), () -> null, Runnable::run,
-                () -> true, true, false, false, Runnable::run, false);
+                TEST_ONLY_ALLOW_UNATTENDED, true, false, false, Runnable::run, false);
     }
 
     /** Test seam for a controlled outcome-publication executor (the ledger write stays synchronous). */
@@ -323,7 +338,7 @@ public final class RunCoordinator {
                    Executor outcomeExecutor) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 OperationAttemptStore.inMemory(), () -> null, Runnable::run,
-                () -> true, true, false, false, outcomeExecutor, false);
+                TEST_ONLY_ALLOW_UNATTENDED, true, false, false, outcomeExecutor, false);
     }
 
     /** Explicit seam for deterministic initialization and process-restart tests; test-only permissive authorization. */
@@ -333,7 +348,7 @@ public final class RunCoordinator {
                    Executor initializationExecutor) {
         this(repository, workerExecutor, mainExecutor, engine, initializationTimeoutMillis,
                 attemptStore, bootCountReader, initializationExecutor,
-                () -> true, false, false, false, Runnable::run, false);
+                TEST_ONLY_ALLOW_UNATTENDED, false, false, false, Runnable::run, false);
     }
 
     /** Authorization-aware seam for deterministic OFF-transition tests. */
@@ -470,17 +485,12 @@ public final class RunCoordinator {
                 Context source = app != null ? app : context;
                 Context deContext = source.isDeviceProtectedStorage()
                         ? source : source.createDeviceProtectedStorageContext();
-                // The START component is enabled/disabled in the application
-                // context; the same read-only gate is used by the boot claim and
-                // service workers. Any failure is treated as OFF (fail closed).
-                UnattendedAuthorization authorization = () -> {
-                    try {
-                        return BootClaimCoordinator.BootComponentGate.PACKAGE_MANAGER.read(source)
-                                == BootClaimCoordinator.BootComponentGate.State.ENABLED;
-                    } catch (RuntimeException e) {
-                        return false;
-                    }
-                };
+                // Unattended start is unavailable in production. Do not derive
+                // authorization from the START component: even a forced-on
+                // receiver or an unreadable component setting must not admit
+                // unattended work. The permissive authorization seam exists only
+                // in package-private constructors used by host tests.
+                UnattendedAuthorization authorization = PRODUCTION_UNATTENDED_REFUSAL;
                 instance = new RunCoordinator(repository, worker,
                         ConfigurationRepository.newMainExecutor(), RunCoordinator::runProductionEngine,
                         INITIALIZATION_TIMEOUT_MS,

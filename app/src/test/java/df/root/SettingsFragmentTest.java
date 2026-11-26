@@ -11,7 +11,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
-import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
@@ -86,67 +85,52 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void enablingSoftRebootRequiresBlockingModalBeforeAnyWrite() {
+    public void softRebootSwitchIsUnavailableAndRejectsEveryEnableAttempt() {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
 
-        toggle(softReboot);
-
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
-        assertNotNull(dialog);
-        assertFalse(Shadows.shadowOf(dialog).isCancelable());
-        assertTrue(Shadows.shadowOf(dialog).getMessage().toString().contains("manual runs only"));
         assertFalse(softReboot.isChecked());
-        assertEquals(0, store.writes.size());
-
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        ShadowLooper.idleMainLooper();
-
         assertFalse(softReboot.isEnabled());
-        assertEquals("Saving configuration...",
-                preference("configuration_status").getSummary());
-        assertEquals(0, store.writes.size());
-        configExecutor.runNext();
-        ShadowLooper.idleMainLooper();
+        toggle(softReboot);
+        Object accepted = ReflectionHelpers.callInstanceMethod(softReboot, "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
 
-        assertTrue(softReboot.isChecked());
-        assertTrue(softReboot.isEnabled());
-        RunConfig durable = store.writes.get(0);
-        assertTrue(durable.isSoftReboot());
-        assertEquals(ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION,
-                durable.getSoftRebootAcknowledgementVersion());
+        assertEquals(Boolean.FALSE, accepted);
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertFalse(softReboot.isChecked());
+        assertFalse(softReboot.isEnabled());
+        assertEquals(0, store.writes.size());
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
     }
 
     @Test
-    public void cancellingAcknowledgementDoesNotPersistOrToggleTheSwitch() {
+    public void softRebootEnableIsRejectedFromStaleGenerationWithoutWrite() {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
-
-        toggle(softReboot);
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
-        dialog.getButton(AlertDialog.BUTTON_NEGATIVE).performClick();
-        ShadowLooper.idleMainLooper();
-
-        assertFalse(softReboot.isChecked());
-        assertTrue(softReboot.isEnabled());
-        assertEquals(0, store.writes.size());
-    }
-
-    @Test
-    public void disablingSoftRebootWaitsForDurableConfirmation() {
-        RunConfig enabled = RunConfig.defaults().withSoftReboot(true);
-        launch(enabled);
-        SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
-        assertTrue(softReboot.isChecked());
-
-        toggle(softReboot);
-        assertTrue(softReboot.isChecked());
-        assertFalse(softReboot.isEnabled());
+        long generationBefore = repository.getConfirmedSnapshot().getGeneration();
+        assertTrue(repository.setDisableModules(true));
         configExecutor.runNext();
         ShadowLooper.idleMainLooper();
 
-        assertFalse(softReboot.isChecked());
+        Object accepted = ReflectionHelpers.callInstanceMethod(softReboot, "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
+
+        assertEquals(Boolean.FALSE, accepted);
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertEquals(1, store.writes.size());
         assertFalse(store.writes.get(0).isSoftReboot());
+        assertEquals(generationBefore + 1L, repository.getConfirmedSnapshot().getGeneration());
+    }
+
+    @Test
+    public void legacyAcknowledgedSoftRebootIsNeverOfferedAsEnabled() {
+        launch(RunConfig.defaults().withSoftReboot(true));
+        SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
+
+        assertFalse(softReboot.isChecked());
+        assertFalse(softReboot.isEnabled());
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertEquals(0, store.writes.size());
     }
 
     @Test
@@ -164,8 +148,10 @@ public class SettingsFragmentTest {
         assertFalse(disableModules.isChecked());
         assertFalse(disableModules.isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
-        // ERROR must not hide the OFF direction; only ON stays gated.
-        assertTrue(boot.isEnabled());
+        // ERROR must not hide the explicit OFF action; the boot switch itself
+        // is unavailable in every state.
+        assertFalse(boot.isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
         assertTrue(preference("configuration_status").getSummary().toString()
                 .contains("Configuration error"));
         assertFalse(repository.getConfirmedSnapshot().isDisableModules());
@@ -187,7 +173,7 @@ public class SettingsFragmentTest {
         ShadowLooper.idleMainLooper();
 
         assertFalse(softReboot.isChecked());
-        assertTrue(softReboot.isEnabled());
+        assertFalse("unavailable switches are never re-enabled", softReboot.isEnabled());
         assertEquals("Configuration verified", status.getSummary());
         assertFalse(store.writes.get(0).isSoftReboot());
     }
@@ -251,7 +237,7 @@ public class SettingsFragmentTest {
         assertFalse(isVisible(retry));
         assertEquals("Configuration verified", status.getSummary());
         assertFalse(softReboot.isChecked());
-        assertTrue(softReboot.isEnabled());
+        assertFalse("unavailable switches are never re-enabled", softReboot.isEnabled());
         ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
                 RunConfig.ExecutionMode.MANUAL);
         assertSame(confirmed, admission.getSnapshot());
@@ -284,7 +270,7 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void frozenConfigurationKeepsBootOffAvailableButDisablesDangerousSwitches() {
+    public void frozenConfigurationKeepsExplicitBootOffAvailableButDisablesAllSwitches() {
         launch(RunConfig.defaults());
         ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
                 RunConfig.ExecutionMode.MANUAL);
@@ -292,12 +278,15 @@ public class SettingsFragmentTest {
 
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
-        assertTrue(preference("boot_start").isEnabled());
+        assertFalse(preference("boot_start").isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
 
         admission.close();
         ShadowLooper.idleMainLooper();
-        assertTrue(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
+        assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertTrue(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
+        assertFalse(preference("boot_start").isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
     }
 
     @Test
@@ -318,22 +307,19 @@ public class SettingsFragmentTest {
     }
 
     @Test
-    public void activeCoordinatorDismissesPendingSoftRebootConsent() {
+    public void activeCoordinatorNeverOpensSoftRebootConsent() {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
         toggle(softReboot);
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
-        assertNotNull(dialog);
-        assertTrue(dialog.isShowing());
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
 
         FakeLease lease = new FakeLease();
         assertTrue(coordinator.submit(RuntimeEnvironment.getApplication(),
                 RunConfig.ExecutionMode.MANUAL, lease).isAccepted());
         ShadowLooper.idleMainLooper();
 
-        assertFalse(dialog.isShowing());
-        assertEquals(Long.valueOf(-1L), ReflectionHelpers.getField(fragment,
-                "mPendingSoftRebootGeneration"));
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertFalse(softReboot.isChecked());
         assertDangerousControlsDisabled();
         assertEquals(0, store.writes.size());
         coordinatorWorker.runAll();
@@ -376,7 +362,8 @@ public class SettingsFragmentTest {
         setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         launch(RunConfig.defaults());
         SwitchPreference boot = preference("boot_start");
-        assertTrue(boot.isChecked());
+        assertFalse(boot.isChecked());
+        assertFalse(boot.isEnabled());
 
         store.results.add(false);
         store.results.add(true);
@@ -389,11 +376,12 @@ public class SettingsFragmentTest {
         RunCoordinator.Snapshot before = coordinator.getSnapshot();
         int writesBefore = store.writes.size();
 
-        toggle(boot);
+        clickBootDisable();
 
         assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
         assertFalse(boot.isChecked());
-        assertTrue(boot.isEnabled());
+        assertFalse(boot.isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
         assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
         assertSame(before, coordinator.getSnapshot());
         assertEquals(writesBefore, store.writes.size());
@@ -414,6 +402,7 @@ public class SettingsFragmentTest {
                 "callChangeListener", ReflectionHelpers.ClassParameter.from(Object.class, true));
 
         assertEquals(Boolean.FALSE, accepted);
+        assertFalse(preference("boot_start").isEnabled());
         assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
     }
 
@@ -432,16 +421,16 @@ public class SettingsFragmentTest {
             ReflectionHelpers.setField(coordinator, "snapshot", snapshot);
             ReflectionHelpers.callInstanceMethod(fragment, "renderConfirmedConfiguration");
             setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
-            boot.setChecked(true);
 
-            assertTrue(state + " must still allow OFF", boot.isEnabled());
+            assertFalse("boot switch is unavailable in every state", boot.isEnabled());
+            assertTrue("explicit OFF stays available", preference("boot_disable").isEnabled());
             Object enableAccepted = ReflectionHelpers.callInstanceMethod(boot,
                     "callChangeListener",
                     ReflectionHelpers.ClassParameter.from(Object.class, true));
             assertEquals(state + " must reject ON", Boolean.FALSE, enableAccepted);
             assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED, bootComponentState());
 
-            toggle(boot);
+            clickBootDisable();
 
             assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
             assertFalse(boot.isChecked());
@@ -462,11 +451,11 @@ public class SettingsFragmentTest {
         launchWithExistingConfiguration();
         setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         SwitchPreference boot = preference("boot_start");
-        boot.setChecked(true);
+        assertFalse(boot.isChecked());
         RunCoordinator.Snapshot before = coordinator.getSnapshot();
         assertEquals(RunCoordinator.State.RUNNING, before.getState());
 
-        toggle(boot);
+        clickBootDisable();
 
         assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, bootComponentState());
         assertSame(before, coordinator.getSnapshot());
@@ -479,15 +468,15 @@ public class SettingsFragmentTest {
         setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         launch(RunConfig.defaults());
         SwitchPreference boot = preference("boot_start");
-        assertTrue(boot.isChecked());
+        assertFalse(boot.isChecked());
         FakeBootComponents controller = new FakeBootComponents(
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         controller.failure = new IllegalStateException("package manager rejected");
         ReflectionHelpers.setField(fragment, "mBootComponents", controller);
 
-        toggle(boot);
+        clickBootDisable();
 
-        assertTrue(boot.isChecked());
+        assertFalse(boot.isChecked());
         assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED, bootComponentState());
         String summary = boot.getSummary().toString();
         assertTrue(summary, summary.contains("Could not change Start at Boot"));
@@ -503,83 +492,86 @@ public class SettingsFragmentTest {
         setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         launch(RunConfig.defaults());
         SwitchPreference boot = preference("boot_start");
-        assertTrue(boot.isChecked());
+        assertFalse(boot.isChecked());
         FakeBootComponents controller = new FakeBootComponents(
                 PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
         controller.stuck = true;
         ReflectionHelpers.setField(fragment, "mBootComponents", controller);
 
-        toggle(boot);
+        clickBootDisable();
 
-        assertTrue(boot.isChecked());
+        assertFalse(boot.isChecked());
         assertTrue(boot.getSummary().toString().contains("Could not change Start at Boot"));
         assertEquals(1, controller.setCalls);
     }
 
     @Test
-    public void currentAcknowledgedConfigurationIsShownWithoutAnotherConsentDialog() {
+    public void currentAcknowledgedConfigurationIsNeverShownAsEnabled() {
         launch(RunConfig.defaults().withSoftReboot(true));
+        SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
 
-        assertTrue(((SwitchPreference) preference(ConfigurationKeys.PREF_SOFT_REBOOT)).isChecked());
+        assertFalse(softReboot.isChecked());
+        assertFalse(softReboot.isEnabled());
         assertNull(ShadowAlertDialog.getLatestAlertDialog());
         assertEquals(0, store.writes.size());
     }
 
     @Test
     @Config(sdk = 32)
-    public void minimumApiSettingsAdapterReflectsAcknowledgedConfigurationWithoutWriting() {
+    public void minimumApiSettingsNeverOffersSoftReboot() {
         launch(RunConfig.defaults().withSoftReboot(true));
+        SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
 
-        assertTrue(((SwitchPreference) preference(ConfigurationKeys.PREF_SOFT_REBOOT)).isChecked());
-        assertTrue(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
+        assertFalse(softReboot.isChecked());
+        assertFalse(softReboot.isEnabled());
         assertEquals(0, store.writes.size());
         assertNull(ShadowAlertDialog.getLatestAlertDialog());
     }
 
     @Test
-    public void failedSoftRebootEnableLeavesUncheckedDisabledAndError() {
-        assertSoftRebootEnableFailure(false);
+    public void softRebootEnableIsRejectedWithoutWriteWhenStoreWouldFail() {
+        assertSoftRebootEnableRefused(false);
     }
 
     @Test
-    public void throwingSoftRebootEnableLeavesUncheckedDisabledAndError() {
-        assertSoftRebootEnableFailure(true);
+    public void softRebootEnableIsRejectedWithoutWriteWhenStoreWouldThrow() {
+        assertSoftRebootEnableRefused(true);
     }
 
     @Test
-    public void confirmingConsentAfterFreezePerformsNoWrite() {
+    public void frozenConfigurationCannotEnableSoftReboot() {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
-        toggle(softReboot);
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
         ConfigurationRepository.RunAdmission admission = repository.acquireRunSnapshot(
                 RunConfig.ExecutionMode.MANUAL);
         ShadowLooper.idleMainLooper();
 
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        ShadowLooper.idleMainLooper();
+        Object accepted = ReflectionHelpers.callInstanceMethod(softReboot, "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
 
+        assertEquals(Boolean.FALSE, accepted);
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
         assertEquals(0, store.writes.size());
         assertFalse(softReboot.isChecked());
         assertFalse(softReboot.isEnabled());
         admission.close();
         ShadowLooper.idleMainLooper();
-        assertTrue(softReboot.isEnabled());
+        assertFalse(softReboot.isEnabled());
     }
 
     @Test
-    public void confirmingConsentAfterInterveningWritePerformsNoSecondWrite() {
+    public void staleSoftRebootEnableCannotWriteAfterInterveningUpdate() {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
-        toggle(softReboot);
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
         assertTrue(repository.setDisableModules(true));
         configExecutor.runNext();
         ShadowLooper.idleMainLooper();
 
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        ShadowLooper.idleMainLooper();
+        Object accepted = ReflectionHelpers.callInstanceMethod(softReboot, "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
 
+        assertEquals(Boolean.FALSE, accepted);
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
         assertEquals(1, store.writes.size());
         assertTrue(store.writes.get(0).isDisableModules());
         assertFalse(store.writes.get(0).isSoftReboot());
@@ -688,7 +680,7 @@ public class SettingsFragmentTest {
         assertTrue(retry.isEnabled());
     }
 
-    private void assertSoftRebootEnableFailure(boolean throwFailure) {
+    private void assertSoftRebootEnableRefused(boolean throwFailure) {
         launch(RunConfig.defaults());
         SwitchPreference softReboot = preference(ConfigurationKeys.PREF_SOFT_REBOOT);
         RunConfig confirmed = repository.getConfirmedSnapshot();
@@ -698,18 +690,17 @@ public class SettingsFragmentTest {
             store.results.add(false);
             store.results.add(true);
         }
-        toggle(softReboot);
-        AlertDialog dialog = ShadowAlertDialog.getLatestAlertDialog();
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick();
-        ShadowLooper.idleMainLooper();
-        configExecutor.runNext();
-        ShadowLooper.idleMainLooper();
 
+        Object accepted = ReflectionHelpers.callInstanceMethod(softReboot, "callChangeListener",
+                ReflectionHelpers.ClassParameter.from(Object.class, true));
+
+        assertEquals(Boolean.FALSE, accepted);
+        assertNull(ShadowAlertDialog.getLatestAlertDialog());
+        assertEquals(0, store.writes.size());
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        assertSame(confirmed, repository.getConfirmedSnapshot());
         assertFalse(softReboot.isChecked());
         assertFalse(softReboot.isEnabled());
-        assertEquals(ConfigurationRepository.State.ERROR, repository.getState());
-        assertSame(confirmed, repository.getConfirmedSnapshot());
-        assertTrue(isVisible(retryPreference()));
     }
 
     private void launch(RunConfig initial) {
@@ -765,8 +756,10 @@ public class SettingsFragmentTest {
     }
 
     private void assertDangerousControlsDisabled() {
-        // Start at Boot stays reachable for OFF even while another run is active.
-        assertTrue(preference("boot_start").isEnabled());
+        // The boot_start switch is unavailable even while another run is active;
+        // only the separate explicit OFF action stays reachable.
+        assertFalse(preference("boot_start").isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertFalse(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
     }
@@ -794,8 +787,9 @@ public class SettingsFragmentTest {
     }
 
     private void assertDangerousControlsEnabled() {
-        assertTrue(preference("boot_start").isEnabled());
-        assertTrue(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
+        assertFalse(preference("boot_start").isEnabled());
+        assertTrue(preference("boot_disable").isEnabled());
+        assertFalse(preference(ConfigurationKeys.PREF_SOFT_REBOOT).isEnabled());
         assertTrue(preference(ConfigurationKeys.PREF_DISABLE_MODULES).isEnabled());
     }
 
@@ -806,6 +800,11 @@ public class SettingsFragmentTest {
 
     private void toggle(SwitchPreference preference) {
         ReflectionHelpers.callInstanceMethod(preference, "onClick");
+    }
+
+    /** The only boot component action left in the UI: explicit safe OFF. */
+    private void clickBootDisable() {
+        assertTrue(Shadows.shadowOf(preference("boot_disable")).click());
     }
 
     private Preference retryPreference() {

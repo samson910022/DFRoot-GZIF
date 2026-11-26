@@ -37,6 +37,7 @@ import org.robolectric.android.controller.ServiceController;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowApplication;
 import org.robolectric.shadows.ShadowLooper;
+import org.robolectric.util.ReflectionHelpers;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
@@ -154,6 +155,48 @@ public class BootReceiverBoundaryTest {
 
         // The latch proves the duplicate worker is done, so this is a stable assertion.
         assertNull(shadowApplication.getNextStartedService());
+    }
+
+    @Test
+    public void forcedOnBootComponentCannotBypassProductionUnattendedRefusalAtAdmission()
+            throws Exception {
+        // Forcing the receiver component on lets the short durable claim queue an
+        // FGS request, but that request is NOT an admission. Drive the production
+        // RunCoordinator with an unattended submission and prove the refusal happens
+        // before any engine call, lease ownership or durable attempt is published.
+        setBootComponent(PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                context.getPackageManager().getComponentEnabledSetting(
+                        new ComponentName(context, BootReceiver.class)));
+
+        ConfigurationRepository repository = new ConfigurationRepository(
+                new StaticConfigStore(new RunConfig(SuManager.NEXT.getPackageName(),
+                        false, false, 0, 3)), Runnable::run, Runnable::run);
+        repository.start();
+        assertEquals(ConfigurationRepository.State.VERIFIED, repository.getState());
+        ConfigurationRepository.setInstanceForTesting(repository);
+
+        RunCoordinator production = RunCoordinator.get(context);
+        AtomicInteger engineCalls = new AtomicInteger();
+        OperationAttemptStore store = OperationAttemptStore.inMemory();
+        ReflectionHelpers.setField(production, "engine",
+                (RunCoordinator.Engine) (ctx, admission, mode, id, events, reporter) -> {
+                    engineCalls.incrementAndGet();
+                    throw new AssertionError("unattended engine must not start in production");
+                });
+        ReflectionHelpers.setField(production, "attemptStore", store);
+        production.initialize();
+
+        FakeLease lease = new FakeLease();
+        RunCoordinator.Submission rejection = production.submit(context,
+                RunConfig.ExecutionMode.UNATTENDED_BOOT, lease, "forced-on-boot");
+
+        assertFalse(rejection.isAccepted());
+        assertTrue(rejection.getReason().contains("unattended admission suppressed"));
+        assertEquals("no unattended engine work may follow a boot broadcast", 0, engineCalls.get());
+        assertEquals("no lease may be owned by the coordinator", 0, lease.closeCount.get());
+        assertNull("no durable attempt may be published", store.load());
+        assertEquals(RunCoordinator.State.IDLE, production.getSnapshot().getState());
     }
 
     @Test

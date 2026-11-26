@@ -30,6 +30,7 @@ public class PreferencesResourceTest {
                 .getResources().getXml(R.xml.preferences);
         Map<String, String> defaultValues = new HashMap<>();
         Map<String, String> summaries = new HashMap<>();
+        Map<String, String> enabled = new HashMap<>();
         try {
             while (parser.next() != XmlPullParser.END_DOCUMENT) {
                 if (parser.getEventType() != XmlPullParser.START_TAG) {
@@ -41,6 +42,8 @@ public class PreferencesResourceTest {
                             parser.getAttributeValue(ANDROID_NAMESPACE, "defaultValue"));
                     summaries.put(key,
                             parser.getAttributeValue(ANDROID_NAMESPACE, "summary"));
+                    enabled.put(key,
+                            parser.getAttributeValue(ANDROID_NAMESPACE, "enabled"));
                 }
             }
         } finally {
@@ -49,6 +52,8 @@ public class PreferencesResourceTest {
 
         Set<String> expectedKeys = new HashSet<>();
         expectedKeys.add("boot_start");
+        expectedKeys.add("boot_status");
+        expectedKeys.add("boot_disable");
         expectedKeys.add("configuration_status");
         expectedKeys.add("configuration_retry");
         expectedKeys.add("soft_reboot");
@@ -57,9 +62,9 @@ public class PreferencesResourceTest {
         assertEquals(expectedKeys, defaultValues.keySet());
         assertEquals("false", defaultValues.get("soft_reboot"));
         assertEquals("false", defaultValues.get("disable_modules"));
-        assertTrue(summaries.get("soft_reboot").contains("manual runs only"));
-        assertTrue(summaries.get("soft_reboot").contains(
-                "Unattended Start at Boot remains disabled"));
-        assertTrue(summaries.get("soft_reboot").contains("pending hardware validation"));
+        assertTrue(summaries.get("boot_start").contains("Unavailable"));
+        assertTrue(summaries.get("soft_reboot").contains("Unavailable"));
+        assertEquals("false", enabled.get("boot_start"));
+        assertEquals("false", enabled.get("soft_reboot"));
     }
 }

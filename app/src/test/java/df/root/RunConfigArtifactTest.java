@@ -200,6 +200,43 @@ public class RunConfigArtifactTest {
     }
 
     @Test
+    public void refusesToPublishSoftRebootEvenForAcknowledgedManualConfig() throws Exception {
+        RunConfig manualSoftReboot = new RunConfig(SuManager.NEXT.getPackageName(), true, false,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 23L);
+
+        IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                () -> RunConfigArtifact.publish(directory, OPERATION_ID, manualSoftReboot, plan,
+                        RunConfig.ExecutionMode.MANUAL, FINGERPRINT, KERNEL,
+                        new RecordingFileSystem()));
+
+        assertTrue(error.getMessage().contains("soft reboot is unavailable"));
+        assertFalse("no run_config may carry soft_reboot=1",
+                Files.exists(directory.resolve(RunConfigArtifact.RUN_CONFIG)));
+        assertNoTemporaryFiles(directory);
+    }
+
+    @Test
+    public void migratedSafeOffSnapshotPublishesForManualRun() throws Exception {
+        RunConfig legacy = new RunConfig(SuManager.NEXT.getPackageName(), true, true,
+                ConfigurationKeys.CURRENT_SOFT_REBOOT_ACK_VERSION, 11L);
+        // The exact safe-off transformation ConfigurationRepository applies on load.
+        RunConfig migrated = legacy.withoutSoftRebootAcknowledgement().nextGeneration();
+
+        RunConfigArtifact.publish(directory, OPERATION_ID, migrated, plan,
+                RunConfig.ExecutionMode.MANUAL, FINGERPRINT, KERNEL,
+                new RecordingFileSystem());
+
+        String content = new String(Files.readAllBytes(
+                directory.resolve(RunConfigArtifact.RUN_CONFIG)), "UTF-8");
+        assertTrue(content.contains("mode=manual\n"));
+        assertTrue(content.contains("soft_reboot=0\n"));
+        assertTrue(content.contains("ack_version=0\n"));
+        assertTrue(content.contains("generation=12\n"));
+        assertTrue(content.contains("disable_modules=1\n"));
+        assertNoTemporaryFiles(directory);
+    }
+
+    @Test
     public void serializesBootModeAndCurrentAcknowledgementExactly() throws Exception {
         RunConfig boot = new RunConfig(SuManager.CLASSIC.getPackageName(), false, false, 0, 0);
         RunPreflight.Plan classicPlan = new RunPreflight.Plan(SuManager.CLASSIC,
