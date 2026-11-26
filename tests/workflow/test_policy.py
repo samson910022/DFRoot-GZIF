@@ -84,7 +84,7 @@ APK_FIXTURE_TEST_STEP = "APK packaging gate fixture tests (CMake, host-only)"
 EXTRACT_PINS_STEP = "Extract reviewed KO pins and sizes"
 KO_CI_POLICY_STEP = "KO hash policy (CI enforced, skip rejected)"
 JVM_TEST_STEP = "Java preference-persistence unit tests"
-JUNIT_STEP = "Assert JUnit XML (39 tests, 0 failures)"
+JUNIT_STEP = "Assert JUnit XML (819 tests, 0 failures)"
 ALL_MARKERS_STEP = "Assert all test suites reached"
 DEBUG_BUILD_STEP = "Build debug APK (compile/content gate only)"
 CI_CACHE_ASSERT_STEP = "Assert KO hash check enabled in every CMakeCache"
@@ -1083,7 +1083,7 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
         './gradlew :app:testDebugUnitTest\n'
         'echo "jvm-ok" > "$RUNNER_TEMP/marker-jvm"'
     ),
-    'Assert JUnit XML (39 tests, 0 failures)': (
+    'Assert JUnit XML (819 tests, 0 failures)': (
         'set -euo pipefail\n'
         "python3 - <<'PY'\n"
         'import glob\n'
@@ -1104,8 +1104,8 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
         '           root.get("errors"), root.get("skipped")))\n'
         'print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %\n'
         '      (tests, failures, errors, skipped))\n'
-        'if tests != 39 or failures != 0 or errors != 0 or skipped != 0:\n'
-        '    raise SystemExit("::error::JUnit XML assertion failed: expected 39 tests, 0 failures/errors/skips")\n'
+        'if tests != 819 or failures != 0 or errors != 0 or skipped != 0:\n'
+        '    raise SystemExit("::error::JUnit XML assertion failed: expected 819 tests, 0 failures/errors/skips")\n'
         'PY\n'
         'echo "junit-ok" > "$RUNNER_TEMP/marker-junit"'
     ),
@@ -2152,14 +2152,14 @@ def assert_pr3_gates(text: str) -> None:
     if "7/7 markers" not in all_markers:
         raise AssertionError("all-suites gate must state the 7/7 marker result")
 
-    # 2. The JUnit assertion is strict: 39 tests, 0 failures/errors/skips.
+    # 2. The JUnit assertion is strict: 819 tests, 0 failures/errors/skips.
     junit = run_script(named_step(host, JUNIT_STEP))
     if junit != HOST_GATES_RUN_SCRIPTS[JUNIT_STEP]:
         raise AssertionError("JUnit XML assertion script is not the pinned script")
     for fragment in (
         "TEST-*.xml",
         "if not files:",
-        "tests != 39",
+        "tests != 819",
         "failures != 0",
         "errors != 0",
         "skipped != 0",
@@ -3623,7 +3623,7 @@ class MutationDetectionTests(unittest.TestCase):
 
     def test_junit_count_weakening_is_rejected(self) -> None:
         for old, new in (
-            ("if tests != 39 or", "if tests != 35 or"),
+            ("if tests != 819 or", "if tests != 815 or"),
             ("failures != 0 or errors != 0 or skipped != 0:", "failures != 0:"),
             ("if not files:", "if False:"),
         ):
@@ -4169,7 +4169,7 @@ class BehavioralScriptTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"Test suite marker missing: {HOST_SUITE_MARKERS[0]}", result.stdout + result.stderr)
 
-    def test_junit_xml_gate_accepts_only_39_clean_tests(self) -> None:
+    def test_junit_xml_gate_accepts_only_819_clean_tests(self) -> None:
         def write_report(root: Path, tests: int, failures: int = 0, errors: int = 0, skipped: int = 0) -> None:
             report = root / "app/build/test-results/testDebugUnitTest/TEST-Preferences.xml"
             report.parent.mkdir(parents=True, exist_ok=True)
@@ -4180,11 +4180,11 @@ class BehavioralScriptTests(unittest.TestCase):
             )
 
         cases = (
-            ("39 clean", (39, 0, 0, 0), True, ""),
-            ("35 tests", (35, 0, 0, 0), False, "JUnit XML assertion failed"),
-            ("one failure", (39, 1, 0, 0), False, "JUnit XML assertion failed"),
-            ("one error", (39, 0, 1, 0), False, "JUnit XML assertion failed"),
-            ("one skip", (39, 0, 0, 1), False, "JUnit XML assertion failed"),
+            ("819 clean", (819, 0, 0, 0), True, ""),
+            ("815 tests", (815, 0, 0, 0), False, "JUnit XML assertion failed"),
+            ("one failure", (819, 1, 0, 0), False, "JUnit XML assertion failed"),
+            ("one error", (819, 0, 1, 0), False, "JUnit XML assertion failed"),
+            ("one skip", (819, 0, 0, 1), False, "JUnit XML assertion failed"),
         )
         for label, counts, passes, message in cases:
             with self.subTest(fixture=label), tempfile.TemporaryDirectory() as tmp:
@@ -4195,7 +4195,7 @@ class BehavioralScriptTests(unittest.TestCase):
                 result = run_in_dir(self.junit_script, root, {"RUNNER_TEMP": str(runner_temp)})
                 if passes:
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("TOTAL tests=39 failures=0 errors=0 skipped=0", result.stdout)
+                    self.assertIn("TOTAL tests=819 failures=0 errors=0 skipped=0", result.stdout)
                     self.assertTrue((runner_temp / "marker-junit").is_file())
                 else:
                     self.assertNotEqual(result.returncode, 0)

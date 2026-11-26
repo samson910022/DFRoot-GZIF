@@ -26,6 +26,26 @@ SCOPED / OPEN — not closed, not proved safe on device, no merge or release
 approval, and no reviewer approval claimed.** The master PR #3 ledger below is
 preserved verbatim.
 
+**Native wiring-check correction (test-only).** Under the owner's protocol
+decision, master's `status_protocol.c`/`bootstrap_stage.c` is the SINGLE
+protocol and PR #2's `run_status.c`/`loader_stage.c` are intentionally not
+linked into either production binary (`app/src/main/jni/CMakeLists.txt`). Ten
+CTest cases (eight `run_status.*`, two `loader_stage.*`) asserted PR #2
+function names in production sources and failed as obsolete "native source
+wiring missing" checks (CI App checks run 45900509964). All ten case names and
+registrations are kept: every source-wiring assertion was re-pointed to the
+equivalent master-protocol wiring in `status_protocol.c`, `bootstrap.c`,
+`bootstrap_stage.c` and `exp.c` — `producer_decide_and_publish`,
+`status_flow_run`, `publish_or_none`, `REBOOT_ATTEMPT_UNKNOWN` /
+`DF_RC_ATTEMPT_UNKNOWN`, tri-state `io_late_load_state`, checked/clamped
+deadlines, reserved-nonce bootfail with unbound cleanup, and fd-anchored
+`df_stage_file` install / `status_cleanup_cb` restore. No case was removed, no
+CTest registration or timeout changed, no `if:`/skip added, and no assertion
+weakened to a trivially true check; the pure host-protocol/helper checks in
+these cases are untouched. The host-native CTest subset is 142/142 green.
+Production protocol behavior is unchanged; this is not device-safety or
+reviewer-approval evidence.
+
 ### R2-18 bounded ordinary app lifecycle (R9.4) — SCOPED / OPEN
 
 **Finite requirement.** On the main-thread start path, when a foreground flush

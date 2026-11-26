@@ -625,11 +625,18 @@ device-specific behavior remains an explicit release gate.
 
 ## Operation ownership, boot, and soft reboot
 
+**R9 availability boundary:** unattended **Start at Boot** and **manual soft
+reboot** are both made **unavailable in production** (unconditional refusal,
+refused writes/artifact, native hard `0`; see issue #6). The paragraphs below
+describe the retained safety mechanisms and historical behavior for audit; they
+do **not** describe an enabled feature. "Turning it ON" and "Auto Soft Reboot"
+are no longer reachable from the shipped UI.
+
 - A process-scoped `RunCoordinator` owns one privileged operation at a time and rejects duplicates. Destroying the Activity only detaches observation; it never cancels or interrupts a started run. Each UI request carries a click-time ID: the coordinator publishes `ACCEPTED`, `REJECTED` or `CANCELLED` for that ID, and the UI clears its pending state only on a matching outcome (never on an unrelated snapshot). `ExploitService` is a Direct Boot-aware `specialUse` foreground service that supplies process lifetime and a timed partial WakeLock for both manual and boot runs, and returns `START_NOT_STICKY` so indeterminate work is never silently replayed after process death. Service destruction publishes `CANCELLED` **only** for unclaimed service-local work and never replays it; accepted work stays coordinator-owned.
 - **Start on Boot** is claim-gated: `BootReceiver` validates the broadcast and durably claims the current `Settings.Global.BOOT_COUNT` in device-protected storage before starting the service. `LOCKED_BOOT_COMPLETED` and `BOOT_COMPLETED` share the claim, so there is **one attempt per boot**; if the boot count is unavailable or the claim cannot be persisted, unattended execution is aborted. The claim re-checks the receiver component at claim time and fails closed on an unreadable/default state. That queued-request recheck is defense in depth and READ-ONLY: the **authoritative final gate** is checked inside `RunCoordinator.submit()` under the same lock as the durable attempt publish, immediately before that publish, with another recheck before the engine starts, and it fails closed on OFF/unreadable. OFF (or an unreadable setting) observed at those reads blocks an unattended operation even when the toggle races a blocked publish, initialization or delayed worker, and the checked barrier clear remains allowed for a proven pre-effect rejection. **Honest boundary:** the OFF write is a `PackageManager` component-setting operation **outside the coordinator monitor**; it cannot be made atomic with the gate read or `engine.run()`. An OFF written after the final pre-engine re-read therefore cannot be observed before the engine starts — this is a residual window, not a claimed guarantee, and no device safety is implied. An OFF toggle **after** `engine.run()` has started is **not** revoked — the coordinator keeps ownership of privileged work instead of cancelling it. Foreground-service start eligibility from boot still requires a hardware/OS gate, not a code claim.
-- **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. Turning it ON still requires verified configuration, an idle coordinator, and consent; a rejected component change is surfaced in the UI with the state actually applied.
+- **Start at Boot can be turned OFF independently in every state** — including configuration ERROR and active/indeterminate operations — without touching the current operation's admission, lease, or finish semantics. In R9 the production authorization is an unconditional refusal; the switch is hard-disabled and presented as unavailable, so there is no ON path in the shipped UI. A rejected component change is surfaced in the UI with the state actually applied.
 - **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until a trusted caller clears the barrier. **Resetting app data is NOT safe recovery**: it only discards the barrier and is not evidence that privileged effects stopped, so it must not be presented as a way out of the lockout. `engineFinished` only proves the Java engine call returned/threw, not that externally owned effects ceased; no in-app retry/clear control is exposed from it.
-- **Unattended soft reboot remains disabled**, even with current manual acknowledgement. **Manual soft reboot is experimental and unvalidated** on GZIF; it has previously caused a full hard reboot on this model. Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
+- **Soft reboot is unavailable in production** (R9): unattended remains disabled and manual is refused at write, artifact and native decision with a hard `0`; legacy acknowledged configs are migrated OFF on load. It was experimental and unvalidated on GZIF and has previously caused a full hard reboot on this model; no completed soft reboot was observed, so the risk is retained (issue #6). Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
 
 ## FAQ
 
@@ -642,7 +649,7 @@ A: Sorry, there is no fix. Either:
 
 **Q: Log says "SUCCESS" or "ksud exited with error", but I don't have root**
 
-A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final result now waits for a run-scoped terminal marker, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). If "Auto Soft Reboot" is enabled, disable it: manual soft reboot is experimental and unvalidated on GZIF and has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6).
+A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final result now waits for a run-scoped terminal marker, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). Manual soft reboot is unavailable in the shipped build (R9) and was experimental and unvalidated on GZIF; it has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6). There is no "Auto Soft Reboot" toggle to disable in R9.
 
 **Q: I installed a module and now I can't launch root without crashing**
 
@@ -666,8 +673,8 @@ A: Typically Android will detect bootloops and boot you into Safe Mode, otherwis
 
 ## Features
 
-- Start on Boot (one attempt per boot via a durable `BOOT_COUNT` claim; boot foreground-service eligibility still needs hardware validation)
-- Soft reboot (manual only; experimental and unvalidated on GZIF — unattended boot soft reboot is disabled)
+- Start on Boot — **unavailable in production (R9)**: production authorization is an unconditional refusal; the retained claim/dedup mechanism remains for audit (issue #6)
+- Soft reboot — **unavailable in production (R9)**: refused at write, artifact and native decision; manual soft reboot was experimental/unvalidated on GZIF (issue #6)
 - RO Partition Protection
 - Disable all KernelSU modules, to recover from a broken one
 - Shizuku not needed — regain root without WiFi!

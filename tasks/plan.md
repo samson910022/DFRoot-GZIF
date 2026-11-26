@@ -673,6 +673,28 @@ be checked by the main agent after the final comprehensive reviews pass.
 - [x] Final 8.3: test/build/CI documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
 - [x] Final 8.4: architecture/native integration documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
 
+## Ninth repair round (R9.1–R9.6, 2026-11-27) — release-merge preparation
+
+Owner chose path C (ordinary merge to master with distribution) and accepted
+the residual risk of the two unavailable features, recorded in issue #6.
+The reviewed head `be9201c` plus master PR #3 were integrated by a merge
+(`cec9268`) preserving both safety layers and using master's single native
+status protocol. R9.2 made unattended Start at Boot and manual soft reboot
+unavailable in production (unconditional refusal, refused writes/artifact,
+native hard `0`, legacy OFF migration). R9.3 added the joined-path ambiguous-
+outcome fail-closed test and finite R2-14 policy. R9.4 added the finite R2-18
+responsiveness requirement, host stall/throw fixtures and a narrow catch so a
+throwing `stopForeground` cannot strand start IDs. R9.6 re-points obsolete
+PR#2-protocol source-wiring checks to master's single protocol (no case removed,
+no coverage weakened) and restores the AES key stack wipe.
+
+- [x] R9.1 — merge `origin/master` into the branch; both safety layers preserved.
+- [x] R9.2 — production-unavailable unattended and soft reboot.
+- [x] R9.3 — R2-14 fail-closed policy and joined-path mock test.
+- [x] R9.4 — R2-18 bounded lifecycle and stranded-ID fix.
+- [x] R9.5 — issue #6 opened with explicit owner acceptance.
+- [ ] Checkpoint R9 — **documentation-accuracy / CI verification only; does NOT change any gate disposition.** R2-14 / R2-16 / R2-18 remain SCOPED / OPEN; PR stays draft until the reviewer approves the final head. Any "independent reviews APPROVE / RESOLVED" wording in R9 commit messages refers to the project's internal documentation-accuracy subagents, **not** to the external PR reviewer; no reviewer approval of any head is claimed.
+
 ## Risks and Mitigations
 
 | Risk | Impact | Mitigation |

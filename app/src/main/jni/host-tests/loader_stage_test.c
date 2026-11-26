@@ -932,7 +932,12 @@ static void test_no_shell(void)
         die("native source directory is required");
     }
     char *bootstrap = read_native_source("bootstrap.c");
-    char *stage_source = read_native_source("loader_stage.c");
+    /* Master's SINGLE producer-side staging implementation is
+     * bootstrap_stage.c (df_stage_file); PR#2's loader_stage.c is intentionally
+     * not linked into either production binary. */
+    char *stage_source = read_native_source("bootstrap_stage.c");
+    char *exp = read_native_source("exp.c");
+    char *boot = normalize_whitespace(bootstrap);
     if (strstr(bootstrap, "system(") != NULL
         || strstr(stage_source, "system(") != NULL
         || strstr(stage_source, "popen(") != NULL
@@ -943,10 +948,18 @@ static void test_no_shell(void)
         || strstr(stage_source, "raise(") != NULL) {
         die("staging reintroduced a shell, process spawn, or signal");
     }
-    expect_contains(bootstrap, "loader_stage_install(");
-    expect_contains(bootstrap, "loader_stage_restore(");
+    /* Install is df_stage_file(); restore is owned by the app's
+     * status_cleanup_cb -> cleanup(pf), and the verified, nonce-bound status
+     * is the only thing that can open the producer's recovery gate. */
+    expect_contains(boot,
+            "df_stage_file(KSUD_STAGE_SRC, KSUD_STAGE_DIR, KSUD_STAGE_NAME, NULL, NULL)");
+    expect_contains(exp, "static int status_cleanup_cb(void *ctx, int bound_observation)");
+    expect_contains(exp, "if (cleanup(pf) < 0) {");
+    expect_contains(boot, "df_recovery_status_is_bound_ok(buf, sizeof(buf), nonce)");
     free(bootstrap);
     free(stage_source);
+    free(exp);
+    free(boot);
 }
 
 static void test_wiring(void)
@@ -954,30 +967,51 @@ static void test_wiring(void)
     if (source_dir == NULL) {
         die("native source directory is required");
     }
-    char *stage_source = read_native_source("loader_stage.c");
+    char *stage_source = read_native_source("bootstrap_stage.c");
     char *bootstrap = read_native_source("bootstrap.c");
+    char *exp = read_native_source("exp.c");
     char *stage = normalize_whitespace(stage_source);
     char *boot = normalize_whitespace(bootstrap);
+    char *app = normalize_whitespace(exp);
 
-    expect_contains(stage, "O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK");
+    /* Master's fd-anchored staging: O_DIRECTORY|O_NOFOLLOW on the directory,
+     * O_NOFOLLOW on the source, O_EXCL|O_NOFOLLOW on the created entry. */
+    expect_contains(stage, "O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC");
+    expect_contains(stage, "O_RDONLY | O_NOFOLLOW | O_CLOEXEC");
     expect_contains(stage, "O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC");
-    expect_contains(stage, "S_ISVTX");
-    expect_contains(stage, "chmod(stage->directory, (mode_t)new_mode)");
-    expect_contains(stage, "st.st_dev != stage->created_dev || st.st_ino != stage->created_ino");
-    expect_contains(stage, "fchmod(dst_fd, LOADER_STAGE_EXEC_MODE)");
-    expect_contains(stage, "fsync(dst_fd)");
-    expect_contains(stage, "while (offset < length)");
-    expect_contains(boot, "loader_stage_restore(&stage)");
-    expect_contains(boot, "if (restored != 0)");
+    /* Strict root-owner / 0700 / non-empty policy replaces the old sticky-bit
+     * choreography; only the entry we created is removed on failure. */
+    expect_contains(stage, "uid == 0 && S_ISDIR(mode) && (mode & (mode_t)0022) == 0");
+    expect_contains(stage, "(mode & (mode_t)07777) == (mode_t)0700 && size > 0");
+    expect_contains(stage, "fstatat(dfd, name, &st, AT_SYMLINK_NOFOLLOW)");
+    expect_contains(stage, "if (rc != 0 && created && dfd >= 0) (void)unlinkat(dfd, name, 0);");
+    expect_contains(stage, "io->set_mode(io->ctx, dst_fd, (mode_t)0700)");
+    expect_contains(stage, "fchmod(fd, mode)");
+    expect_contains(stage, "io->sync(io->ctx, dst_fd)");
+    expect_contains(stage, "fsync(dfd)");
+    expect_contains(stage, "while (off < (size_t)r) {");
+    expect_contains(stage, "if (w == 0) {");
+    expect_contains(stage, "errno = EIO;");
+    expect_contains(stage, "if (total == 0)");
+
+    /* Producer installs via df_stage_file; the app's status_cleanup_cb
+     * restores via cleanup(pf) and only a nonce-bound status opens the gate. */
+    expect_contains(boot, "if (df_stage_file(KSUD_STAGE_SRC, KSUD_STAGE_DIR, KSUD_STAGE_NAME, NULL, NULL) != 0)");
+    expect_contains(boot, "KSUD_STAGE \"/data/adb/.ksud-stage\"");
     expect_contains(boot, "\"late-load\"");
-    expect_contains(boot, "\"/data/local/tmp/.ksud-stage\"");
-    if (strstr(bootstrap, "kill(") != NULL || strstr(bootstrap, "raise(") != NULL) {
-        die("bootstrap reintroduced process signaling");
-    }
+    expect_contains(app, "static int status_cleanup_cb(void *ctx, int bound_observation)");
+    expect_contains(app, "if (cleanup(pf) < 0) {");
+    expect_contains(app, "status = (bound_observation == 1 && !pf->cleanup_failed) ? \"ok\\n\" : \"fail\\n\";");
+    expect_contains(boot, "df_recovery_status_is_bound_ok(buf, sizeof(buf), nonce)");
+    /* Master's child signaling is bounded, never an unbounded blocking wait. */
+    expect_contains(boot, "#define SIGKILL_REAP_WAIT_MS 2000");
+    expect_contains(boot, "kill_and_reap_bounded(pid);");
     free(stage_source);
     free(bootstrap);
+    free(exp);
     free(stage);
     free(boot);
+    free(app);
 }
 
 static void run_case(const char *name)

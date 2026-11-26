@@ -1069,12 +1069,16 @@ static int setup(int argc, char **argv) {
     struct run_config_native_args args;
     if (run_config_parse_native_args(argc, argv, &args) != 0) {
         fprintf(stderr, "invalid native arguments: %s\n", run_config_last_error());
+        /* Defense in depth: even a rejected parse may have filled the local
+         * key buffer before failing. Master wipes it on every USAGE_FAIL. */
+        clear_secret(args.aes_key, sizeof(args.aes_key));
         usage(argv[0]);
         return 2;
     }
     struct run_config config;
     if (run_config_parse_file(args.run_config_path, &config) != 0) {
         fprintf(stderr, "run-config rejected: %s\n", run_config_last_error());
+        clear_secret(args.aes_key, sizeof(args.aes_key));
         return 2;
     }
     memcpy(g_operation_id, config.operation_id, sizeof(g_operation_id));
@@ -1087,6 +1091,9 @@ static int setup(int argc, char **argv) {
     g_spi         = args.spi;
     g_seq         = 1;
     memcpy(g_aes_key, args.aes_key, sizeof(g_aes_key));
+    /* Master wipes the argv-derived LOCAL copy immediately after the copy;
+     * the global g_aes_key is the only copy that survives setup(). */
+    clear_secret(args.aes_key, sizeof(args.aes_key));
 
     /* Master's KO-target preflight: presence is authoritative; no fallback to
      * a guessed target. */
@@ -1107,8 +1114,9 @@ static int setup(int argc, char **argv) {
     printf("run-config: operation=%s generation=%llu manager=%s mode=%s\n",
            g_operation_id, (unsigned long long)g_generation, g_manager,
            mode_name(g_mode));
-    /* Master wipes only the LOCAL argv-derived copy here; the global g_aes_key
-     * must remain intact for the transform and is wiped on every exit path. */
+    /* The LOCAL argv-derived copy was already wiped after the copy above;
+     * the global g_aes_key stays intact for the transform and is wiped on
+     * every exit path. */
     return 0;
 }
 

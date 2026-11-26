@@ -1034,3 +1034,16 @@ be checked by the main agent after the final comprehensive reviews pass.
 - [x] Final 8.2: security/staging/environment documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
 - [x] Final 8.3: test/build/CI documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
 - [x] Final 8.4: architecture/native integration documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
+
+## Ninth repair round (R9.1–R9.6, 2026-11-27) — release-merge preparation
+
+Owner chose path C (ordinary merge to master with distribution), accepted the
+residual risk of the two unavailable features (issue #6), and chose master's
+`status_protocol.c` as the single native protocol.
+
+- [x] R9.1 — integrate `origin/master` by merge; preserve both safety layers.
+- [x] R9.2 — make Start at Boot and manual soft reboot unavailable in production.
+- [x] R9.3 — R2-14 joined-path ambiguous-outcome fail-closed test and finite policy.
+- [x] R9.4 — R2-18 finite responsiveness, stall/throw fixtures, stranded-ID catch.
+- [x] R9.5 — issue #6 opened with explicit owner acceptance.
+- [ ] Checkpoint R9 — documentation-accuracy / CI verification only; does NOT change any gate disposition. R2-14 / R2-16 / R2-18 remain SCOPED / OPEN; PR stays draft until reviewer approval of the final head. "Independent reviews APPROVE / RESOLVED" in R9 commit messages refers to internal documentation-accuracy subagents, NOT the external PR reviewer; no reviewer approval of any head is claimed.

@@ -696,52 +696,55 @@ static char *normalize_whitespace(const char *text)
     return out;
 }
 
-/* Cross-file structural guard: bootstrap and exp must consume the shared
- * constants and the shared progress table, with no private copy or kill. */
+/* Cross-file structural guard. Under the owner's single-protocol decision,
+ * bootstrap and exp consume ONE protocol (status_protocol.c) and ONE set of
+ * bounded deadline constants. No private outcome channel, no private deadline
+ * copy, and no terminal publication that bypasses the shared mapping. */
 static void test_shared_budget_wiring(void)
 {
     if (source_dir == NULL) die("native source directory is required");
     char *bootstrap = read_native_source("bootstrap.c");
     char *exp = read_native_source("exp.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *b = normalize_whitespace(bootstrap);
     char *e = normalize_whitespace(exp);
-    /* Late-load command and poll draw from ONE shared budget: the start is
-     * captured before the command and the poll receives only the remainder. */
-    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
-    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
-    if (strstr(bootstrap, "run_status_wait_continues(now - start, RUN_STATUS_LATE_LOAD_WAIT_MS)")
-        != NULL) {
-        die("late-load poll was given a fresh budget");
-    }
-    expect_contains(b, "run_ctx_timed(\"u:r:ksu:s0\", (char *[]){ KSUD, \"soft-reboot\", NULL }, "
-                       "RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out, &soft_launch_failed)");
-    /* The bounded wait itself now lives in the shared, host-tested helper; it
-     * polls with WNOHANG and never signals the child. A timeout is rc=7, not a
-     * soft-reboot failure. A failed fork() is the ordinary rc=6 failure. */
-    expect_contains(b, "run_status_wait_child_bounded(pid, limit_ms, &exit_code)");
-    expect_contains(b, "run_status_soft_reboot_launch_code( soft_launch_failed, soft_rc, "
-                       "soft_timed_out)");
-    expect_contains(e, "run_status_wait_continues( now - start, "
-                       "RUN_STATUS_TERMINAL_READ_WAIT_MS)");
-    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
-    /* The reader consumes the classifier's acknowledgement flag: a non-7
-     * definitive code is actionable only after matching confirmation. */
-    expect_contains(e, "!result.publication_confirmed");
-    expect_contains(e, "run_status_progress_markers[");
-    /* The writer must route every terminal publication through the shared
-     * success/failure mapping; no code may return its intended value after a
-     * failed publication. */
-    expect_contains(b, "run_status_publication_exit_code(write_result, code)");
-    if (strstr(bootstrap, "kill(") != NULL
-        || strstr(bootstrap, "LATE_LOAD_WAIT_LIMIT_MS") != NULL
-        || strstr(exp, "progress_markers[]") != NULL
-        || strstr(exp, "\"ksud start: SUCCESS\"") != NULL) {
-        die("a deadline or progress marker was reintroduced locally");
+    char *p = normalize_whitespace(protocol);
+
+    /* One bounded late-load budget in the producer, one bounded overall wait
+     * in the consumer; both are passed into the shared protocol. */
+    expect_contains(b, "#define LATE_LOAD_WAIT_MS 60000");
+    expect_contains(b, "#define SOFT_REBOOT_WAIT_MS 5000");
+    expect_contains(e, "#define DF_WAIT_BUDGET_MS 70000");
+    expect_contains(e, "#define DF_WAIT_GRACE_MS 10000");
+    expect_contains(e, "#define DF_WAIT_OVERALL_MS 85000");
+    expect_contains(b, "return producer_decide_and_publish(&io, NULL, late_load_rc, /* soft_reboot */ 0, LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);");
+    expect_contains(e, "wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,");
+
+    /* The single publication path and single rc mapping live in the master
+     * protocol: an indeterminate attempt is rc7, never a definitive fallback. */
+    expect_contains(p, "static enum df_outcome publish_or_none(");
+    expect_contains(p, "case REBOOT_ATTEMPT_UNKNOWN: return DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(p, "case REBOOT_PENDING: return DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(e, "rc = df_outcome_to_rc(outcome);");
+    expect_contains(b, "df_publish_property(token)");
+    expect_contains(e, "df_read_property(buf, cap, out_len)");
+    /* Progress markers stay informational; no /dev outcome channel or private
+     * late-load deadline may be reintroduced. Master's kill/reap is bounded. */
+    expect_contains(e, "kProgressMarkers[]");
+    expect_contains(b, "#define SIGKILL_REAP_WAIT_MS 2000");
+    expect_contains(b, "kill_and_reap_bounded(pid);");
+    /* Match code, not the comments that explicitly say /dev/dffinal is unused. */
+    if (strstr(bootstrap, "open(\"/dev/dffinal\"") != NULL
+        || strstr(exp, "open(\"/dev/dffinal\"") != NULL
+        || strstr(b, "LATE_LOAD_WAIT_LIMIT_MS") != NULL) {
+        die("a private outcome channel or deadline was reintroduced");
     }
     free(bootstrap);
     free(exp);
+    free(protocol);
     free(b);
     free(e);
+    free(p);
 }
 
 static void test_protocol_helpers(void)
@@ -1966,41 +1969,76 @@ static void test_poll_deadline_timeout(void)
     }
     if (source_dir == NULL) die("native source directory is required");
     char *bootstrap = read_native_source("bootstrap.c");
+    char *protocol = read_native_source("status_protocol.c");
+    char *exp = read_native_source("exp.c");
     char *b = normalize_whitespace(bootstrap);
-    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
-    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
-    expect_contains(b, "return terminal(run_status_bounded_wait_timeout_code(expired));");
+    char *p = normalize_whitespace(protocol);
+    char *e = normalize_whitespace(exp);
+
+    /* The producer's poll is bounded by the deadline bootstrap passes into
+     * the single protocol; the reader charges cleanup to the SAME absolute
+     * deadline. */
+    expect_contains(b, "#define LATE_LOAD_WAIT_MS 60000");
+    expect_contains(b, "return producer_decide_and_publish(&io, NULL, late_load_rc, /* soft_reboot */ 0, LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);");
+    expect_contains(p, "deadline = deadline_after(start, late_load_wait_ms);");
+    expect_contains(p, "if (now >= deadline) {");
+    expect_contains(e, "wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,");
+    /* Expiry of a pending attempt is indeterminate rc7; a continuing wait
+     * publishes no terminal outcome. No phase may get a fresh full budget. */
+    expect_contains(p, "io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;");
+    expect_contains(p, "case REBOOT_ATTEMPT_UNKNOWN: return DF_RC_ATTEMPT_UNKNOWN;");
+    if (strstr(p, "deadline = deadline_after(now, late_load_wait_ms);") != NULL) {
+        die("late-load poll reintroduced a fresh full budget");
+    }
     free(bootstrap);
+    free(protocol);
+    free(exp);
     free(b);
+    free(p);
+    free(e);
 }
 
-/* Cross-file guard for all three timeout sites: no unbounded late-load wait,
- * no kill, and each timeout routed to rc=7 through the shared mapping. */
+/* Cross-file guard for the timeout sites under master's single protocol: the
+ * late-load command is bounded, an unobserved exit is indeterminate before any
+ * definitive retract, and every timeout exits rc7 through the shared mapping. */
 static void test_timeout_indeterminate_wiring(void)
 {
     if (source_dir == NULL) die("native source directory is required");
     char *bootstrap = read_native_source("bootstrap.c");
+    char *protocol = read_native_source("status_protocol.c");
+    char *exp = read_native_source("exp.c");
     char *b = normalize_whitespace(bootstrap);
-    if (strstr(bootstrap, "run_ctx(NULL") != NULL) {
-        die("unbounded late-load wait was reintroduced");
-    }
-    if (strstr(bootstrap, "kill(") != NULL) {
-        die("a kill was reintroduced into bootstrap");
-    }
-    expect_contains(b, "run_ctx_timed(NULL, (char *[]){ \"/data/local/tmp/.ksud-stage\", "
-                       "\"late-load\", \"--package-name\", config.manager, NULL }, "
-                       "RUN_STATUS_LATE_LOAD_WAIT_MS, &late_timed_out, &late_launch_failed)");
-    expect_contains(b, "run_status_late_load_launch_code( late_launch_failed, late_rc, "
-                       "late_timed_out)");
-    expect_contains(b, "run_status_wait_child_bounded(pid, limit_ms, &exit_code)");
-    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
-    expect_contains(b, "return terminal(run_status_bounded_wait_timeout_code(expired));");
-    expect_contains(b, "run_ctx_timed(\"u:r:ksu:s0\", (char *[]){ KSUD, \"soft-reboot\", NULL }, "
-                       "RUN_STATUS_SOFT_REBOOT_WAIT_MS, &soft_timed_out, &soft_launch_failed)");
-    expect_contains(b, "return terminal(run_status_soft_reboot_launch_code( soft_launch_failed, "
-                       "soft_rc, soft_timed_out))");
+    char *p = normalize_whitespace(protocol);
+    char *e = normalize_whitespace(exp);
+
+    /* The late-load command polls WNOHANG against a bounded deadline; a clock
+     * failure or expiry marks the exit unobserved so bootstrap publishes rc7. */
+    expect_contains(b, "if (now < 0 || now - start >= RUN_CTX_WAIT_MS) {");
+    expect_contains(b, "if (unobserved != NULL) *unobserved = 1;");
+    expect_contains(b, "return publish_indeterminate_before_fallback(nonce);");
+    /* Every producer decision goes through ONE protocol. Tri-state late-load
+     * state and an expired deadline can only SKIP the reboot (fail closed). */
+    expect_contains(b, "return producer_decide_and_publish(&io, NULL, late_load_rc, /* soft_reboot */ 0, LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);");
+    expect_contains(b, "io.late_load_state = io_late_load_state;");
+    expect_contains(b, "return late_load_running();");
+    expect_contains(p, "deadline = deadline_after(start, late_load_wait_ms);");
+    expect_contains(p, "if (st < 0) {");
+    expect_contains(p, "return publish_or_none(io, ctx, REBOOT_SKIPPED);");
+    /* The bounded SIGKILL/reap loop never blocks forever on a stuck child. */
+    expect_contains(b, "#define SIGKILL_REAP_WAIT_MS 2000");
+    expect_contains(b, "kill_and_reap_bounded(pid);");
+    /* All timeout exits map to indeterminate rc7 through the shared mapping. */
+    expect_contains(p, "io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;");
+    expect_contains(p, "case REBOOT_ATTEMPT_UNKNOWN: return DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(e, "if (wait == ERR) {");
+    expect_contains(e, "rc = DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(e, "if (outcome == DF_OUTCOME_NONE) {");
     free(bootstrap);
+    free(protocol);
+    free(exp);
     free(b);
+    free(p);
+    free(e);
 }
 
 /* The native reader's own deadline expiry must never be reported as SUCCESS
@@ -2022,14 +2060,29 @@ static void test_reader_timeout_indeterminate(void)
     }
     if (source_dir == NULL) die("native source directory is required");
     char *exp = read_native_source("exp.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *e = normalize_whitespace(exp);
-    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
+    char *p = normalize_whitespace(protocol);
+
+    /* The reader's bounded wait runs in the master protocol. A pending
+     * preflight that never refines is REBOOT_ATTEMPT_UNKNOWN (rc7); an ERR or
+     * a missing bound observation is also rc7. Only setup() failures are rc2. */
+    expect_contains(e, "wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,");
+    expect_contains(e, "if (wait == ERR) {");
+    expect_contains(e, "printf(\"status: indeterminate rc=%d (recovery UNKNOWN); no reboot authorized\\n\", rc);");
+    expect_contains(e, "if (outcome == DF_OUTCOME_NONE) {");
+    expect_contains(e, "printf(\"status: no bound final observation; indeterminate rc=%d\\n\", rc);");
     expect_contains(e, "if (setup(argc, argv) != 0) return 2;");
-    if (strstr(e, "timeout: ERROR - check logcat & dmesg") != NULL) {
+    expect_contains(p, "io->observed_outcome = REBOOT_ATTEMPT_UNKNOWN;");
+    expect_contains(p, "case REBOOT_ATTEMPT_UNKNOWN: return DF_RC_ATTEMPT_UNKNOWN;");
+    if (strstr(exp, "rc = DF_RC_ERROR;") != NULL
+        || strstr(exp, "timeout: ERROR - check logcat & dmesg") != NULL) {
         die("reader timeout still reports a definitive failure");
     }
     free(exp);
+    free(protocol);
     free(e);
+    free(p);
 }
 
 /* Pure shared-budget arithmetic: the poll receives only the time the late-load
@@ -2048,16 +2101,26 @@ static void test_shared_late_load_budget(void)
     }
     if (source_dir == NULL) die("native source directory is required");
     char *bootstrap = read_native_source("bootstrap.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *b = normalize_whitespace(bootstrap);
-    expect_contains(b, "int64_t late_start = monotonic_ms();");
-    expect_contains(b, "run_status_remaining_budget( late_elapsed, RUN_STATUS_LATE_LOAD_WAIT_MS)");
-    expect_contains(b, "run_status_wait_continues(now - poll_start, late_poll_budget)");
-    if (strstr(bootstrap, "run_status_wait_continues(now - start, RUN_STATUS_LATE_LOAD_WAIT_MS)")
-        != NULL) {
-        die("late-load poll reintroduced a fresh full budget");
+    char *p = normalize_whitespace(protocol);
+
+    /* ONE bounded deadline for the late-load scan; the recovery-gate window
+     * is clamped to its remainder, and the consumer's grace window is clamped
+     * to the overall deadline. No phase receives a fresh full budget. */
+    expect_contains(p, "deadline = deadline_after(start, late_load_wait_ms);");
+    expect_contains(p, "int64_t window = deadline_after(now, DF_RECOVERY_WAIT_MS);");
+    expect_contains(p, "int64_t recovery_deadline = (window < deadline) ? window : deadline;");
+    expect_contains(p, "overall_deadline = deadline_after(start, overall_ms);");
+    expect_contains(p, "deadline = (g < overall_deadline) ? g : overall_deadline;");
+    expect_contains(b, "return producer_decide_and_publish(&io, NULL, late_load_rc, /* soft_reboot */ 0, LATE_LOAD_WAIT_MS, SOFT_REBOOT_WAIT_MS);");
+    if (strstr(p, "deadline = deadline_after(now, late_load_wait_ms);") != NULL) {
+        die("late-load wait reintroduced a fresh full budget");
     }
     free(bootstrap);
+    free(protocol);
     free(b);
+    free(p);
 }
 
 /* A failed fork() starts no child: keep the ordinary rc=1 / rc=6 failure.
@@ -2078,10 +2141,25 @@ static void test_launch_failure_mapping(void)
     }
     if (source_dir == NULL) die("native source directory is required");
     char *bootstrap = read_native_source("bootstrap.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *b = normalize_whitespace(bootstrap);
-    expect_contains(b, "if (pid < 0) { if (launch_failed != NULL) *launch_failed = 1; return -1; }");
+    char *p = normalize_whitespace(protocol);
+
+    /* A failed fork() starts no child: both launchers return -1 WITHOUT
+     * marking the exit unobserved, so an ordinary ERROR/REBOOT_FAILED is
+     * published. Only a timeout or unobserved exit can be indeterminate. */
+    expect_contains(b, "if (unobserved != NULL) *unobserved = 0;");
+    expect_contains(b, "pid = fork(); if (pid < 0) return -1;");
+    expect_contains(p, "if (late_load_rc != 0) {");
+    expect_contains(p, "return publish_or_none(io, ctx, ERROR);");
+    expect_contains(p, "child_rc = io->wait_child(ctx, child_wait_ms);");
+    expect_contains(p, "refined = (child_rc == 0) ? REBOOT_REQUESTED : REBOOT_FAILED;");
+    expect_contains(p, "case ERROR: return DF_RC_ERROR;");
+    expect_contains(p, "case REBOOT_FAILED: return DF_RC_REBOOT_FAILED;");
     free(bootstrap);
+    free(protocol);
     free(b);
+    free(p);
 }
 
 /* End-to-end protocol case: bootstrap publishes its reserved rc=1 diagnostic
@@ -2130,17 +2208,34 @@ static void test_pre_admission_unconfirmed(void)
         die("pure decision differed from the reader path");
     }
 
-    /* Cross-file wiring: exp must run the narrow scan, use the pure helper,
-     * and print its explicit diagnostic; the deadline path must stay rc7. */
+    /* Cross-file wiring under the single master protocol: a failure before a
+     * run identity exists is published on the RESERVED-nonce channel, which
+     * the reader accepts only as an UNBOUND observation. With no bound final
+     * token the result stays indeterminate rc7, never rc0/rc1 of this run. */
     if (source_dir == NULL) die("native source directory is required");
+    char *bootstrap = read_native_source("bootstrap.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *exp = read_native_source("exp.c");
+    char *b = normalize_whitespace(bootstrap);
+    char *p = normalize_whitespace(protocol);
     char *e = normalize_whitespace(exp);
-    expect_contains(e, "run_status_pre_admission_failure()");
-    expect_contains(e, "run_status_decide(&result, pre_admission_failure, &decision)");
-    expect_contains(e, "printf(\"%s\\n\", decision.diagnostic)");
-    expect_contains(e, "rc = decision.code;");
-    expect_contains(e, "rc = run_status_reader_timeout_code(expired)");
+    expect_contains(b, "if (read_nonce(nonce) != 0) {");
+    expect_contains(b, "df_format_final_token(token, sizeof(token), DF_RESERVED_BOOTSTRAP_NONCE, BOOTSTRAP_FAILED)");
+    expect_contains(b, "publish_bootstrap_failure_bounded()");
+    expect_contains(b, "if (io_publish_final(NULL, nonce, REBOOT_ATTEMPT_UNKNOWN) != 0) {");
+    expect_contains(b, "return DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(p, "int df_parse_bootstrap_failure_token(");
+    expect_contains(p, "if (!final_parsed && io->read_bootstrap_failure) {");
+    expect_contains(p, "cleanup_and_recheck(io, ctx, cleanup_cb, 0, cleanup_done, cleanup_failed);");
+    expect_contains(e, "io.read_bootstrap_failure = exp_read_bootstrap_failure;");
+    expect_contains(e, "status = (bound_observation == 1 && !pf->cleanup_failed) ? \"ok\\n\" : \"fail\\n\";");
+    expect_contains(e, "if (outcome == DF_OUTCOME_NONE) {");
+    expect_contains(e, "rc = DF_RC_ATTEMPT_UNKNOWN;");
+    free(bootstrap);
+    free(protocol);
     free(exp);
+    free(b);
+    free(p);
     free(e);
 }
 
@@ -2417,16 +2512,32 @@ static void test_classifier_failure_indeterminate(void)
 
     if (source_dir == NULL) die("native source directory is required");
     char *exp = read_native_source("exp.c");
+    char *protocol = read_native_source("status_protocol.c");
     char *e = normalize_whitespace(exp);
-    expect_contains(e, "rc = run_status_classifier_error_code();");
-    expect_contains(e,
-            "printf(\"terminal classifier error: %s; completion unverified\\n\", result.diagnostic);");
-    if (strstr(exp, "rc = RUN_STATUS_TERMINAL_ERROR") != NULL
-        || strstr(exp, "rc = RUN_STATUS_TERMINAL_SUCCESS") != NULL) {
-        die("classifier failure still exits a definitive code");
+    char *p = normalize_whitespace(protocol);
+
+    /* A failed observation in master's single protocol (ERR / strict parse
+     * failure) leaves NO bound outcome and forces an UNBOUND cleanup. The
+     * reader reports indeterminate rc7 instead of substituting rc0/rc1. */
+    expect_contains(p, "if (r == ERR) {");
+    expect_contains(p, "cleanup_cb(ctx, 0);");
+    expect_contains(p, "if (cleanup_failed) *cleanup_failed = 1;");
+    expect_contains(p, "if (out) *out = DF_OUTCOME_NONE;");
+    expect_contains(p, "case REBOOT_ATTEMPT_UNKNOWN: return DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(e, "wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,");
+    expect_contains(e, "if (wait == ERR) {");
+    expect_contains(e, "printf(\"status: indeterminate rc=%d (recovery UNKNOWN); no reboot authorized\\n\", rc);");
+    expect_contains(e, "rc = DF_RC_ATTEMPT_UNKNOWN;");
+    expect_contains(e, "if (cleanup(pf) < 0) {");
+    expect_contains(e, "status = (bound_observation == 1 && !pf->cleanup_failed) ? \"ok\\n\" : \"fail\\n\";");
+    if (strstr(exp, "rc = DF_RC_ERROR;") != NULL
+        || strstr(exp, "rc = DF_RC_SUCCESS;") != NULL) {
+        die("an observed failure still exits a definitive code");
     }
     free(exp);
+    free(protocol);
     free(e);
+    free(p);
 }
 
 /* Pure, deterministic state-machine table for the R2-14 boundary. Harmless
