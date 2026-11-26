@@ -8,9 +8,11 @@ identical head confirmed in Re-review 8. R8 changes **no production code** and
 **closes no gate**. The R8.2 README phase is already committed as `fde6b73`.
 The PR-description correction (the stale "base CI fails without
 signing.properties" statement) was applied GitHub-side only: no code, no head
-change, no git commit. This R8.3 CHANGELOG phase, the R8.4 tasks
-plan/todo phase, and the final consolidation commit are referenced here **by
-subject only**; their short hashes will be filled in during final consolidation.
+change, no git commit. The R8.3 CHANGELOG phase is committed as `4002b39` and
+the R8.4 tasks plan/todo phase as `55f2c62`; the final consolidation commit
+(`chore: close the eighth documentation round`) closes the round. The R8.1
+GitHub-side edit was verified with `isDraft=true`, `state=OPEN` and
+`headRefOid=be9201c55d42c38e8e6d98a3eb640dd6cd153598`.
 
 Disposition table — unchanged from Re-review 8 (no new evidence changed any
 disposition, no new finding IDs assigned):

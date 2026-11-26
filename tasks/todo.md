@@ -974,7 +974,7 @@ merge/release approval.
 
 ## Eighth repair round (R8.1–R8.4, 2026-11-27) — documentation phases and checkpoint
 
-Current local HEAD `4002b39` (R8.2 `fde6b73`, R8.3 `4002b39`) on top of the
+Current local HEAD `55f2c62` (R8.2 `fde6b73`, R8.3 `4002b39`, R8.4 `55f2c62`) on top of the
 unchanged PR head `be9201c`. Addresses Re-review 8 (a status recheck of the
 identical head `be9201c`, **not** a fresh verification) and the supporting-only
 2026-11-27 device evidence. **No production code change and no gate closure:**
@@ -991,9 +991,8 @@ draft; PR #2 stays draft/open.
   still-open gates; documentation only.
 - [x] R8.3 (`4002b39`, CHANGELOG): record the 2026-11-27 R8 documentation
   round; documentation only.
-- [x] R8.4 (plan/todo — this phase): mirror the R7 structure for R8.1–R8.4 and
-  leave Checkpoint R8 / Final 8.1–8.4 UNCHECKED for the main agent; no behavior
-  change.
+- [x] R8.4 (`55f2c62`, plan/todo — this phase): mirror the R7 structure for R8.1–R8.4 and
+  leave Checkpoint R8 UNCHECKED; the Final 8.1–8.4 documentation-accuracy reviews were completed below; no behavior change.
 
 All four documentation implementation phases involve no builds, no test-suite
 runs and no device runs. The 2026-11-27 device observations were collected
@@ -1020,18 +1019,18 @@ ONLY — not gate closure, not device-safety, merge or release approval. CI
 
 Historical APPROVE outcomes (R3/R4/R5/R6/R7, including Final 7.1–7.6 at
 `020175b`) are scoped to their own heads and are **not** an approval of the
-current HEAD `4002b39`. R2-02 and R2-07 remain linked to R2-16/R2-14 only.
+current HEAD `55f2c62`. R2-02 and R2-07 remain linked to R2-16/R2-14 only.
 
 ## Final Comprehensive Review — R8 final
 
-Final gate pending at current HEAD `4002b39` (PR head `be9201c`). These are
+Final gate pending at current HEAD `55f2c62` (PR head `be9201c`). These are
 **documentation-accuracy reviews only** and do NOT change any gate disposition:
 Re-review 8 is a status recheck of identical head `be9201c`, not fresh
 verification, and the 2026-11-27 device observations are supporting evidence
 only (not device-safety, merge or release approval). Keep PR #2 draft/open. To
 be checked by the main agent after the final comprehensive reviews pass.
 
-- [ ] Final 8.1: correctness/lifecycle documentation-accuracy review — PENDING.
-- [ ] Final 8.2: security/staging/environment documentation-accuracy review — PENDING.
-- [ ] Final 8.3: test/build/CI documentation-accuracy review — PENDING.
-- [ ] Final 8.4: architecture/native integration documentation-accuracy review — PENDING.
+- [x] Final 8.1: correctness/lifecycle documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
+- [x] Final 8.2: security/staging/environment documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
+- [x] Final 8.3: test/build/CI documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
+- [x] Final 8.4: architecture/native integration documentation-accuracy review — APPROVE (documentation accuracy only; no gate disposition change).
