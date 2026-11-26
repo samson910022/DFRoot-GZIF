@@ -672,5 +672,5 @@ int main(void)
     touch("/dev/dfm6");
     /* config.soft_reboot is intentionally NOT forwarded: soft reboot is
      * unavailable and the production decision entry hard-codes 0. */
-    return final_rc(decide_and_publish(late_load_rc, nonce));
+    return final_rc(decide_and_publish(late_load_rc, nonce), nonce);
 }
