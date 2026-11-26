@@ -11,11 +11,15 @@ DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a
 
 ## DFRoot GZIF — Samsung Galaxy S23 Ultra (SM-S9180 / S9180ZHU8GZIF)
 
-This fork adds hardware-validated support for the S23 Ultra (`dm3q`) build
+This fork ports the DFRoot chain to the S23 Ultra (`dm3q`) build
 **`S9180ZHU8GZIF`** (Android 17 / One UI 9.0 / SPL 2026-10-05 /
-kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
+kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`). It was
+hardware-validated on 2026-11-17 against the **historical** implementation only;
+the current code base is host-tested with device retests for the **P2-16 restore
+scope** and, under D2, the **P2-17 final-status-observability scope only**; the
+PR as a whole is not device-verified (boundary below).
 
-- **Validated 2026-11-17** (volatile, late-load root only):
+- **Validated 2026-11-17 (historical loaders only)** (volatile, late-load root only):
   - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
   - KernelSU-Next **3.4.2** Samsung-patched generic loader → full chain; `su -v` → `3.4.2:KernelSU` (run8, 17:53)
 - **Vanilla (unpatched) KernelSU / KernelSU-Next modules panic inside `init_module()` on this build** — do not substitute them. This fork bundles Samsung-patched loaders under `app/src/main/jniLibs/` (provenance + sha256: `NOTICE`).
@@ -23,6 +27,190 @@ kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`).
 - **Only `S9180ZHU8GZIF` is tested.** No other build/model/One UI version is claimed. Not registered in any update feed.
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
+- **P2-16 fix (`376f5e2`; device retest passed for the restore scope; rc=2 timeout / unbound observation separate and OPEN):** the two pre-fix S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). On the retest S23 run the helper patch was re-established (verified) at cleanup and the vendor / `crash_dump64` restores were `restore OK (verified)` with **no recovery-failed bit** — P2-16's restore defect is **closed on device** for that scope. The run **still** ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed` with `/dev/dffinal` absent — a **separate, pre-existing OPEN item** (also present in the two pre-fix attempts); `/dev/dffinal` was the historical channel and **is no longer produced** under D2. P1-02 / P1-07 / P1-08 remain OPEN; no tag, no publish (disposable local test key). See `CHANGELOG.md` round 12 and round 13.
+- **P2-17 fix (D2, committed at literal head `e823fb4`; parent `d39a278` historical):** the final status was published on time with the correct nonce-bound token, but `/dev/dffinal` carried `u:object_r:device:s0`, which the app domain could not read, so every run ended rc=2 unbound observation. A relabel attempt (`0f9bf69`) was denied and reverted at `d39a278`; a zero-code pre-flight eliminated creating a file in the `/data` root (root got `Permission denied`). D2 makes the **non-persistent Android property `dfroot.final`** the single authoritative final channel: root/bootstrap sets it, the app reads it, its context is `u:object_r:default_prop:s0`, unprivileged `setprop` is denied, and the canonical token / nonce binding / strict parse / fail-closed publication are unchanged. **`/dev/dffinal` is no longer produced.** Device retest PASSED for the **final-status-observability scope only** (APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`, disposable local test key, no tag/publish): `final: ROOT_ONLY - no reboot requested; root not verified` then `status: final status observed (rc=0)`, property `dfroot.final` = `dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only`, root via `3.4.2:KernelSU` / `u:r:ksu:s0`, Enforcing, all restores `restore OK (verified)` with no bit 64 (P2-16 scope still green), no unbound observation. The rc=0 is **scoped to final-status observability only**; P1-02 / P1-07 / P1-08 remain OPEN and the PR as a whole is not device-verified, not merge-ready and not release-ready. Evidence for that earlier **pre-commit author-local run**: `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7*.txt`); `post-reboot8.txt` records the device not reconnecting after reboot, so no post-reboot state claim. **A second author-local full run at the committed head `e823fb4`** (APK sha256 `f866b4388f9f4c9e365dbf2936a9b076eab14b6ad2f2b4e9ea3e642080758807`, disposable local test key, no tag/publish) is **SCOPED AUTHOR-LOCAL EVIDENCE, NOT independent validation**: `pre9.txt` clean after reconnection (Enforcing, no `su`, no `/dev/df`, no `/dev/dffinal`, no `ksud`, `dfroot.final` empty, vendor 529568 B mtime 2022-01-01); `app-result9.txt` helper patch re-established, four restores `restore OK (verified)`, no bit 64, `final: ROOT_ONLY - no reboot requested; root not verified` then `status: final status observed (rc=0)`; `root-probes9.txt` nonce `fdeb49b6704ae77bdd4648bbabfb9d69`, `3.4.2:KernelSU` / `u:r:ksu:s0`, Enforcing; `root-stability9.txt` after 30 s root/property unchanged, `ksud`=0, pstore empty. No reboot was requested, so there is no post-reboot evidence; this does not supersede the `post-reboot8.txt` caveat. Counts unchanged (policy 92; helper-size 30 author-reported; six CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3). Exact-head CI for `e823fb4` is run **45864085866** (host-only; see the boundary below). See `CHANGELOG.md` round 13.
+
+> [!WARNING]
+> **Validation boundary.** The **literal head is the committed `e823fb4`**
+> (`fix(native): publish final status via app-readable property`, D2 native
+> property channel + round-13 docs in ONE commit); its immediate parent
+> `d39a278` is historical. PR #3 base is
+> `9f60e16251f5856ee1ae720eaea84b41d7992920`, CI merge SHA
+> `69054f5be1a278d88c19164444a7590e3c5bc2c0`. Round-12 heads
+> (`39a376f` docs, `376f5e2` code), the historical relabel attempt `0f9bf69`
+> and its revert `d39a278` are historical; the P2-15 fix code head is
+> `7e18b13`, the Phase B / P2-14 code head is `0ea022f` (`fix(ci): verify
+> loader bytes inside every distributable APK`) and the round-8 reviewed head
+> is `36a11bc` — none of these is the literal head. The producer change
+> `2b59684` and loader integration `413a5cb` are earlier/mid-increment points.
+> **Independent-review accounting (R11, comment 7126155178): 29 IDs, 23
+> closed, 4 open (3 P1 + 1 P2) and 2 author-reported addressed / pending
+> independent validation.** The author changelog rounds 11–13 are **not**
+> independent review rounds R1–R11; P2-15/P2-16/P2-17 are author-reported, not
+> discovered by R10. **Round-10 scope (not retroactively
+> changed):** consolidated review comment **7126155178** at `74b12df` reported
+> **0 new findings, 0 P2 open and 3 P1 open (P1-02 / P1-07 / P1-08)**, left the
+> head unchanged and completed CI run **45710535038** with `success`. **P2-15
+> was NOT found by that review**, nor were P2-16 and P2-17 — all three are
+> author-reported and pending independent validation; an author-local release
+> build found P2-15 because non-tag CI builds Debug only and the tagged release
+> job was never executed. CI status re-checked earlier: run **45708004129** at
+> `0ea022f` **completed with conclusion `success`** (host-only, not device
+> validation); its log confirms the counts below. Runs **45706111735**
+> (`0832331`), **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are
+> also completed `success` but are **earlier heads**. **Exact-head CI (committed
+> head `e823fb4`): run 45864085866** — `pull_request` event, head `e823fb4`,
+> **completed `success`**, **host-only**: Fast CI (92 policy, 36 Make, 40
+> signing), Host evidence gates (61 status, 13 proc, 28 ELF, 40 loader-stage,
+> six CMake 23/25/3/7/6/16, 7/7 markers), CI DFRoot evidence gates, LKM 1/1,
+> JUnit 39/0/0/0 — all pass; helper-size **30** is **author-reported** (CI
+> prints pass, not a count). **Signed release APK and Publish GitHub Release
+> jobs SKIPPED; no DFRoot APK uploaded.** CI does **not** verify any device
+> result. No completed-green CI conclusion is claimed for the earlier heads
+> `7e18b13` or `376f5e2`.
+> run6/run8 happened on 2026-11-17 against the
+> **historical implementation** (old multi-marker protocol, then-current KO
+> pins, old preference path). **Two S23 attempts on 2026-11-26 at the pre-fix
+> head `0f0a2ad` reached a full root chain but FAILED the vendor restore (app
+> rc 66 = 2 + recovery bit 64); they are attempts, not validations** (evidence:
+> `/mnt/240G_SSD/opencode_tmp/s23-final/`). A later S23 retest of the APK built
+> from code head `376f5e2` **passed for the P2-16 restore scope** (`cleanup:
+> crash_dump64 helper patch re-established (verified)`, vendor and
+> `crash_dump64` `restore OK (verified)`, no bit 64), but **still** ended
+> `status: timeout waiting for final status (rc=2)` / `cleanup: unbound
+> observation; recovery gate stays closed` with `/dev/dffinal` absent — a
+> **separate pre-existing OPEN item**, not caused by P2-16 (`/dev/dffinal` was
+> the historical channel and **is no longer produced** under D2). A later D2
+> device retest **passed for the P2-17 final-status-observability scope only**:
+> `final: ROOT_ONLY - no reboot requested; root not verified` then
+> `status: final status observed (rc=0)`, with `dfroot.final` =
+> `dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only`, all restores verified
+> and no bit 64 (APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`,
+> disposable local test key, no tag/publish). That rc=0 is **scoped**: it does
+> not validate the chain, quiescence, loaders or release readiness. The PR as a
+> whole is **not device-verified, not independently merge-ready and not
+> release-ready**; a successful build does not certify safe privileged
+> execution.
+> An **unconditional** `host-gates` job runs **all** host suites as required
+> gates on **every** event, including protected `v*` tag pushes, with a
+> checkout-SHA assertion; both `build-dfroot` and `build-release` require it,
+> and `publish` requires `build-release`. Non-tag events upload **no DFRoot app
+> APK**: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
+> (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
+> intermediate `df-lkm-${kmi}` KO artifact **is** uploaded separately by
+> `build-lkms` on every event; it is a build intermediate, not a DFRoot app APK
+> and not a release claim. The Debug APK is a compile/content gate only. Only a
+> `v*` tag push takes the protected `build-release` path, where the signed APK
+> is `apksigner`-verified and checksummed, then every distributable APK is
+> packaged-byte-verified with its own manifest and `so_sha256` binding **and
+> has both bundled loader entries extracted and checked for SHA-256 + size
+> against the CMakeLists.txt pins by the real verifier** (Phase B gate
+> `Verify bundled loader bytes in every distributable APK`); every provenance
+> record gets a required identity check, a nonempty per-APK loader index is
+> required at the pre-upload choke point, and release evidence is asserted at
+> a single pre-upload choke point before `publish` can run. This is a host/CI
+> packaging gate, **not** device validation; release markers stay 3/3 and host
+> markers stay 7/7.
+> **Loader-byte preservation (P2-15, Phase 1 `7e18b13`):** the Phase B gate
+> checks bytes inside distributable APKs, but AGP 9.5 strips debug symbols
+> from bundled release JNI libraries by default. A local release build from
+> `74b12df` packaged different loader bytes even though the committed inputs
+> and build-time pins were correct. `app/build.gradle.kts` now sets
+> `packaging.jniLibs` `keepDebugSymbols += "**/libksud.so"` and
+> `keepDebugSymbols += "**/libksudnext.so"` so both entries keep their reviewed
+> bytes in release APKs. Host-only local-key evidence, no release/device claim
+> (see `CHANGELOG.md` round 11).
+> Provenance manifests are informational evidence, **not** an attestation or
+> an independent reproducible-build proof.
+> Host suites at the Phase B code head (`0ea022f`, local verification; at the
+> literal head only the workflow policy count below and the helper-size count
+> change): **61**
+> status + `final_publish` + 13 proc-scan + **28 ELF** + 16/14/10 device-version
+> + **40 loader-stage** cases (`tests/native/loader_stage_test.c`) and the
+> helper-size suite (`tests/native/helper_size_test.c`, **30 cases at `376f5e2`,
+> was 7**), CMake **23/25/3/7/6/16**
+> cases (KO policy / packaged-KO / APK packaging / APK content **7** cases /
+> target graph / loader hash **16** cases), JVM **39 tests** (4/10/12/13 in
+> LaunchGate / ListenerLifecycle / PreferenceIntegrity / PreferencePersister)
+> with a strict **39/0/0/0** XML assertion, **7/7** host suite markers on every
+> event and **3/3** release markers (plus the nonempty gate index, the required
+> per-APK loader index and single upload choke point) on the tag path. Workflow
+> policy (`tests/workflow/test_policy.py`): **92 tests** (was 90 at rounds 8–10
+> and 85 earlier; P2-15 regression added at `7e18b13`).
+> No required gate uses `continue-on-error`.
+> **KO pins:** the byte gate rejects unknown bytes but still accepts the two
+> known obsolete pins (`94f8be…` / `9dfb8b…`, 13504 / 13384 B). Release is
+> withheld by **policy** — a reviewed re-pin, the OPEN P1-08 staging gate and
+> device validation — not by the hash gate alone; passing the gate is not device
+> validation. Gradle passes the Android variant (`release` / `debug`) as the
+> authoritative native policy signal, and the KO is linked into a dedicated
+> `.dfroot_ko` section whose final bytes in `libdfroot.so` are SHA-256-checked
+> against the same pins.
+> The app reads the single authoritative nonce-bound final outcome from the
+> **non-persistent Android property `dfroot.final`** (context
+> `u:object_r:default_prop:s0`; root/bootstrap sets it, the app reads it;
+> unprivileged `setprop` is denied). **`/dev/dffinal` is no longer produced.**
+> The token and rc mapping are unchanged (truthful rc 0–9 plus the additive 64
+> recovery bit), with exactly-once cleanup on
+> every exit, and separate app-owned `dfbootfail` / `dfrecover` channels:
+> `dfrecover` is bound to the current run nonce, so a stale or foreign `ok` is
+> rejected: token syntax is not invocation proof, and absence of evidence is
+> not proof that system activity stopped. Deadline checks are host-proven
+> ordering only; device quiescence and verified restoration are UNVALIDATED.
+> Preference transactions use a durable write-ahead marker, a sticky
+> fail-closed `WILDCARD`, launch tokens and a whole-transaction lock; no
+> success is reported for a failed integrity transaction. Boot component state
+> is tri-state and now shows a **persistent `UNKNOWN` status row** plus an
+> explicit safe disable action; `UNKNOWN` is never shown as verified `OFF` and
+> never used to accept `OFF`, and nothing auto-enables. Real UI lifecycle and
+> PackageManager behavior are UNVALIDATED. All host-proven only. Auto Soft
+> Reboot and Start on Boot remain disabled by default and unvalidated.
+> **P1-08 remains OPEN:** the previously bundled loaders consumed a
+> `shell`-writable `/data/local/tmp/.ksud-stage`. Both loaders have now been
+> rebuilt from the P1-08-patched source to consume a root-owned
+> `/data/adb/.ksud-stage` (fd-validated before promotion), and the producer at
+> `2b59684` stages to that exact path; the rebuilt bytes are pinned by sha256
+> and size at build time. This was a loader-side fix — DFRoot-side changes
+> alone could not close it. It remains **OPEN pending re-review and fresh
+> on-device full-chain validation**: documentation is not a fix and unverified
+> privileged content must not be consumed or distributed. run6/run8 are
+> historical and validate only the old loaders. **P1-02 and P1-07 also remain
+> OPEN safety/release gates**; the two pre-fix S23 attempts returned rc 66,
+> but **P1-07 remains OPEN** even though restore verification is now
+> device-confirmed on the retest runs — quiescence and failure-interruption
+> remain unproven. The pre-D2 rc=2 unbound-observation timeout was a separate
+> OPEN item; the D2 retest observed rc=0 through `dfroot.final`, which confirms
+> final-status observability only and does not close any P1 gate.
+> P2-13 and P2-14 are unchanged (Phase A/B, pending final comprehensive
+> review). **P2-15 was addressed in Phase 1 (`7e18b13`) and is pending final
+> comprehensive review** — not claimed finally closed. **P2-16's restore defect
+> was addressed in `376f5e2` and is device-confirmed closed on S23 for the
+> restore scope** (retest passed: helper patch re-established and verified
+> restores of vendor file and `crash_dump64`, no bit 64); the separate rc=2
+> timeout / unbound-observation item was the pre-D2 finding. **P2-17 (D2)
+> moved the authoritative final channel to the non-persistent property
+> `dfroot.final`; `/dev/dffinal` is no longer produced**, and both scoped
+> author-local S23 retests passed for the **final-status-observability scope
+> only** (rc=0, correct nonce-bound token, all restores verified, no bit 64;
+> the second at committed head `e823fb4`, no reboot requested). **P1-02, P1-07
+> and P1-08 remain OPEN**; those scoped rc=0 results are not a full-chain,
+> quiescence, loader or release validation and are **not independent
+> validation**. Auto Soft Reboot and Start on Boot remain disabled and
+> unvalidated; no independent device run validates the PR as a whole, no tag
+> was created and no release was published, and this PR is **not independently
+> device-verified, not merge-ready and not release-ready**. Both new local APKs
+> used a **disposable local test key**, are not official signing material and
+> were never tagged, uploaded or published; exact-head CI run 45864085866
+> skipped the signed release APK and GitHub Release publish jobs, and the
+> release job remains unexecuted. See `CHANGELOG.md` round 13 (current), round 12, round 11
+> and round 8 (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle
+> detail.
+
+> [!NOTE]
+> **Post-rebase integration.** PR #1 (CI build reliability) is now merged into
+> the base and PR #3 was rebased onto that head. run6/run8 and all earlier CI
+> runs predate the rebase: they are historical and do not validate the rebased
+> head. No tag was created by us.
 
 ## FAQ
 
@@ -122,8 +310,8 @@ SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
 The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 `app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
 
-- build it with the top-level `make` (podman + the digest-pinned `android13-5.15`
-  DDK image — long), or
+- build it with the top-level `make` (one podman build, digest-pinned
+  `android13-5.15` DDK image — long), or
 - build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
   the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
   for GZIF, or
@@ -143,40 +331,57 @@ Then: `./gradlew :app:assembleRelease` →
 `app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
 `adb install -r` → enable adb → open **DFRoot GZIF** → LAUNCH ROOT.
 
+The native build requires `CMAKE_OBJCOPY` (configure fails without it): a
+POST_BUILD step dumps the dedicated `.dfroot_ko` section from `libdfroot.so`
+and verifies the **packaged bytes** against the same KO pins and expected
+sizes. There is no skip option for this gate. Tag CI repeats it against the
+APK's `lib/arm64-v8a/libdfroot.so` before publishing. The gate rejects unknown
+bytes but **accepts the two known obsolete pins**: a release is withheld by
+policy (reviewed re-pin, OPEN P1-08 and device validation), not by the hash
+gate alone; passing it is not device validation (see `CHANGELOG.md`).
+
 ### Signing variants and CI events
 
 - **Debug** is always signed with the standard Android debug keystore
   (`signingConfigs.getByName("debug")`), independently of `signing.properties`,
   and is installable for development.
-- **Release** is **unsigned** when `signing.properties` is absent: Gradle only
-  warns at configuration time and the build succeeds. An unsigned release APK
-  is not a production artifact — Android will not install it over an installed
-  signed build. To produce an installable signed Release, add a gitignored root
-  `signing.properties` with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` /
-  `KEY_ALIAS` / `KEY_PASSWORD` (or use the top-level `make`, which generates a
-  local keystore from the exported `SIGN_PASS` / `SIGN_ALIAS`). **Do not commit
-  it.** Incomplete properties fail closed with a readable configuration error.
-- **CI event matrix** (`.github/workflows/build.yml`): pull requests, pushes to
-  `master`/`main`, and manual `workflow_dispatch` runs build a
-  **debug-keystore-signed Debug + unsigned Release** pair of APKs and run all
-  fast policy/contract tests **with no secrets available** — there is no release
-  signing on those events. Only a **push of a `v*` tag** runs `build-release` in
-  the protected `release` environment, where the `KEYSTORE*` secrets exist,
-  builds and verifies a **signed Release**, and publishes it (with
-  `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`) as a GitHub
-  Release. Branch/PR builds never see secrets and never publish a GitHub Release.
-  Branch/PR/manual unsigned APKs are nevertheless public Actions artifacts (the
-  repository is public): the `DFRoot` artifact also carries `GPL-3.0.txt`,
-  `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md` alongside the APKs.
+- **Release** requires a gitignored root `signing.properties` with
+  `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (or the
+  top-level `make`, which generates a local keystore from the exported
+  `SIGN_PASS` / `SIGN_ALIAS`). Without complete, real signing material the
+  release variant and every release task are **disabled/fail closed**; a
+  harmless placeholder keeps configuration, `assembleDebug` and unit tests
+  working, and no unsigned or dummy-signed release APK is emitted. **Do not
+  commit** `signing.properties`.
+- **CI event matrix** (`.github/workflows/build.yml`): an unconditional
+  `host-gates` job (`needs: build-lkms`, no `if`, checkout-SHA assertion) runs
+  all native/CMake/JVM suites, the real KO CI policy and the 7/7 marker gate on
+  **every** event including protected `v*` tag pushes. Pull requests, pushes to
+  `master`/`main` and manual `workflow_dispatch` runs then build a
+  debug-keystore-signed Debug APK strictly as a compile/content gate with **no
+  secrets**, and upload **no APK** — only the `DFRoot-CI-evidence` bundle with
+  `GPL-3.0.txt`, `LICENSE`, `NOTICE` and `THIRD_PARTY_NOTICES.md`. No signed
+  APK, no signing secrets, no GitHub Release and no release claim. Only a push
+  of a `v*` tag runs `build-release` in the protected `release` environment
+  (also requiring `host-gates`), where the four `KEYSTORE*` secrets exist: the
+  signed APK is `apksigner`-verified, checksummed, packaged-byte- and
+  provenance-evidence-gated before upload, then `publish` (requiring
+  `build-release`) emits the GitHub Release with the same licence/notice
+  bundle. The signing smoke uses an isolated identity
+  (`df.root.signingsmoke` / `4.8-gzif-signingsmoke` /
+  `SigningSmoke-4.8-gzif-signingsmoke.apk`), rejects `DFRoot_*.apk` and emits no
+  distributable artifact.
 - The `KEYSTORE` value — the protected CI secret, or the environment value read
   by `WriteSigningProperties.java ci` locally — must be a **base64-encoded JKS**
-  (produce it with `base64 -w0 keystore.jks`). It is decoded and the resulting
-  JKS validated before any signing material is published; a raw JKS is rejected.
+  (produce it with `base64 -w0 keystore.jks`); it is decoded and the JKS
+  validated before any signing material is published. A raw JKS is rejected.
 
 > [!WARNING]
-> The release signing key is new. Android refuses to overwrite-update an
+> **The release signing key is new.** Android refuses to overwrite-update an
 > installed application with an APK signed by a different key: uninstall any
 > existing DFRoot GZIF installation before installing a signed release build.
+> No APK is distributed from non-tag CI; the signing-smoke APK uses an isolated
+> identity and is never a distributable artifact.
 
 ## Credits
 

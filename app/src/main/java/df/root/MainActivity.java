@@ -1,3 +1,5 @@
+// Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): durable gate owns
+// boot-disable; the activity listener is UI-only and lifecycle-scoped. See NOTICE.
 package df.root;
 
 import android.app.Activity;
@@ -10,6 +12,7 @@ import android.graphics.drawable.Drawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -40,14 +43,27 @@ public class MainActivity extends Activity implements IReporter {
     private TextView outputView;
     private Spinner spinnerSuManager;
     private Context mDeCtx;
+    private Context mAppContext;
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private final Executor mExec = Executors.newSingleThreadExecutor();
     private int mValidSuManagerPos = 0;
+    private PreferencePersister mPrefsPersister;
+    // Held in a field so onDestroy() can remove it: a static/anonymous listener
+    // would retain this Activity across every screen recreation.
+    private PreferenceIntegrity.Listener mIntegrityListener;
+    // A programmatic setSelection() fires onItemSelected again; suppress the
+    // write (and any further revert) while restoring the previous choice.
+    private boolean mRestoringSpinnerSelection;
+    // Keeps the CPU awake across the up-to-85s overall status wait in
+    // ExploitRunner.run() (70 s budget + bounded grace); the timeout bounds it
+    // in case the native binary hangs.
+    private PowerManager.WakeLock mWakeLock;
 
     @Override
     public void report(String msg) {
         Log.i(TAG, msg.trim());
         mMain.post(() -> {
+            if (isFinishing() || isDestroyed() || outputView == null || outputScroll == null) return;
             outputView.append(msg);
             outputScroll.post(() -> outputScroll.fullScroll(View.FOCUS_DOWN));
         });
@@ -56,7 +72,11 @@ public class MainActivity extends Activity implements IReporter {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mAppContext = getApplicationContext();
         mDeCtx = createDeviceProtectedStorageContext();
+        PreferenceIntegrity.init(mDeCtx);
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        mWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:manual");
         setContentView(R.layout.activity_main);
 
         getActionBar().setSubtitle("@diabl0w github/xda");
@@ -79,6 +99,18 @@ public class MainActivity extends Activity implements IReporter {
         spinnerSuManager.setAdapter(new SuManagerAdapter(this, entries));
 
         SharedPreferences prefs = mDeCtx.getSharedPreferences(ExploitRunner.PREFS_NAME, Context.MODE_PRIVATE);
+        final Context app = mAppContext;
+        mPrefsPersister = new PreferencePersister(prefs, (key, detail) -> {
+            Log.e(TAG, "Preference write failed for " + key + ": " + detail);
+            // The durable gate already disabled boot at the failure boundary;
+            // this callback is only a user-facing revert/toast.
+            mMain.post(() -> {
+                if (isFinishing() || isDestroyed() || outputView == null) return;
+                Toast.makeText(app,
+                        "Could not save selection - reverting; LAUNCH ROOT is blocked " +
+                        "until the same setting saves successfully", Toast.LENGTH_LONG).show();
+            });
+        });
         String saved = prefs.getString(ExploitRunner.PREF_SU_MANAGER, null);
         boolean savedFound = false;
         for (int i = 1; i < entries.size(); i++) {
@@ -90,22 +122,44 @@ public class MainActivity extends Activity implements IReporter {
             }
         }
         if (!savedFound && saved != null) { // Saved manager was uninstalled
-            prefs.edit().remove(ExploitRunner.PREF_SU_MANAGER).apply();
+            // commit(): the native bootstrap reads the prefs XML from disk.
+            if (!mPrefsPersister.remove(ExploitRunner.PREF_SU_MANAGER)) {
+                // commit() failed: the stale package name MAY REMAIN ON DISK,
+                // and BootReceiver (if enabled) could still read it through
+                // ExploitRunner.run() on a later boot. The UI avoids offering
+                // a selection the bootstrap would act on, but this is a
+                // residual risk (see CHANGELOG.md / PORTING-GZIF.md).
+                revertSpinnerSelection(0);
+            }
         }
 
         spinnerSuManager.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int pos, long id) {
+                if (mRestoringSpinnerSelection) return; // programmatic revert
                 SuManagerEntry e = entries.get(pos);
                 if (e.packageName == null) return;
+                int previous = mValidSuManagerPos;
                 mValidSuManagerPos = pos;
-                prefs.edit().putString(ExploitRunner.PREF_SU_MANAGER, e.packageName).apply();
+                // commit(): the native bootstrap reads the prefs XML from disk.
+                if (!mPrefsPersister.putString(ExploitRunner.PREF_SU_MANAGER, e.packageName)) {
+                    // Guard prevents this setSelection() from writing the old
+                    // value back or triggering another revert.
+                    revertSpinnerSelection(previous);
+                }
                 updateRunButton();
             }
             @Override
             public void onNothingSelected(AdapterView<?> parent) {}
         });
 
+        // UI-only: reflect the latch on the next frame. Boot-disable is a
+        // durable operation owned by PreferenceIntegrity at the failure boundary.
+        mIntegrityListener = () -> mMain.post(() -> {
+            if (isFinishing() || isDestroyed() || btnRun == null) return;
+            updateRunButton();
+        });
+        PreferenceIntegrity.addListener(mIntegrityListener);
         updateRunButton();
 
         btnRun.setOnClickListener(v -> {
@@ -130,22 +184,55 @@ public class MainActivity extends Activity implements IReporter {
         return super.onOptionsItemSelected(item);
     }
 
+    @Override
+    protected void onDestroy() {
+        // No callback may outlive the screen and retain it after recreation.
+        if (mIntegrityListener != null) {
+            PreferenceIntegrity.removeListener(mIntegrityListener);
+            mIntegrityListener = null;
+        }
+        super.onDestroy();
+    }
+
     private void updateRunButton() {
-        btnRun.setEnabled(mValidSuManagerPos >= 1 && !new File("/dev/df").exists());
+        if (btnRun == null || isFinishing() || isDestroyed()) return;
+        btnRun.setEnabled(mValidSuManagerPos >= 1
+                && !new File("/dev/df").exists()
+                && !PreferenceIntegrity.isQuarantined());
+    }
+
+    /** Revert the spinner without re-persisting the old selection. */
+    private void revertSpinnerSelection(int pos) {
+        mRestoringSpinnerSelection = true;
+        spinnerSuManager.setSelection(pos, false);
+        // AdapterView normally dispatches onItemSelected synchronously, but a
+        // queued callback must also see the guard: our post is FIFO behind it.
+        mMain.post(() -> mRestoringSpinnerSelection = false);
+        mValidSuManagerPos = pos;
+        updateRunButton();
     }
 
     private void runExploit() {
+        // Bound the lock so a hung native binary cannot keep the device awake
+        // forever; 120s comfortably covers the 85s overall status budget.
+        mWakeLock.acquire(120000);
         try {
             int rc = ExploitRunner.run(mDeCtx, this);
-            String msg = rc == 0 ? "DFRoot: SUCCESS"
-                       : rc == 1 ? "DFRoot: Error - ksud nonzero exit"
-                       : rc == 2 ? "DFRoot: Error - check logcat & dmesg"
-                       : "DFRoot: Error - failed to patch files";
-            mMain.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+            /* rc comes from either a Java-side early gate or the single
+             * atomically published final outcome. StatusRc.name() never claims
+             * root was verified or a reboot was confirmed: only an on-device
+             * oracle can prove either. */
+            String msg = StatusRc.name(rc);
+            mMain.post(() -> {
+                if (mAppContext != null && !isFinishing() && !isDestroyed()) {
+                    Toast.makeText(mAppContext, msg, Toast.LENGTH_LONG).show();
+                }
+            });
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");
         } finally {
+            if (mWakeLock.isHeld()) mWakeLock.release();
             mMain.post(this::updateRunButton);
         }
     }

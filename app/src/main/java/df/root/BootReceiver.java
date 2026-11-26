@@ -1,3 +1,6 @@
+// Modified 2026-11-25 (DFRoot GZIF round-4 PR #3 phase 3): defense-in-depth
+// quarantine check; the component is expected to be durably disabled already.
+// See NOTICE.
 package df.root;
 
 import android.content.BroadcastReceiver;
@@ -24,6 +27,16 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         }
         Log.i(TAG, "boot: " + intent.getAction());
         final Context deCtx = context.createDeviceProtectedStorageContext();
+        PreferenceIntegrity.init(deCtx);
+        if (PreferenceIntegrity.isQuarantined()) {
+            // Defense in depth only. On a healthy failure path the component
+            // was already durably disabled by the shared gate at the failure
+            // boundary; if this receiver still runs, that is an anomaly. This
+            // check is NEVER an oracle that the state is safe -- it can only
+            // skip a launch, never authorize one.
+            Log.i(TAG, "boot: preferences quarantined, skipping launch");
+            return;
+        }
         PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:boot");
         wl.acquire();

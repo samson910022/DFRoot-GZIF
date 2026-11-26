@@ -197,12 +197,12 @@
 
   // simulate a push operation
   .macro push Rn:req
-      str     \Rn, [sp, -16]
+      str     \Rn, [sp, #-16]!
   .endm
 
   // simulate a pop operation
-  .macro pop R:req
-      ldr     \Rn, [sp], 16
+  .macro pop Rn:req
+      ldr     \Rn, [sp], #16
   .endm
 
 // Save x0 to filename for debugging.
@@ -221,7 +221,7 @@
     mov x0, -100
     adr x1, \filename
     movl x2, (O_CREAT|O_EXCL|O_CLOEXEC|O_WRONLY)
-    mov x3, (0777)
+    mov x3, (0600)
     mov x8, #SYS_openat
     svc 0
 
@@ -251,7 +251,7 @@
     mov x0, -100
     adr x1, \filename
     movl x2, (O_CREAT|O_EXCL|O_CLOEXEC)
-    mov x3, xzr
+    mov x3, (0600)
     mov x8, #SYS_openat
     svc 0
 .endm
