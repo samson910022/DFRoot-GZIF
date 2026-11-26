@@ -1,5 +1,86 @@
 # Changelog — DFRoot GZIF
 
+## 2026-11-27 — Eighth documentation round (R8) — PR description correction and supporting device evidence
+
+Authoritative record of the **eighth documentation round** (R8) on PR #2 /
+branch `fix/app-correctness-safety`, started from reviewed head `be9201c` — the
+identical head confirmed in Re-review 8. R8 changes **no production code** and
+**closes no gate**. The R8.2 README phase is already committed as `fde6b73`.
+The PR-description correction (the stale "base CI fails without
+signing.properties" statement) was applied GitHub-side only: no code, no head
+change, no git commit. This R8.3 CHANGELOG phase, the R8.4 tasks
+plan/todo phase, and the final consolidation commit are referenced here **by
+subject only**; their short hashes will be filled in during final consolidation.
+
+Disposition table — unchanged from Re-review 8 (no new evidence changed any
+disposition, no new finding IDs assigned):
+
+| Item | Disposition |
+|---|---|
+| 19 of 24 findings | Addressed in reviewed scope; unchanged. |
+| R2-14 | **SCOPED / OPEN** publication/acknowledgement gate — not closed, not proved safe. |
+| R2-16 | **SCOPED / OPEN** authorization (non-atomic OFF) gate — not closed, not proved safe. |
+| R2-18 | **SCOPED / OPEN** (P2) main-thread/foreground-service timing gate — not closed, not proved safe. |
+| R2-02, R2-07 | **Linked only** to the owning R2-16 authorization and R2-14 publication gates; not independent closed issues. |
+| R2-17, R2-24 | Closed **only in the previously reviewed scope**; no new claim here. |
+| Verdict | Unchanged **REQUEST CHANGES / keep draft**. |
+
+Device / build identity and authorization scope: S23 Ultra SM-S9180 (`dm3q`),
+build `CP2A.260605.016.S9180ZHU8GZIF`, Android 17 (SPL 2026-10-05), bootloader
+locked with `ro.boot.verifiedbootstate=green`, installed `df.root` 4.8-gzif /
+versionCode 408 matching repo head `be9201c`. The owner explicitly authorized
+**FULL device testing including soft-reboot / crash in R8 only**, overriding the
+earlier no-device constraint. All operations used `-s R5CW21C8PLR`. No payload
+rebuild, no APK assembly, no privileged container, no PCK/guard change; the
+installed APK was unchanged throughout.
+
+Five-stage device evidence — **SUPPORTING ONLY**; each item states its
+non-claim explicitly:
+
+- **(a) Baseline (happy path) — SUPPORTING ONLY:** full exploit chain observed,
+  root verified (`su -c id` → uid=0, `su -v` → 3.4.2:KernelSU), `final: ROOT_ONLY
+  - no reboot requested; root not verified`, `status: final status observed
+  (rc=0)`. **Non-claim:** this is not device safety and does not validate any
+  gate.
+- **(b) R2-14 abnormal force-stop — SUPPORTING ONLY:** `am force-stop df.root`
+  mid-patching produced `WINDOW DIED`, kernel-side root survived, and the
+  relaunched app showed an empty output view with `enabled=false` — no
+  fabricated success or completion claim. **Non-claim:** the precise
+  rc7-publish↔ack publication race was not instrumented or proved; R2-14 stays
+  OPEN.
+- **(c) R2-16 OFF authorization — SUPPORTING ONLY:** disabling
+  `com.rifsxd.ksunext` immediately disabled `LAUNCH ROOT`, and `Start at Boot`
+  / `Start at Boot status` read `Status unavailable - not confirmed disabled`
+  (fail-closed on an unreadable authorization read). **Non-claim:** the precise
+  non-atomic OFF transition during the final authorization read was **not hit**;
+  R2-16 stays OPEN.
+- **(d) R2-18 duplicate / contention — SUPPORTING ONLY:** three rapid taps
+  produced `hook armed` count **1** (one admitted run; duplicates rejected),
+  device responsive, `sys.boot_completed=1`, no FATAL/ANR.
+  **Non-claim:** no ANR-proof and no foreground-service-grace proof; main-thread
+  wait time and FGS deadline were not measured. R2-18 stays OPEN.
+- **(e) Soft-reboot (highest risk, last) — SUPPORTING ONLY:** with
+  `Auto Soft Reboot` enabled, native log showed `REBOOT_PENDING` then
+  `REBOOT_SKIPPED - soft reboot not attempted (late-load not confirmed absent)`,
+  `status: final status observed (rc=5)`; a 70 s uptime monitor increased
+  168→234 s without reset — no soft or hard reboot occurred. **Non-claim:** this
+  single observed run is not exhaustive proof over every interleaving and does
+  **not** remove the experimental soft-reboot risk.
+- **Volatile-root reboot observation — SUPPORTING ONLY:** after the Stage 2
+  force-stop, `adb reboot` returned the device healthy with `su` and `/dev/df`
+  absent, confirming the volatile-root contract and that a reboot clears any
+  page-cache residue from the interrupted run. **Non-claim:** not a closure of
+  R2-14 and not a claim about the un-instrumented publication window.
+
+Evidence framing: Re-review 8 is a **status recheck of the identical
+`be9201c`**, not a fresh line-by-line review, not new verification, and not a
+newly executed test suite. CI run `45787525701` is the previously reviewed,
+host-only run and is **not device evidence**. Nothing here establishes device
+safety, merge approval or release approval; the reviewer's instruction is not
+to expand the implementation merely to generate more review iterations.
+
+Keep PR #2 draft/open; R8 changes no production code and closes no gate.
+
 ## 2026-11-26 — Seventh repair round (R7.1–R7.3) consolidated — PR #2 / branch `fix/app-correctness-safety`
 
 Authoritative record of the **seventh repair round** (final local HEAD
