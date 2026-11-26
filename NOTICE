@@ -212,10 +212,14 @@ historical implementations or pre-rebase heads, not this head.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
-- **Validation status at the current code base (D2, uncommitted working tree on
-  `d39a278`; the upcoming documentation commit's immediate parent is `d39a278`
-  and is authoritative).** Host-only except for the scoped device retests
-  recorded in the P2-16 and P2-17 bullets below. Round-12 heads (`39a376f` docs,
+- **Validation status at the current code base (D2, committed literal head
+  `e823fb4`; parent `d39a278` historical).** The commit
+  `fix(native): publish final status via app-readable property` landed the D2
+  native property channel and the round-13 documentation in ONE commit. PR #3
+  base is `9f60e16251f5856ee1ae720eaea84b41d7992920` and the CI merge SHA for
+  the exact-head run is `69054f5be1a278d88c19164444a7590e3c5bc2c0`. Host-only
+  CI, plus scoped **author-local** device retests recorded in the P2-16 and
+  P2-17 bullets below. Round-12 heads (`39a376f` docs,
   `376f5e2` code), the reverted relabel attempt `0f9bf69` and its revert
   `d39a278` are historical; the P2-15 fix
   code head is `7e18b13`, the Phase B / P2-14 code head is `0ea022f` and the
@@ -228,19 +232,30 @@ historical implementations or pre-rebase heads, not this head.
   (not retroactively changed):** consolidated review comment **7126155178** at
   `74b12df` reported **0 new findings, 0 P2 open and 3 P1 open
   (P1-02 / P1-07 / P1-08)**, left the head unchanged and completed CI run
-  **45710535038** with `success`. **P2-15 was NOT found by that review**; an
-  author-local release build found it (non-tag CI builds Debug only; the tagged
-  release job was unexecuted). CI re-check: run **45708004129** at `0ea022f`
+  **45710535038** with `success`. **P2-15 was NOT found by that review**, nor
+  were P2-16 and P2-17 (all author-reported, pending independent validation);
+  an author-local release build found P2-15 (non-tag CI builds Debug only; the
+  tagged release job was unexecuted). CI re-check: run **45708004129** at `0ea022f`
   **completed with conclusion `success`** (host-only, not device validation);
   runs **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
   **45697296267** (`bb83849`) are also completed `success` but are **earlier
   heads**. The counts below are confirmed by the Phase B code-head log; no
-  literal-head count is asserted from an earlier log and no completed-green CI
-  conclusion is claimed for `7e18b13`, `376f5e2` or the D2 working tree (a run
-  had started but not concluded at documentation time; **no new CI run number**
-  is claimed for D2). The P2-16 restore-scope retest and the P2-17
-  final-status-observability retest are recorded in the bullets below; both are
-  **scoped**, no device run validates the PR as a whole, no tag was created and
+  literal-head count is asserted from an earlier log, and **no CI run at
+  `376f5e2` is claimed**. **Exact-head CI for `e823fb4` is run 45864085866**
+  (`pull_request` event, head `e823fb4`, **completed `success`**): host-only —
+  Fast CI (92 policy, 36 Make, 40 signing), Host evidence gates (61 status, 13
+  proc, 28 ELF, 40 loader-stage, six CMake 23/25/3/7/6/16, 7/7 markers), CI
+  DFRoot evidence gates, LKM 1/1, JUnit 39/0/0/0 — all pass; helper-size **30**
+  is author-reported (CI prints pass, not a count). **Signed release APK and
+  Publish GitHub Release jobs SKIPPED; no DFRoot APK uploaded.** CI does **not**
+  verify any device result. **Independent-review accounting (R11, comment
+  7126155178): 29 IDs, 23 closed, 4 open (3 P1 + 1 P2) and 2 author-reported
+  addressed / pending independent validation.** Author changelog rounds 11–13
+  are **not** independent review rounds R1–R11; P2-15/P2-16/P2-17 are
+  author-reported, not discovered by R10. The P2-16 restore-scope retest and
+  the two P2-17 final-status-observability retests are recorded in the bullets
+  below; all are **scoped author-local evidence, not independent validation**,
+  no independent device run validates the PR as a whole, no tag was created and
   no release was published.
 - **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
   DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
@@ -418,13 +433,14 @@ historical implementations or pre-rebase heads, not this head.
   absent, vendor size/mtime unchanged, S23 connected; no panic evidence (pstore
   empty). Counts otherwise unchanged (policy 92; CMake 23/25/3/7/6/16; native
   61 + `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40;
-  JVM 39; markers 7/7 + 3/3); **no new CI run number**. **Validation boundary:
-  the PR as a whole is not device-verified, not independently merge-ready and
-  not release-ready; no tag or publish.** P1-02, P1-07 and P1-08 remain OPEN —
+  JVM 39; markers 7/7 + 3/3); no CI run number is claimed for that earlier P2-16
+  code head `376f5e2` (exact-head CI for `e823fb4` is 45864085866, host-only).
+  **Validation boundary: the PR as a whole is not independently
+  device-verified, not merge-ready and not release-ready; no tag or publish.** P1-02, P1-07 and P1-08 remain OPEN —
   P1-07 restore verification is now device-confirmed but quiescence and
   failure-interruption remain unproven. See `CHANGELOG.md` round 12.
-- **P2-17 (D2; uncommitted working tree on `d39a278`, to be committed after
-  review) — final-status observability, scoped device retest PASSED.** The old
+- **P2-17 (D2; committed at literal head `e823fb4`, parent `d39a278` historical)
+  — final-status observability, scoped author-local device retests PASSED.** The old
   `/dev/dffinal` final channel was published on time with the correct nonce but
   carried `u:object_r:device:s0`, so the app domain could not observe it and
   every run ended rc=2 unbound observation. A `fsetxattr` relabel attempt
@@ -438,7 +454,8 @@ historical implementations or pre-rebase heads, not this head.
   canonical token / nonce binding / strict parse / fail-closed publication are
   unchanged. **`/dev/dffinal` is no longer produced**; device diagnostics now
   use `dfroot.final`.
-  **Device retest (S23, 2026-11-27, scoped PASS):** APK sha256
+  **Earlier pre-commit author-local device retest (S23, 2026-11-27, scoped
+  PASS; working tree on `d39a278`):** APK sha256
   `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af` with a
   **disposable local test key** (no tag, no publish, no official signing claim):
   `final: ROOT_ONLY - no reboot requested; root not verified` then
@@ -450,16 +467,34 @@ historical implementations or pre-rebase heads, not this head.
   (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`,
   `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`).
   `post-reboot8.txt` records the device not reconnecting (`adb: device
-  'R5CW21C8PLR' not found`), so no post-reboot state claim is made. Counts are
-  unchanged (policy 92; helper-size 30; CMake 23/25/3/7/6/16; native 61 +
-  `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40; JVM 39;
-  markers 7/7 + 3/3); `final_publish` gains an unnumbered pure truth-table test;
-  **no new CI run number**. **Limits:** the rc=0 is a SCOPED confirmation of
-  final-status observability only — not full-chain, quiescence, loader or
-  release validation. **P1-02 / P1-07 / P1-08 remain OPEN**; the PR as a whole
-  is **not device-verified, not independently merge-ready and not
-  release-ready**. Auto Soft Reboot and Start on Boot remain disabled and
-  unvalidated. See `CHANGELOG.md` round 13.
+  'R5CW21C8PLR' not found`), so no post-reboot state claim is made.
+  **Second author-local full run at committed head `e823fb4` (after the R11
+  snapshot):** APK sha256
+  `f866b4388f9f4c9e365dbf2936a9b076eab14b6ad2f2b4e9ea3e642080758807`
+  (**disposable local test key**, no tag/publish), evidence
+  `/mnt/240G_SSD/opencode_tmp/s23-final/` (`pre9.txt`, `app-result9.txt`,
+  `root-probes9.txt`, `root-stability9.txt`, `logcat9.txt`, `apk9-sha256.txt`):
+  `pre9.txt` clean after reconnection (Enforcing, no `su`, no `/dev/df`, no
+  `/dev/dffinal`, no `ksud`, `dfroot.final` empty, vendor 529568 B mtime
+  2022-01-01); `app-result9.txt` helper patch re-established, four restores
+  `restore OK (verified)`, no bit 64, `final: ROOT_ONLY - no reboot requested;
+  root not verified` then `status: final status observed (rc=0)`;
+  `root-probes9.txt` nonce `fdeb49b6704ae77bdd4648bbabfb9d69`,
+  `3.4.2:KernelSU` / `u:r:ksu:s0`, Enforcing; `root-stability9.txt` after 30 s
+  root/property unchanged, `ksud`=0, pstore empty. **SCOPED AUTHOR-LOCAL
+  EVIDENCE, NOT independent validation**; no reboot was requested, so there is
+  no post-reboot evidence, and this does not supersede the `post-reboot8.txt`
+  caveat above. Counts are unchanged (policy 92; helper-size 30 author-reported;
+  CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28, version
+  16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3); `final_publish` gains
+  an unnumbered pure truth-table test. **Exact-head CI for `e823fb4` is run
+  45864085866** (completed `success`, host-only, release/publish jobs SKIPPED,
+  no DFRoot APK uploaded; see above). **Limits:** the rc=0 results are a SCOPED
+  confirmation of final-status observability only — not full-chain, quiescence,
+  loader or release validation, and not independent validation. **P1-02 /
+  P1-07 / P1-08 remain OPEN**; the PR as a whole is **not independently
+  device-verified, not merge-ready and not release-ready**. Auto Soft Reboot
+  and Start on Boot remain disabled and unvalidated. See `CHANGELOG.md` round 13.
 
 References
 ----------
