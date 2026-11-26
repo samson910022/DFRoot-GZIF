@@ -12,6 +12,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef __ANDROID__
+#include <sys/system_properties.h>
+/* The header's duplicated bound must stay equal to bionic's: a mismatch
+ * would silently permit a truncating __system_property_set() call. */
+_Static_assert(PROP_VALUE_MAX == DF_PROP_VALUE_MAX,
+               "DF_PROP_VALUE_MAX must match bionic PROP_VALUE_MAX");
+#endif
+
 int df_token_is_canonical(const char *token)
 {
     char nonce[DF_NONCE_CHARS + 1];
@@ -20,6 +28,52 @@ int df_token_is_canonical(const char *token)
     return df_token_split(token, strlen(token), nonce, sizeof(nonce),
                           &outcome) == 0;
 }
+
+int df_property_value_ok(const char *buf, size_t len, size_t cap)
+{
+    char nonce[DF_NONCE_CHARS + 1];
+    enum df_outcome outcome;
+
+    if (!buf || cap == 0 || len == 0 || len >= cap ||
+        len >= DF_FINAL_TOKEN_CAP || len >= DF_PROP_VALUE_MAX)
+        return 0;
+    /* df_token_split() rejects embedded NULs, a wrong prefix, malformed hex,
+     * an unknown/none outcome and a missing/duplicated trailing newline. It
+     * extracts but does not compare the nonce, which is intentional here. */
+    return df_token_split(buf, len, nonce, sizeof(nonce), &outcome) == 0;
+}
+
+#ifdef __ANDROID__
+int df_publish_property(const char *token)
+{
+    size_t len;
+
+    if (!token || !df_token_is_canonical(token))
+        return -1;
+    len = strlen(token);
+    /* __system_property_set() silently truncates at PROP_VALUE_MAX-1 bytes.
+     * Never hand it a value that could be truncated. */
+    if (len == 0 || len >= DF_FINAL_TOKEN_CAP || len >= DF_PROP_VALUE_MAX)
+        return -1;
+    return __system_property_set(DF_FINAL_PROPERTY, token) < 0 ? -1 : 0;
+}
+
+int df_read_property(char *buf, size_t cap, size_t *out_len)
+{
+    int n;
+
+    if (!buf || !out_len || cap < DF_PROP_VALUE_MAX)
+        return -1; /* bionic may write PROP_VALUE_MAX bytes before length check */
+    *out_len = 0;
+    n = __system_property_get(DF_FINAL_PROPERTY, buf);
+    /* 0 means absent (or an empty value); bionic writes a NUL at buf[n], so
+     * the caller's buffer must be strictly larger than the value length. */
+    if (n <= 0 || (size_t)n >= cap)
+        return -1;
+    *out_len = (size_t)n;
+    return 0;
+}
+#endif /* __ANDROID__ */
 
 int df_publish_final(const char *tmp_path, const char *final_path,
                      const char *token)

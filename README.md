@@ -15,8 +15,9 @@ This fork ports the DFRoot chain to the S23 Ultra (`dm3q`) build
 **`S9180ZHU8GZIF`** (Android 17 / One UI 9.0 / SPL 2026-10-05 /
 kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF`). It was
 hardware-validated on 2026-11-17 against the **historical** implementation only;
-the current code head is host-tested with a device retest for the **P2-16
-restore scope only**; the PR as a whole is not device-verified (boundary below).
+the current code base is host-tested with device retests for the **P2-16 restore
+scope** and, under D2, the **P2-17 final-status-observability scope only**; the
+PR as a whole is not device-verified (boundary below).
 
 - **Validated 2026-11-17 (historical loaders only)** (volatile, late-load root only):
   - KernelSU **3.3.0** Samsung-patched classic loader → full chain; `su -c id` → `uid=0(root) … u:r:ksu:s0` (run6, 16:49)
@@ -26,14 +27,16 @@ restore scope only**; the PR as a whole is not device-verified (boundary below).
 - **Only `S9180ZHU8GZIF` is tested.** No other build/model/One UI version is claimed. Not registered in any update feed.
 - The fork renames the app label to **DFRoot GZIF** (`versionCode` 408, `versionName` `4.8-gzif`). `applicationId` remains `df.root` by design (bootstrap staging depends on it).
 - Provenance, per-file change notices, licence split, and the source offer for the bundled loaders: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`. Build/port notes: `PORTING-GZIF.md`.
-- **P2-16 fix (`376f5e2`; device retest passed for the restore scope; rc=2 timeout / unbound observation separate and OPEN):** the two pre-fix S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). On the retest S23 run the helper patch was re-established (verified) at cleanup and the vendor / `crash_dump64` restores were `restore OK (verified)` with **no recovery-failed bit** — P2-16's restore defect is **closed on device** for that scope. The run **still** ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed` with `/dev/dffinal` absent — a **separate, pre-existing OPEN item** (also present in the two pre-fix attempts). P1-02 / P1-07 / P1-08 remain OPEN; no tag, no publish (disposable local test key). See `CHANGELOG.md` round 12.
+- **P2-16 fix (`376f5e2`; device retest passed for the restore scope; rc=2 timeout / unbound observation separate and OPEN):** the two pre-fix S23 attempts showed a full root chain but a failed `/vendor/lib64/AIAwbModel_v2.2.tflite` restore (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`, rc 66). The decisive log shows the page-cache-only splicehelper patch was gone by cleanup, so the original `crash_dump64` ran (`wrong number of args: 3 (expected 6)`); the exact discard mechanism is **not proven**. The fix adds a pure `df_helper_block_matches()` predicate and calls `ensure_helper_patch()` at the start of `cleanup()` so the same patched helper is re-applied with the same verification before helper-backed restores, fail-closed and with no second restore record (helper-size suite **7 → 30** cases). On the retest S23 run the helper patch was re-established (verified) at cleanup and the vendor / `crash_dump64` restores were `restore OK (verified)` with **no recovery-failed bit** — P2-16's restore defect is **closed on device** for that scope. The run **still** ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed` with `/dev/dffinal` absent — a **separate, pre-existing OPEN item** (also present in the two pre-fix attempts); `/dev/dffinal` was the historical channel and **is no longer produced** under D2. P1-02 / P1-07 / P1-08 remain OPEN; no tag, no publish (disposable local test key). See `CHANGELOG.md` round 12 and round 13.
+- **P2-17 fix (D2, uncommitted working tree on `d39a278`; to be committed after review):** the final status was published on time with the correct nonce-bound token, but `/dev/dffinal` carried `u:object_r:device:s0`, which the app domain could not read, so every run ended rc=2 unbound observation. A relabel attempt (`0f9bf69`) was denied and reverted at `d39a278`; a zero-code pre-flight eliminated creating a file in the `/data` root (root got `Permission denied`). D2 makes the **non-persistent Android property `dfroot.final`** the single authoritative final channel: root/bootstrap sets it, the app reads it, its context is `u:object_r:default_prop:s0`, unprivileged `setprop` is denied, and the canonical token / nonce binding / strict parse / fail-closed publication are unchanged. **`/dev/dffinal` is no longer produced.** Device retest PASSED for the **final-status-observability scope only** (APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`, disposable local test key, no tag/publish): `final: ROOT_ONLY - no reboot requested; root not verified` then `status: final status observed (rc=0)`, property `dfroot.final` = `dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only`, root via `3.4.2:KernelSU` / `u:r:ksu:s0`, Enforcing, all restores `restore OK (verified)` with no bit 64 (P2-16 scope still green), no unbound observation. The rc=0 is **scoped to final-status observability only**; P1-02 / P1-07 / P1-08 remain OPEN and the PR as a whole is not device-verified, not merge-ready and not release-ready. Evidence: `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7*.txt`). See `CHANGELOG.md` round 13.
 
 > [!WARNING]
-> **Validation boundary.** The current **code head** of
-> `fix/native-exploit-robustness` is `376f5e2` (Phase 1 native cleanup-time
-> helper re-apply for P2-16); the literal head is this documentation update
-> (immediate parent `7a855c5`). The code head's immediate parent is `0f0a2ad`
-> (the pre-fix device-run head); the P2-15 fix code head is `7e18b13`, the Phase B / P2-14
+> **Validation boundary.** The upcoming documentation commit on
+> `fix/native-exploit-robustness` will have immediate parent `d39a278` and is
+> authoritative for the current boundary; the **P2-17 D2 code base** is the
+> **uncommitted working tree on `d39a278`**, to be committed after review.
+> Round-12 heads (`39a376f` docs, `376f5e2` code), the historical relabel
+> attempt `0f9bf69` and its revert `d39a278` are historical; the P2-15 fix code head is `7e18b13`, the Phase B / P2-14
 > code head is `0ea022f` (`fix(ci): verify loader bytes inside every
 > distributable APK`) and the round-8 reviewed head is `36a11bc` — none of
 > these is the literal head. The producer change `2b59684` and loader
@@ -49,8 +52,9 @@ restore scope only**; the PR as a whole is not device-verified (boundary below).
 > **45702366070** (`36a11bc`) and **45697296267** (`bb83849`) are also
 > completed `success` but are **earlier heads**; no literal-head count is
 > asserted from an earlier log and no completed-green CI conclusion is claimed
-> for `7e18b13` or `376f5e2` (a run had started but not concluded at
-> documentation time; no new CI run number is claimed for `376f5e2`).
+> for `7e18b13`, `376f5e2` or the D2 working tree (a run had started but not
+> concluded at documentation time; **no new CI run number** is claimed for the
+> D2 code base).
 > run6/run8 happened on 2026-11-17 against the
 > **historical implementation** (old multi-marker protocol, then-current KO
 > pins, old preference path). **Two S23 attempts on 2026-11-26 at the pre-fix
@@ -62,8 +66,16 @@ restore scope only**; the PR as a whole is not device-verified (boundary below).
 > `crash_dump64` `restore OK (verified)`, no bit 64), but **still** ended
 > `status: timeout waiting for final status (rc=2)` / `cleanup: unbound
 > observation; recovery gate stays closed` with `/dev/dffinal` absent — a
-> **separate pre-existing OPEN item**, not caused by P2-16. The PR as a whole
-> is **not device-verified, not independently merge-ready and not
+> **separate pre-existing OPEN item**, not caused by P2-16 (`/dev/dffinal` was
+> the historical channel and **is no longer produced** under D2). A later D2
+> device retest **passed for the P2-17 final-status-observability scope only**:
+> `final: ROOT_ONLY - no reboot requested; root not verified` then
+> `status: final status observed (rc=0)`, with `dfroot.final` =
+> `dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only`, all restores verified
+> and no bit 64 (APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`,
+> disposable local test key, no tag/publish). That rc=0 is **scoped**: it does
+> not validate the chain, quiescence, loaders or release readiness. The PR as a
+> whole is **not device-verified, not independently merge-ready and not
 > release-ready**; a successful build does not certify safe privileged
 > execution.
 > An **unconditional** `host-gates` job runs **all** host suites as required
@@ -121,8 +133,12 @@ restore scope only**; the PR as a whole is not device-verified (boundary below).
 > authoritative native policy signal, and the KO is linked into a dedicated
 > `.dfroot_ko` section whose final bytes in `libdfroot.so` are SHA-256-checked
 > against the same pins.
-> The app uses a single atomically published nonce-bound `/dev/dffinal` outcome
-> (truthful rc 0–9 plus the additive 64 recovery bit), exactly-once cleanup on
+> The app reads the single authoritative nonce-bound final outcome from the
+> **non-persistent Android property `dfroot.final`** (context
+> `u:object_r:default_prop:s0`; root/bootstrap sets it, the app reads it;
+> unprivileged `setprop` is denied). **`/dev/dffinal` is no longer produced.**
+> The token and rc mapping are unchanged (truthful rc 0–9 plus the additive 64
+> recovery bit), with exactly-once cleanup on
 > every exit, and separate app-owned `dfbootfail` / `dfrecover` channels:
 > `dfrecover` is bound to the current run nonce, so a stale or foreign `ok` is
 > rejected: token syntax is not invocation proof, and absence of evidence is
@@ -148,23 +164,31 @@ restore scope only**; the PR as a whole is not device-verified (boundary below).
 > historical and validate only the old loaders. **P1-02 and P1-07 also remain
 > OPEN safety/release gates**; the two pre-fix S23 attempts returned rc 66,
 > but **P1-07 remains OPEN** even though restore verification is now
-> device-confirmed on the retest run — quiescence and failure-interruption
-> remain unproven, and the rc=2 unbound-observation timeout is a separate OPEN
-> item.
+> device-confirmed on the retest runs — quiescence and failure-interruption
+> remain unproven. The pre-D2 rc=2 unbound-observation timeout was a separate
+> OPEN item; the D2 retest observed rc=0 through `dfroot.final`, which confirms
+> final-status observability only and does not close any P1 gate.
 > P2-13 and P2-14 are unchanged (Phase A/B, pending final comprehensive
 > review). **P2-15 was addressed in Phase 1 (`7e18b13`) and is pending final
 > comprehensive review** — not claimed finally closed. **P2-16's restore defect
 > was addressed in `376f5e2` and is device-confirmed closed on S23 for the
 > restore scope** (retest passed: helper patch re-established and verified
 > restores of vendor file and `crash_dump64`, no bit 64); the separate rc=2
-> timeout / unbound-observation item remains OPEN. Auto Soft Reboot and Start on
-> Boot remain disabled and unvalidated; no device run validates the PR as a
-> whole, no tag was created and no release was published, and this PR is **not
-> device-verified, not independently merge-ready and not release-ready**. The
-> only new local APK used a **disposable local test key**, is not official
+> timeout / unbound-observation item was the pre-D2 finding. **P2-17 (D2)
+> moved the authoritative final channel to the non-persistent property
+> `dfroot.final`; `/dev/dffinal` is no longer produced**, and the S23 retest
+> passed for the **final-status-observability scope only** (rc=0, correct
+> nonce-bound token, all restores verified, no bit 64; local test key, no
+> tag/publish). **P1-02, P1-07 and P1-08 remain OPEN**; that scoped rc=0 is not
+> a full-chain, quiescence, loader or release validation. Auto Soft Reboot and
+> Start on Boot remain disabled and unvalidated; no device run validates the PR
+> as a whole, no tag was created and no release was published, and this PR is
+> **not device-verified, not independently merge-ready and not release-ready**.
+> The only new local APK used a **disposable local test key**, is not official
 > signing material and was never tagged, uploaded or published; the release job
-> remains unexecuted. See `CHANGELOG.md` round 12, round 11 and round 8
-> (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle detail.
+> remains unexecuted. See `CHANGELOG.md` round 13 (current), round 12, round 11
+> and round 8 (2026-11-26) and `PORTING-GZIF.md` §19 for the test/lifecycle
+> detail.
 
 > [!NOTE]
 > **Post-rebase integration.** PR #1 (CI build reliability) is now merged into

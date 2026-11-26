@@ -12,8 +12,8 @@
  * be generated and persisted by exp.c BEFORE the hook is armed, and read back
  * by bootstrap; only then does a token bound to it identify this invocation.
  * A nonce read from shared persistent state alone does NOT establish identity:
- * exp.c refuses to arm when an existing /dev/dffinal token or an app-private
- * state file is stale, tampered or otherwise ambiguous. Clearing shared state
+ * exp.c refuses to arm when an existing dfroot.final property token or an
+ * app-private state file is stale, tampered or otherwise ambiguous. Clearing shared state
  * at entry (dfinv/dfrecover/dfbootfail) is ONLY hygiene, NEVER proof that a
  * later publication belongs to this invocation: every auxiliary observation
  * must be byte-bound to the current nonce before it can carry authority. */
@@ -22,7 +22,7 @@
 /* Exact byte length of a bound recovery-status token: 32 hex + '\n'. */
 #define DF_RECOVERY_STATUS_CHARS (DF_NONCE_CHARS + 1)
 /* Dedicated reserved identity for bootstrap failures that happen before a run
- * nonce can be established. Never used for a normal /dev/dffinal publication.
+ * nonce can be established. Never used for a normal dfroot.final publication.
  * The reserved token's SYNTAX is not invocation proof: it identifies a
  * bootstrap failure channel, never the current run's final outcome. */
 #define DF_RESERVED_BOOTSTRAP_NONCE "00000000000000000000000000000000"

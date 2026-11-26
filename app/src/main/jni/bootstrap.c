@@ -34,11 +34,10 @@
 #define KSUD       "/data/adb/ksud"
 #define PREFS_PATH "/data/user_de/0/df.root/shared_prefs/dfroot.xml"
 #define MODULES_DIR "/data/adb/modules"
-/* The single authoritative outcome. Written atomically via the .tmp file so
- * the consumer can never observe a partial token. Progress markers stay
- * informational; only /dev/dffinal carries the result. */
-#define DF_FINAL_PATH "/dev/dffinal"
-#define DF_FINAL_TMP  "/dev/dffinal.tmp"
+/* The single authoritative outcome is the dfroot.final system property
+ * (DF_FINAL_PROPERTY in final_status_publish.h): root can set it and the app
+ * can read it; no normal-outcome file in /dev is created or relabelled.
+ * Progress markers stay informational; only the property carries the result. */
 #define DF_NONCE_PATH "/data/user_de/0/df.root/files/dfinv"
 /* App-private channels: bootstrap failures before a run identity exists are
  * published under the RESERVED nonce here, never to /dev/dffinal. The recovery
@@ -318,27 +317,43 @@ static int io_late_load_state(void *ctx)
     return late_load_running();
 }
 
-/* Read the published final token with the strict real adapter: O_NOFOLLOW,
- * regular-file only, bounded size, exact read. A failure (absent/unreadable/
- * symlink/oversize) is simply "not available yet" to the consumer. */
+/* The producer never reads the final channel; retained as a fail-closed
+ * adapter so the injected vtable is complete. On Android it reads the same
+ * dfroot.final property the consumer observes. */
 static int io_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
 {
     (void)ctx;
-    return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
+#ifdef __ANDROID__
+    return df_read_property(buf, cap, out_len);
+#else
+    (void)buf; (void)cap; (void)out_len;
+    return -1; /* no Android property service on the host */
+#endif
 }
 
-/* Atomically publish one canonical, nonce-bound final token via
- * df_publish_final(): O_EXCL|O_NOFOLLOW temp, mode DF_FINAL_MODE (0644,
- * fchmod-pinned against umask), fsync, rename. rename(2) is atomic, so the
- * consumer sees either the old token or the new one, never a partial write.
- * Failure leaves the previous final status untouched. */
+/* Publish one canonical, nonce-bound final token to the single authoritative
+ * dfroot.final property. The token text is formatted exactly as before; the
+ * publisher validates its shape and length before calling the property setter
+ * (which never truncates). A publish failure returns -1, so the protocol maps
+ * it to DF_OUTCOME_NONE and the consumer fails closed on its deadline. No
+ * /dev file is written, cleared or relabelled for a normal outcome. */
 static int io_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
 {
     char token[DF_FINAL_TOKEN_CAP];
     (void)ctx;
     if (df_format_final_token(token, sizeof(token), nonce, outcome) < 0)
         return -1;
-    return df_publish_final(DF_FINAL_TMP, DF_FINAL_PATH, token);
+#ifdef __ANDROID__
+    if (df_publish_property(token) != 0) {
+        printf("bootstrap: publish property dfroot.final failed\n");
+        return -1;
+    }
+    printf("bootstrap: final token published as property dfroot.final\n");
+    return 0;
+#else
+    (void)token;
+    return -1; /* no Android property service on the host */
+#endif
 }
 
 /* SIGKILL the child and reap it with WNOHANG against a short secondary

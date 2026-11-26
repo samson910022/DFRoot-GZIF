@@ -362,6 +362,51 @@ static void test_bound_recovery_status(void)
     free(buf);
 }
 
+/* Pure truth table for the Android property VALUE validator. This exercises
+ * ONLY the host-safe predicate: no bionic adapters (df_publish_property /
+ * df_read_property) are compiled or called here. Length/canonicality only;
+ * nonce binding stays the strict parser's job and is not duplicated. */
+static void test_property_value_ok_truth_table(void)
+{
+    char buf[DF_FINAL_TOKEN_CAP + 4];
+    size_t len;
+
+    /* Canonical tokens are accepted when the length fits strictly inside cap. */
+    len = strlen(TOK_ROOT);
+    memcpy(buf, TOK_ROOT, len);
+    assert(df_property_value_ok(buf, len, len + 1) == 1);
+    assert(df_property_value_ok(buf, len, DF_FINAL_TOKEN_CAP) == 1);
+    /* Empty, NULL and a cap that is not strictly larger than len are rejected. */
+    assert(df_property_value_ok(buf, 0, sizeof(buf)) == 0);
+    assert(df_property_value_ok(NULL, len, sizeof(buf)) == 0);
+    assert(df_property_value_ok(buf, len, len) == 0);
+    assert(df_property_value_ok(buf, len, 0) == 0);
+    /* Oversize: len at or beyond the token cap / property cap is rejected. */
+    assert(df_property_value_ok(buf, DF_FINAL_TOKEN_CAP, sizeof(buf)) == 0);
+    assert(df_property_value_ok(buf, DF_PROP_VALUE_MAX, sizeof(buf)) == 0);
+    /* Noncanonical shapes: no prefix, missing newline, extra newline,
+     * uppercase nonce, unknown outcome and an embedded NUL. */
+    {
+        const char *bad[] = {
+            "root_only",
+            "dfroot-v2:" NONCE ":root_only",
+            "dfroot-v2:" NONCE ":root_only\n\n",
+            "dfroot-v2:0123456789ABCDEF0123456789abcdef:root_only\n",
+            "dfroot-v2:" NONCE ":nope\n",
+            "dfroot-v2:" NONCE ":none\n",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            size_t n = strlen(bad[i]);
+            assert(n < sizeof(buf));
+            memcpy(buf, bad[i], n);
+            assert(df_property_value_ok(buf, n, sizeof(buf)) == 0);
+        }
+        memcpy(buf, TOK_ROOT, len);
+        buf[15] = '\0'; /* NUL inside the nonce */
+        assert(df_property_value_ok(buf, len, sizeof(buf)) == 0);
+    }
+}
+
 int main(void)
 {
     mode_t old_umask;
@@ -436,6 +481,8 @@ int main(void)
     test_recovery_status();
     /* 8. Bound recovery-status round-trip: stale "ok\n" is rejected. */
     test_bound_recovery_status();
+    /* 9. Pure property-value truth table (host only; bionic adapters excluded). */
+    test_property_value_ok_truth_table();
 
     cleanup_files();
     puts("final_publish_test: canonical-token / permission / atomicity / reader / bootfail / unbound+bound recovery checks passed");

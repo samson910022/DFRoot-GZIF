@@ -14,14 +14,15 @@
 > smoke emits only an isolated `SigningSmoke-*.apk` that is never distributed.
 
 > [!WARNING]
-> **Literal head is not device-verified as a whole (restore-scope retest passed;
-> rc=2 timeout / P1 gates OPEN).** The current **code head** of
-> `fix/native-exploit-robustness` is `376f5e2` (Phase 1 native cleanup-time
-> helper re-apply for P2-16, 2026-11-26); the literal head is this documentation
-> update (immediate parent `7a855c5`). The code head's immediate parent is
-> `0f0a2ad` (the pre-fix device-run head); the P2-15 fix code head is `7e18b13`, the Phase
-> B / P2-14 code head is `0ea022f` and the round-8 reviewed head is `36a11bc`
-> — none of these is the literal head. **Round-10
+> **Literal head is not device-verified as a whole (scoped restore- and
+> final-status-observability retests passed; P1 gates OPEN).** The upcoming
+> documentation commit on `fix/native-exploit-robustness` has immediate parent
+> `d39a278` and is authoritative for the current boundary. The **P2-17 D2 code
+> base** is the **uncommitted working tree on `d39a278`**, to be committed after
+> review. Round-12 heads (`39a376f` docs, `376f5e2` code), the reverted relabel
+> attempt `0f9bf69` and its revert `d39a278` are historical; the P2-15 fix code
+> head is `7e18b13`, the Phase B / P2-14 code head is `0ea022f` and the
+> round-8 reviewed head is `36a11bc` — none of these is the literal head. **Round-10
 > scope (not retroactively changed):** consolidated review comment
 > **7126155178** at `74b12df` reported **0 new findings, 0 P2 open and 3 P1
 > open (P1-02 / P1-07 / P1-08)**, left the head unchanged and completed CI run
@@ -31,20 +32,22 @@
 > `0832331` (`fix(cmake): invalidate loader evidence before argument
 > validation`) and Phase B `0ea022f` (`fix(ci): verify loader bytes inside
 > every distributable APK`). Producer `2b59684` and loader integration
-> `413a5cb` are earlier/mid-increment points. This code head —
-> single nonce-bound `/dev/dffinal` outcome, app-owned bootfail/recovery
-> channels, write-ahead preference transaction, lifecycle-safe listeners,
-> persistent `UNKNOWN` boot-state UI, KO hash policy, build provenance and
-> packaging gates — is **host-tested except for the P2-16 restore-scope device
-> retest** recorded in §12 row 31 and the round-12 note above; the PR as a whole
-> is not device-verified. CI status re-checked before
+> `413a5cb` are earlier/mid-increment points. The D2 code base —
+> single nonce-bound final outcome in the **non-persistent Android property
+> `dfroot.final`** (root/bootstrap sets, app reads; `u:object_r:default_prop:s0`;
+> unprivileged `setprop` denied; **`/dev/dffinal` is no longer produced**),
+> app-owned bootfail/recovery channels, write-ahead preference transaction,
+> lifecycle-safe listeners, persistent `UNKNOWN` boot-state UI, KO hash policy,
+> build provenance and packaging gates — is **host-tested except for the scoped
+> device retests** recorded in §12 rows 31–32 and the round-12/round-13 notes
+> above; the PR as a whole is not device-verified. CI status re-checked before
 > finalizing this ledger: run **45708004129** at `0ea022f` **completed with
 > conclusion `success`** (host-only, not device validation); runs
 > **45706111735** (`0832331`), **45702366070** (`36a11bc`) and
 > **45697296267** (`bb83849`) also completed `success` but are **earlier
-> heads**; no completed-green CI conclusion is claimed for `7e18b13` or
-> `376f5e2` (a run had started but not concluded at documentation time; no new
-> CI run number is claimed for `376f5e2`). Counts below are confirmed
+> heads**; no completed-green CI conclusion is claimed for `7e18b13`,
+> `376f5e2` or the D2 working tree (a run had started but not concluded at
+> documentation time; **no new CI run number** is claimed for D2). Counts below are confirmed
 > by the Phase B code-head log; no exact literal-head count is asserted from an
 > earlier log. The hardware
 > results in §5 and §12 (run6/run8, 2026-11-17) and all earlier CI runs were
@@ -234,13 +237,53 @@
 > scope. **Separate and still OPEN (also in the two pre-fix attempts, not
 > caused by P2-16):** `status: timeout waiting for final status (rc=2)` and
 > `cleanup: unbound observation; recovery gate stays closed`, `/dev/dffinal`
-> absent. Post-reboot 15:23:08Z (`post-reboot3.txt`): Enforcing, uptime 62.73,
+> (historical channel, **no longer produced** under D2) absent. Post-reboot 15:23:08Z (`post-reboot3.txt`): Enforcing, uptime 62.73,
 > no `su`, all checked `/dev/df*` + `ksud` absent, vendor size/mtime unchanged; no panic
 > evidence (pstore empty). **Limits:** the PR as a whole is **not
 > device-verified, not merge-ready and not release-ready**; no tag or publish.
 > P1-02 / P1-07 / P1-08 remain OPEN — P1-07 restore verification is now
 > device-confirmed but quiescence and failure-interruption remain unproven. See
 > `CHANGELOG.md` round 12.
+
+> [!NOTE]
+> **Round 13 / P2-17 (2026-11-27) — final status moved to `dfroot.final`
+> (scoped device retest PASSED).** The final token was published on time with
+> the correct nonce but `/dev/dffinal` carried `u:object_r:device:s0`, so the
+> app domain could not observe it and runs ended rc=2 unbound observation
+> (`selinux-diag5.txt`, `poll-root-final5.txt`, `app-result6.txt`). A
+> `fsetxattr` relabel attempt (`0f9bf69`, copying `dfinv`'s `app_data_file`
+> label) was denied, never created `/dev/dffinal`, and its bootfail fallback
+> also failed (`label-diag6.txt`, `faildiag6.txt`); it was reverted at
+> `d39a278`. A zero-code pre-flight ruled out a file in the `/data` root
+> (`p2-17-preflight/d1-probe.txt`: root `Permission denied`). **D2 (uncommitted
+> working tree on `d39a278`, to be committed after review):** the single
+> authoritative final status is the **non-persistent Android property
+> `dfroot.final`** — root/bootstrap sets it, the app reads it, context
+> `u:object_r:default_prop:s0`, unprivileged `setprop` denied
+> (`channel-probe7*.txt`); canonical token, nonce binding, strict parse and
+> fail-closed publication are unchanged. **`/dev/dffinal` is no longer
+> produced**; device diagnostics use `dfroot.final`.
+>
+> **Device retest (S23, scoped PASS):** APK sha256
+> `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`,
+> **disposable local test key** (no tag/publish): `app-result8b.txt` shows
+> `final: ROOT_ONLY - no reboot requested; root not verified` then
+> `status: final status observed (rc=0)`, no unbound observation, all four
+> restores `restore OK (verified)` with no bit 64 (P2-16 scope still green);
+> `root-probes8b.txt` shows `prop=[dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only]`,
+> `3.4.2:KernelSU`, `uid=0(root) … u:r:ksu:s0`, `selinux=Enforcing`. Evidence:
+> `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`,
+> `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7*.txt`).
+> `post-reboot8.txt` records the device not reconnecting after reboot, so no
+> post-reboot claim is made. Counts unchanged (policy 92; helper-size 30;
+> CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28, version
+> 16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3); `final_publish` gains
+> an unnumbered pure truth-table test; **no new CI run number**. **Limits:** the
+> rc=0 confirms **final-status observability only** — not the full chain,
+> quiescence, loaders or release readiness. **P1-02 / P1-07 / P1-08 remain
+> OPEN**; the PR as a whole is **not device-verified, not merge-ready and not
+> release-ready**; no tag/publish, disposable local test key. See
+> `CHANGELOG.md` round 13.
 
 ---
 
@@ -337,7 +380,9 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
   final token is bound to the run nonce:
   `dfroot-v2:<32-hex nonce>:<outcome>\n`.
 - on **exit 0** → the pure producer publishes one atomically replaced final
-  token in `/dev/dffinal`: `ROOT_ONLY` when Auto Soft Reboot is off (terminal
+  token in the non-persistent Android property `dfroot.final` (root/bootstrap
+  sets it, the app reads it; **`/dev/dffinal` is no longer produced**):
+  `ROOT_ONLY` when Auto Soft Reboot is off (terminal
   immediately: it means ONLY "no reboot requested"); with it on, a 60 s
   monotonic-clock wait for `late-load` to disappear (unknown, timeout or an
   absence confirmed after the deadline → `REBOOT_SKIPPED`, **no reboot**), a
@@ -395,11 +440,11 @@ SharedPreferences quarantine gate; rc 7 covers `reboot_pending` /
 when a restore could not be verified; the Java `StatusRc.name()` surfaces that
 warning for every code and never claims verified root or a confirmed reboot.
 
-| `/dev/dffinal` token | App rc | Meaning |
+| `dfroot.final` property token (root sets, app reads; `/dev/dffinal` no longer produced) | App rc | Meaning |
 |---|---|---|
 | `root_only` | 0 | late-load exited 0, no reboot requested; **root not verified** (terminal) |
 | `error` | 1 | bootstrap failed at/after late-load or secure staging; no reboot |
-| `bootstrap_failed` on `dfbootfail` (reserved zero nonce) | 1 | bootstrap failed before a run identity existed (e.g. missing/malformed nonce); separate app-owned channel, **not** `/dev/dffinal`; no reboot |
+| `bootstrap_failed` on `dfbootfail` (reserved zero nonce) | 1 | bootstrap failed before a run identity existed (e.g. missing/malformed nonce); separate app-owned channel, **not** `dfroot.final`; no reboot |
 | *(absent / no valid token)* | 2 | unknown — check logcat & dmesg |
 | `reboot_requested` | 4 | soft-reboot command exited 0; **reboot not confirmed** |
 | `reboot_skipped` | 5 | soft reboot not attempted (late-load state unknown or deadline expired) |
@@ -549,15 +594,16 @@ return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot));
 /* decide_and_publish() wires status_io to real ops and calls:
  *   producer_decide_and_publish(io, ctx, late_load_rc, soft_reboot,
  *                               60000, 5000);
- * publish_final() writes /dev/dffinal.tmp (0644, fchmod-pinned against
- * umask, O_EXCL|O_NOFOLLOW), fsync()s it, then rename(2)s it over
- * /dev/dffinal so the app uid can read the token. */
+ * publish_final() now sets the non-persistent Android property
+ * dfroot.final (context u:object_r:default_prop:s0) from root/bootstrap;
+ * the app reads that property. The old /dev/dffinal temp-file publication
+ * is gone: /dev/dffinal is no longer produced. */
 ```
 
-This matches the documented FZG1 loader contract of the **historical (run4/run6/run8) binaries** (`kernelsu/README.md:154-156` in the payloads repo; `next-failure-analysis.md` §3.2/§6; those binaries contained the strings `/data/local/tmp/.ksud-stage`, `Failed to stage ksud`, `/data/adb/ksud`). The rebuilt loaders now bundled here contain `/data/adb/.ksud-stage` instead. `.ksud-stage` and `/data/adb/ksud` are on the same `/data` filesystem so the loader's `rename(2)` never crosses devices (`EXDEV` avoided). A secure-staging failure or a nonzero `late-load` exit now both publish the single `error` token in `/dev/dffinal` (rc=1); distinguishing the sub-step requires logcat with **both** KSU tags.
+This matches the documented FZG1 loader contract of the **historical (run4/run6/run8) binaries** (`kernelsu/README.md:154-156` in the payloads repo; `next-failure-analysis.md` §3.2/§6; those binaries contained the strings `/data/local/tmp/.ksud-stage`, `Failed to stage ksud`, `/data/adb/ksud`). The rebuilt loaders now bundled here contain `/data/adb/.ksud-stage` instead. `.ksud-stage` and `/data/adb/ksud` are on the same `/data` filesystem so the loader's `rename(2)` never crosses devices (`EXDEV` avoided). A secure-staging failure or a nonzero `late-load` exit now both publish the single `error` token in the `dfroot.final` property (rc=1; **`/dev/dffinal` is no longer produced**); distinguishing the sub-step requires logcat with **both** KSU tags.
 
 > [!NOTE]
-> The single `error` token in `/dev/dffinal` covers both "secure staging failed" and "ksud exited nonzero"; distinguishing them requires either reading the app log (the app prints `progress: bootstrap starting SU daemon` then awaits the final status) or capturing logcat with **both** tags (`KernelSU` **and** `KernelSU Next`) — the 17:00 evidence was blind to the latter and had to be diagnosed from the binary (see §9.2).
+> The single `error` token in `dfroot.final` (`/dev/dffinal` is no longer produced) covers both "secure staging failed" and "ksud exited nonzero"; distinguishing them requires either reading the app log (the app prints `progress: bootstrap starting SU daemon` then awaits the final status) or capturing logcat with **both** tags (`KernelSU` **and** `KernelSU Next`) — the 17:00 evidence was blind to the latter and had to be diagnosed from the binary (see §9.2).
 
 > [!WARNING]
 > **Residual staging risk (P1-08, release gate).** Historically (run4/run6/run8 loaders), `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory; `stage_file()` prevented symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but a `shell`-uid process could still replace the file after `close()` and before the loader's `rename()`. **That risk could not be closed by DFRoot-side changes alone**: it required rebuilding the loaders. Those rebuilds are now integrated — the bundled loaders consume a root-owned `/data/adb/.ksud-stage` validated by fd before promotion — but **P1-08 stays OPEN pending re-review and fresh on-device full-chain validation**. Do not treat this PR as a complete fix for that threat model.
@@ -654,15 +700,16 @@ validation.
    su -v             # 3.3.0:KernelSU   (run6)   |   3.4.2:KernelSU   (run8)
    getenforce        # Enforcing
    cat /proc/modules | grep kernelsu   # kernelsu ... Live
-   cat /dev/dffinal  # dfroot-v2:<nonce>:<root_only | reboot_pending |
-                     #   reboot_requested | reboot_skipped | reboot_failed |
-                     #   reboot_attempt_unknown | error>
+   getprop dfroot.final  # dfroot-v2:<nonce>:<root_only | reboot_pending |
+                         #   reboot_requested | reboot_skipped | reboot_failed |
+                         #   reboot_attempt_unknown | error>
+   # /dev/dffinal is no longer produced; use the property for final-status diagnostics.
    ```
 6. **After every reboot: re-run LAUNCH ROOT.** There is no persistence. Do **not** enable "Start on Boot" or "Auto Soft Reboot" until you have tested them (see §9.6 / §10).
 
 ### 8.4 What the app does each run (compressed)
 
-Fresh boot → press LAUNCH ROOT → (a) app stages bundled `libksudnext.so`/`libksud.so` + `libbootstrap.so` to its protected storage, (b) execs `libdfroot.so` with the IpSec SPI/key args, (c) `crash_dump64` + vendor tflite + `libc++.so` get patched in page cache, (d) `createOrphanProcess()` arms the init-tid-1 hook, (e) kernel UMH spawns `bootstrap`, (f) `bootstrap` stages `.ksud-stage`, (g) Samsung-patched ksud renames it to `/data/adb/ksud` and `init_module()`s its embedded `android13-5.15_kernelsu.ko`, (h) `bootstrap` atomically publishes one token in `/dev/dffinal` and the app reports the corresponding rc — never "root verified" and never a guaranteed reboot.
+Fresh boot → press LAUNCH ROOT → (a) app stages bundled `libksudnext.so`/`libksud.so` + `libbootstrap.so` to its protected storage, (b) execs `libdfroot.so` with the IpSec SPI/key args, (c) `crash_dump64` + vendor tflite + `libc++.so` get patched in page cache, (d) `createOrphanProcess()` arms the init-tid-1 hook, (e) kernel UMH spawns `bootstrap`, (f) `bootstrap` stages `.ksud-stage`, (g) Samsung-patched ksud renames it to `/data/adb/ksud` and `init_module()`s its embedded `android13-5.15_kernelsu.ko`, (h) `bootstrap` publishes one token in the non-persistent property `dfroot.final` (`/dev/dffinal` is no longer produced) and the app reports the corresponding rc — never "root verified" and never a guaranteed reboot.
 
 ---
 
@@ -672,7 +719,7 @@ Fresh boot → press LAUNCH ROOT → (a) app stages bundled `libksudnext.so`/`li
 `/dev/df` exists (MainActivity.java:134, ExploitRunner.java:46) — the exploit already ran on **this** boot. `/dev` is devtmpfs and is wiped at every boot, so this cannot be residue from a previous one. Reboot to re-arm. The button also requires a valid SU manager selected (position ≥ 1).
 
 ### 9.2 Toast "DFRoot: Error - bootstrap failed" / final token `error` (rc=1)
-Semantics (current code): `/dev/dffinal` contains `error` (rc=1) after a nonzero `late-load`/secure-staging failure; the app log line is `final: ERROR - bootstrap failed before root`. Under the **old marker protocol** this was `/dev/dfme2` present and `/dev/dfm6` absent; the historical run evidence below uses that old scheme and is **not** a validation of the current flow. Causes seen in the field, in probability order:
+Semantics (current code): the `dfroot.final` property contains `error` (rc=1) after a nonzero `late-load`/secure-staging failure (**`/dev/dffinal` is no longer produced**); the app log line is `final: ERROR - bootstrap failed before root`. Under the **old marker protocol** this was `/dev/dfme2` present and `/dev/dfm6` absent; the historical run evidence below uses that old scheme and is **not** a validation of the current flow. Causes seen in the field, in probability order:
 
 1. **Bundled Next loader with wrong embedded KMI asset name** (the 17:00 class; `libksudnext.so` embeds `android13-5.15.189_kernelsu.ko` only). Detect: `strings app/src/main/jniLibs/arm64-v8a/libksudnext.so | grep _kernelsu.ko` from host. **Fix:** keep `libksudnext.so` = `ksud-next-generic-kdp` (embeds `android13-5.15_kernelsu.ko`).
 2. **`/data/adb` missing / `.ksud-stage` not created / rename failed** (run4 class). Detect on device: `ls -l /data/local/tmp/.ksud-stage /data/adb/ksud` — `.ksud-stage` gone + `/data/adb/ksud` present = staging step succeeded and the failure was later; both absent = secure staging failed (e.g. `/data` full?); both present = ksud never consumed the stage (should not happen on this code path — re-check with full-tag logcat).
@@ -684,7 +731,7 @@ Semantics (current code): `/dev/dffinal` contains `error` (rc=1) after a nonzero
    ```
 
 ### 9.3 SELinux Permissive after a run
-`getenforce` → `Permissive` means the **exploit executed** (dfroot.ko flipped `selinux_state`) but does **not** mean root was obtained. In the 17:00 failure (`next-failure-evidence.txt:3`) the device was Permissive and KSU was **not** resident. Permissive persists until reboot. Check `/dev/dffinal` (or the old `/dev/dfm6` in historical logs) and `su -c id` to know which side of the line you are on.
+`getenforce` → `Permissive` means the **exploit executed** (dfroot.ko flipped `selinux_state`) but does **not** mean root was obtained. In the 17:00 failure (`next-failure-evidence.txt:3`) the device was Permissive and KSU was **not** resident. Permissive persists until reboot. Check `getprop dfroot.final` (or the old `/dev/dfm6` in historical logs; **`/dev/dffinal` is no longer produced**) and `su -c id` to know which side of the line you are on.
 
 ### 9.4 Manager shows "Not installed"
 The KernelSU / KernelSU-Next manager UI reads the KSU driver fd; no module resident ⇒ "Not installed". This follows DFRoot "SUCCESS" automatically on stock-panic runs (runs 2/3 — no root, manager says not installed) and on the 17:00 asset-name failure. It is a *symptom*, not a diagnosis; use §9.2.
@@ -786,9 +833,9 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 Rows 1–20 are evidence for the **historical implementation** (old marker
 protocol, historical KO pins, old preference write path). run6/run8 and all
 earlier CI runs predate the post-PR #1 rebase and do not validate the current
-code head of `fix/native-exploit-robustness` (`376f5e2`, Phase 1 P2-16 native
-fix); that head is host-tested except for the P2-16 restore-scope device retest
-in row 31. The P2-15 fix head is `7e18b13` and the Phase B code
+code base of `fix/native-exploit-robustness` (D2, uncommitted working tree on
+`d39a278`); it is host-tested except for the scoped P2-16 restore retest in row
+31 and the P2-17 final-status-observability retest in row 32. The P2-15 fix head is `7e18b13` and the Phase B code
 head is `0ea022f`. Rows 21–28 describe that
 host evidence explicitly, with code-head counts locally verified at the final
 Phase B increment and tabulated in `CHANGELOG.md` round 8
@@ -796,10 +843,12 @@ Phase B increment and tabulated in `CHANGELOG.md` round 8
 count is 92 and the helper-size count is 30, was 7). CI run 45708004129 at
 `0ea022f` completed with conclusion `success` at re-check (host-only evidence,
 not device validation); no completed-green CI conclusion is claimed for
-`7e18b13` or `376f5e2`. Rows 29–30 are the historical failed S23 attempts at
-the pre-fix head and the fix; **row 31 records the device retest at the code
-head: P2-16 restore scope passed, rc=2 timeout / unbound observation separate
-and OPEN**. A green
+`7e18b13`, `376f5e2` or the D2 working tree. Rows 29–30 are the historical
+failed S23 attempts at the pre-fix head and the fix; **row 31 records the
+round-12 device retest (P2-16 restore scope passed; rc=2 timeout / unbound
+observation was a separate OPEN item in that pre-D2 run), and row 32 records
+the D2 retest (rc=0 via `dfroot.final`, scoped to final-status observability
+only)**. A green
 build does not certify safe privileged execution.
 Provenance manifests are informational, not independent
 reproducible-build proofs or attestations. **The byte gate rejects unknown
@@ -833,7 +882,7 @@ Passing the gate is not device validation.
 | 18 | sepolicy/module interop over long periods (feature 5 error, LSPosed/Zygisk family) | **Partially observed** (one non-fatal feature error; modules' sepolicy loaded) | `run8_logcat.txt:9747-9871` |
 | 19 | CVE-2026-98260-dm3q port | **Not attempted** | — |
 | 20 | "Both managers" success (classic manager UI + Next UI) | **Half-validated**: both manager APKs present and exercised as *failures*; both **loader lineages** validated as successes (run6 = classic 3.3.0 lineage; run8 = Next 3.4.2 lineage). `me.weishu.kernelsu`-selected success run: **not performed** | §5.1 |
-| 21 | Single atomically published nonce-bound `/dev/dffinal` outcome + truthful rc 0–9 and additive 64 | **UNVALIDATED on device** — host-only: 61 `status_protocol` cases + real-file canonical/permission/atomicity/reader/bootfail/bound+unbound recovery checks | `tests/native/status_protocol_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 6 |
+| 21 | Single authoritative nonce-bound final outcome in the non-persistent property `dfroot.final` (root sets, app reads) + truthful rc 0–9 and additive 64; **`/dev/dffinal` is no longer produced** | **UNVALIDATED on device** — host-only: 61 `status_protocol` cases + real-file canonical/permission/atomicity/reader/bootfail/bound+unbound recovery checks; scoped D2 device confirmation of observability only in row 32 | `tests/native/status_protocol_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 6 and round 13 |
 | 22 | Nonce bound before state write, reserved-nonce `BOOTSTRAP_FAILED` on app-owned `dfbootfail`, nonce-bound `dfrecover` (stale/foreign `ok` rejected), deadline enforced before/after positive recovery and after cleanup before terminal outcomes, `REBOOT_SKIPPED` on NULL/failure/timeout/late evidence, exactly-once cleanup on every exit, `/proc` scan verdict | **UNVALIDATED on device** — host-only at the current head: 61 status cases + `final_publish`, 13 proc-scan cases, **28 ELF** cases, 16+14+10 device-version cases, real-file bootfail/recovery tests; async quiescence and device timing unvalidated | `tests/native/status_protocol_test.c`, `tests/native/proc_scan_policy_test.c`, `tests/native/elf_parser_test.c`, `tests/native/device_version_test.c`, `tests/native/final_publish_test.c`; `CHANGELOG.md` round 8 (historical round-6 count was 26 ELF) |
 | 23 | Write-ahead durable `PENDING` preference marker, same-key recovery, sticky fail-closed `WILDCARD`, launch tokens + whole-transaction lock (no success on failed transaction), lifecycle-scoped listeners, tri-state boot UI with persistent `UNKNOWN` row and explicit safe disable (never verified OFF, no auto-enable), rc 9 `/dev/df` gate, rc 8 uncertain-prefs gate, truthful `StatusRc` | **UNVALIDATED on device** — host-only JVM: 39 tests, 0 failures/errors/skips (LaunchGate 4, ListenerLifecycle 10, PreferenceIntegrity 12, PreferencePersister 13); strict CI XML assertion; real UI lifecycle/PackageManager unvalidated | `tests/java/*.java`; `CHANGELOG.md` round 6; §19 |
 | 24 | CMake KO policy / packaged bytes / APK packaging / APK content / target-graph / loader-hash suites | **UNVALIDATED on device** — host-only at the current head: **23 / 25 / 3 / 7 / 6 / 16** cases (KO policy / packaged-KO / APK packaging / APK content **7** / target graph / loader hash **16**); 25 packaged-KO cases include same-path arg failures, mutating objcopy via 755 launcher so cases 14a/14b actually execute, input immutability; 6 target-graph cases (case 5 proves wrong-pin failure and correct-pin recovery); stale verified `.so` and stale loader evidence removed before re-check (Phase A) | `tests/cmake/ko_hash_policy_test.cmake`, `tests/cmake/packaged_ko_test.cmake`, `tests/cmake/apk_packaging_gate_test.cmake`, `tests/cmake/apk_content_gate_test.cmake`, `tests/cmake/packaging_target_graph_test.cmake`, `tests/cmake/loader_hash_test.cmake`; `CHANGELOG.md` round 8 (historical round-6/round-8-reviewed counts were 23/25/3/3/6/5 and 23/25/3/3/6) |
@@ -845,8 +894,9 @@ Passing the gate is not device validation.
 | 29 | Two S23 attempts (2026-11-26) at the pre-fix head `0f0a2ad` reached full root but failed the vendor restore | **Device-observed attempt, NOT a validation of any head** — `su -v` = `3.4.2:KernelSU`, `su -c id` = `uid=0(root) … context=u:r:ksu:s0`, SELinux Enforcing, KSU Next daemon + modules loaded, no panic evidence; `/vendor/lib64/AIAwbModel_v2.2.tflite` restore FAILED (`read_vendor_splice at 0x0: got 0 bytes, status=0x0, errno=0`), app rc **66** = 2 + 64 recovery bit; clean reboot both times. Decisive `logcat2.txt`: helper patch applied 19:58:38, bootstrap ro / SU daemon 19:58:40, cleanup 19:59:49 `F crashdump64: crash_dump.cpp:278] wrong number of args: 3 (expected 6)` then the 0-byte read — page-cache-only patch gone by cleanup so the original `crash_dump64` ran; **exact discard mechanism NOT proven** | `/mnt/240G_SSD/opencode_tmp/s23-final/` (`logcat.txt`, `logcat2.txt`, `app-result2.txt`, `root-probes.txt`, `root-probes2.txt`, `post-reboot.txt`, `post-reboot2.txt`); `CHANGELOG.md` round 12 |
 | 30 | P2-16 cleanup-time helper re-apply at the code head `376f5e2` (implementation) | **Host-tested implementation; device retest passed for the restore scope in row 31** — pure `df_helper_block_matches()` predicate above `DF_HELPER_TEST_ONLY`; `ensure_helper_patch()` called at start of `cleanup()` before helper-backed restores, re-applying the same patched helper with the same verification, no second restore record, fail-closed; helper-size suite **7 → 30** cases, all other counts unchanged. **PR as a whole not device-verified, not merge-ready, not release-ready**; no tag/publish. P1-02/P1-07/P1-08 remain OPEN | `CHANGELOG.md` round 12; `NOTICE` P2-16 bullet |
 | 31 | Device retest at the code head `376f5e2` (S23, 2026-11-26) — P2-16 restore scope | **DEVICE PASS for the P2-16 restore scope; rc=2 timeout / unbound observation separate and OPEN** — APK sha256 `bd8a17836effcac027b719b61bff0abfea4b309289e47c4d6d9732947e0bcbd9`, **disposable local test key** (no tag/publish); clean `pre3.txt` (Enforcing, no `su`/`/dev/df`/`/dev/dffinal`/`ksud`, empty `persist.log.tag`, vendor 529568 B mtime 2022-01-01); 15:20:48Z full root chain (`su -v` `3.4.2:KernelSU`, `uid=0(root) … u:r:ksu:s0`, Enforcing). `logcat3.txt`: 23:21:59.947 `cleanup: crash_dump64 helper patch missing; re-applying`; 23:21:59.956 `cleanup: crash_dump64 helper patch re-established (verified)`; 23:21:59.958/.959 libbase `restore OK (verified)`; 23:22:01.570 `restore OK (verified) for /vendor/lib64/AIAwbModel_v2.2.tflite`; 23:22:01.578 `restore OK (verified) for /apex/com.android.runtime/bin/crash_dump64`; counts `wrong number of args` 0, `got 0 bytes` 0, `restore FAILED` 0, `recovery-failed bit` 0, `helper patch re-established` 1, vendor `restore OK` 1 → **no bit 64**, restore defect closed on device. **Still `status: timeout waiting for final status (rc=2)` + `cleanup: unbound observation; recovery gate stays closed`, `/dev/dffinal` absent — pre-existing in both pre-fix attempts, not caused by P2-16.** Post-reboot 15:23:08Z (`post-reboot3.txt`): Enforcing, uptime 62.73, no `su`, all checked `/dev/df*` + `ksud` absent, vendor size/mtime unchanged, no panic evidence (pstore empty). P1-02/P1-07/P1-08 remain OPEN (P1-07 restore verification device-confirmed but quiescence/failure-interruption unproven) | `/mnt/240G_SSD/opencode_tmp/s23-final/` (`pre3.txt`, `logcat3.txt`, `logcat3-key.txt`, `root-probes3.txt`, `app-result3.txt`, `post-reboot3.txt`); `CHANGELOG.md` round 12 |
+| 32 | D2 device retest (S23, 2026-11-27) — P2-17 final-status observability only | **DEVICE PASS for the final-status-observability scope ONLY** — APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`, **disposable local test key** (no tag/publish, no official signing claim). `app-result8b.txt`: `final: ROOT_ONLY - no reboot requested; root not verified` then `status: final status observed (rc=0)`; no unbound observation, no rc=2 timeout. `root-probes8b.txt`: `prop=[dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only]`, `3.4.2:KernelSU`, `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, `selinux=Enforcing`. All four restores `restore OK (verified)` (both libbase writes, vendor tflite, `crash_dump64`), helper patch re-established (verified), **no bit 64** — P2-16 restore scope still green. `channel-probe7*.txt`: property context `u:object_r:default_prop:s0`, unprivileged `setprop` denied (`rc=1`), unprivileged shell could read a root-set property; **`/dev/dffinal` is no longer produced**. `post-reboot8.txt`: device not found after reboot (`adb: device 'R5CW21C8PLR' not found`) — no post-reboot state claim. Counts unchanged (policy 92; helper-size 30; CMake 23/25/3/7/6/16; native 61 + `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40; JVM 39; markers 7/7 + 3/3), `final_publish` gains an unnumbered pure truth-table test, **no new CI run number**. **Limits:** scoped rc=0 only — not full-chain, quiescence, loader or release validation; P1-02/P1-07/P1-08 remain OPEN; PR not device-verified/merge-ready/release-ready | `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`); `CHANGELOG.md` round 13 |
 
-Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; the two 2026-11-26 pre-fix S23 attempts reached a full root chain but failed the vendor restore (rc 66). The 2026-11-26 retest at code head `376f5e2` passed for the P2-16 restore scope (verified restores, no bit 64), but still ended in rc=2 timeout / unbound observation with `/dev/dffinal` absent — a separate OPEN item; the PR as a whole is not device-verified, and P1-02/P1-07/P1-08 remain OPEN. Every other CVE/module/persistence aspect remains unverified.** A successful host build does not certify safe privileged execution.
+Confidence rollup: **the historical chain worked on this firmware in exactly two cold-boot runs with the Samsung-patched loaders; the two 2026-11-26 pre-fix S23 attempts reached a full root chain but failed the vendor restore (rc 66). The 2026-11-26 retest at code head `376f5e2` passed for the P2-16 restore scope (verified restores, no bit 64), but still ended in rc=2 timeout / unbound observation with `/dev/dffinal` absent — a separate pre-D2 OPEN item. The D2 retest (row 32) **passed for the P2-17 final-status-observability scope only**: rc=0 via the non-persistent `dfroot.final` property, correct nonce-bound token, all restores verified, no bit 64; **`/dev/dffinal` is no longer produced**. That scoped rc=0 is not a full-chain validation; the PR as a whole is not device-verified, and P1-02/P1-07/P1-08 remain OPEN. Every other CVE/module/persistence aspect remains unverified.** A successful host build does not certify safe privileged execution.
 
 ---
 
@@ -914,7 +964,7 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
 10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
 11. Load-bearing artifacts (historical run6/run8 chain): `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (then `aab76943…`/`679504dd…`; current bundles are the P1-08 rebuilds `731c3fa1…`/`7f28f1fb…` — see §6 and the round-8 note), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle **9.9.2** (distribution SHA-256 pinned) with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease` (release needs complete signing material; otherwise the variant is disabled) → `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
-13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; `/dev/dffinal` ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
+13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; **`getprop dfroot.final`** (the non-persistent property root sets and the app reads; **`/dev/dffinal` is no longer produced**) ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
 
@@ -1045,9 +1095,10 @@ round-4 cleanup timing, reserved bootfail channel and final test counts.
 ## 17. Historical — round-4 (2026-11-25) — final host test, lifecycle and failure-path shape
 
 > **Historical section.** Its counts (49 status, 28 JVM, 15 packaged-KO) describe
-> the round-4 implementation, not the literal head. The round-11 note at the
-> top is authoritative for the literal head; §19 below was authoritative for
-> the round-6 head and §18 is historical.
+> the round-4 implementation, not the literal head. The round-13 note at the
+> top is authoritative for the upcoming documentation commit and the current
+> validation boundary; §19 below was authoritative for the round-6 head and §18
+> is historical.
 
 This section described the round-4 head of `fix/native-exploit-robustness`.
 Everything here is **host-proven only**: no host test executes a privileged
@@ -1218,8 +1269,9 @@ not certify safe privileged execution.**
 > then-current docs head (`0ea022f`; producer `2b59684`, loader integration
 > `413a5cb`, post-review Phase A/B increments `0832331` / `0ea022f`) is covered
 > by the round-8/P1-08 note at the top of this file and by `CHANGELOG.md`
-> round 8; the current code head is `376f5e2` (the literal head is the round-12
-> documentation update; round 11 for `7e18b13`).
+> round 8; the current code base is the D2 uncommitted working tree on `d39a278`
+> (the upcoming documentation commit's immediate parent is `d39a278` and is
+> authoritative; round 12 for `376f5e2`, round 11 for `7e18b13`).
 > Counts in §19.1 below are historical counts for the round-6 head, **not**
 > literal-head counts.
 
@@ -1313,8 +1365,11 @@ head, and §19 (round-6) added 2026-11-25 to match the then-current head and PR 
 The current-head ledger above was updated to `0ea022f` (post-review Phase A/B),
 then to `7e18b13` (round 11 / P2-15), then to the code head `376f5e2` (round 12 /
 P2-16) on 2026-11-26, and then to this documentation update (immediate parent
-`7a855c5`); the P2-16 restore scope passed its S23 device retest while the rc=2
-timeout / unbound observation remains a separate OPEN item.
+`d39a278`); the P2-16 restore scope passed its S23 device retest while the rc=2
+timeout / unbound observation was a separate pre-D2 OPEN item. Round 13 / P2-17
+records the D2 uncommitted working tree on `d39a278` (to be committed after
+review), where `dfroot.final` replaces `/dev/dffinal` (no longer produced) and
+the S23 retest passed for the final-status-observability scope only.
 Sections §16–§19 are historical. No adb was run and no commit was made for
 these documents. Log contents referenced by line range only. **Do not commit
 host logs or this device's raw dumps anywhere public.***

@@ -1,19 +1,63 @@
 # Changelog — DFRoot GZIF
 
+## Round 13 / P2-17 (2026-11-27) — final-status observability moved to Android property `dfroot.final` (device retest passed for the final-status-observability scope only)
+
+**Head model.** This section will be authoritative for the **upcoming documentation commit** on `fix/native-exploit-robustness`, whose immediate parent is `d39a27828e66e6c32a9af84f60ad0651c43b1f47`. The device retest below was run against the **uncommitted D2 working tree on `d39a278`** (five C/test files owned by the code owner); that tree is **to be committed after review** and is **not** committed at documentation time. The round-12 documentation head is `39a376f`; earlier code heads are `376f5e2` (P2-16 code head), `7e18b13` (P2-15), `0ea022f` (Phase B / P2-14) and `36a11bc` (round-8 reviewed). `0f9bf69` is a reverted historical attempt (below); `d39a278` is its revert. All earlier sections are historical; round-10 totals (0 new / 0 P2 / 3 P1) and the round-11/round-12 totals are **not retroactively changed**.
+
+### Finding — final token published, but not observable by the app domain
+
+Evidence at `/mnt/240G_SSD/opencode_tmp/s23-final/` (`selinux-diag5.txt`, `poll-root-final5.txt`, `app-result6.txt`, `logcat6.txt`): a root shell could read `/dev/dffinal` on time with the correct nonce-bound token (`dfroot-v2:2f79eed61a9de68855bc189ed8f810a1:root_only`, mtime `2026-11-26 23:49:06.861999960 +0800`, 53 B), and the restore chain was healthy, but the app never observed it — every run ended `status: timeout waiting for final status (rc=2)` / `cleanup: unbound observation; recovery gate stays closed`. `selinux-diag5.txt` identifies the cause: `/dev/dffinal` was labeled `u:object_r:device:s0`, which the app domain cannot read. The token format, nonce binding and publication were correct; the **channel** was not app-observable.
+
+### Historical failed attempt 1 (`0f9bf69`, reverted at `d39a278`)
+
+The first attempt relabeled `/dev/dffinal` with `fsetxattr`, copying the `app_data_file` label of `dfinv` (`label-diag6.txt` shows `dfinv` = `u:object_r:app_data_file:s0:c100,c258,c512,c768`). The relabel was **denied**; `/dev/dffinal` was **never created**, and the bootfail fallback did not yield a readable token either (`faildiag6.txt`: empty app-owned `dfbootfail`, no `/dev/dffail`, no `/dev/dffinal`). That commit was reverted at `d39a278`. It is recorded **only as a historical failed attempt** — not the current design, and not claimed to work.
+
+### D1 pre-flight (eliminated; zero code)
+
+A root-side pre-flight probe (`p2-17-preflight/d1-probe.txt`) tried to create a file in the `/data` root as root and got `can't create /data/dfroot-preflight.tmp: Permission denied`; the follow-up app-uid probe could not rely on that path. The "publish to a file in the `/data` root" direction was therefore **eliminated without any code change**.
+
+### D2 design (uncommitted working tree; to be committed after review)
+
+The single authoritative final status is now a **non-persistent Android property `dfroot.final`**: root/bootstrap sets it and the app reads it. Its property context is `u:object_r:default_prop:s0` (`channel-probe7c.txt`); an unprivileged `setprop` was **denied** (`channel-probe7b.txt`: `setprop rc=1`, property empty) while an unprivileged shell could **read** a root-set property (`channel-probe7.txt`: `prop=[ROOTONLY]`). The canonical token, 128-bit run-nonce binding and strict parse are **unchanged**, and publication failure still fails closed. **`/dev/dffinal` is no longer produced** and is no longer the authoritative app-observable channel; device diagnostics for the final status now use `dfroot.final`. This design is **in the uncommitted working tree** and is **pending review/commit**; no commit is claimed for it in this documentation update.
+
+### Device retest (PASSED for the final-status-observability scope) — S23, 2026-11-27
+
+APK sha256 `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af`, installed with a **disposable local test key** — no tag, no publish, no official signing claim. Evidence: `/mnt/240G_SSD/opencode_tmp/s23-final/` (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`, `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`).
+
+Decisive lines:
+
+- `app-result8b.txt`: `final: ROOT_ONLY - no reboot requested; root not verified`, then `status: final status observed (rc=0)`; no `unbound observation` and no rc=2 timeout.
+- `root-probes8b.txt`: `prop=[dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only]`, `3.4.2:KernelSU`, `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, `selinux=Enforcing`.
+- `app-result8b.txt`: all four restores `restore OK (verified)` — both `libbase.so` writes, `/vendor/lib64/AIAwbModel_v2.2.tflite` and `/apex/com.android.runtime/bin/crash_dump64` — with the helper patch re-established (verified) at cleanup, and **no recovery-failed bit (64)**. The P2-16 restore scope is therefore still green on this retest.
+
+`post-reboot8.txt` records `adb: device 'R5CW21C8PLR' not found` after reboot: the S23 did **not** reconnect for a post-reboot state probe, so no post-reboot absence or cleanliness claim is made for this run.
+
+### Counts, scopes and disposition
+
+All counts are **unchanged**: workflow policy **92**, `status_protocol` **61**, helper-size **30**, six CMake suites **23 / 25 / 3 / 7 / 6 / 16**, native **61** status / **13** proc-scan / **28** ELF / **16+14+10** version / **40** loader-stage, JVM **39**, markers **7/7** host + **3/3** release. `final_publish` gains an **unnumbered pure truth-table test**; no numbered case count changes. **No new CI run number** is claimed.
+
+- The rc=0 is a **scoped confirmation of final-status observability only** (`dfroot.final` readable by the app, correct nonce-bound `root_only` token, rc=0); it is **not** a full-chain validation and is not proof of root usability, quiescence, loader correctness or release readiness.
+- **P1-02, P1-07 and P1-08 remain OPEN.** P1-02's invocation-identity concern is not closed by observing a final-status token.
+- **The PR as a whole is not device-verified, not independently merge-ready and not release-ready.** No tag was created, nothing was published, and no official signing claim is made; the APK used a disposable local test key. **Auto Soft Reboot and Start on Boot remain disabled by default and unvalidated.**
+- P2-13/P2-14/P2-15/P2-16 dispositions are unchanged from earlier rounds (addressed, pending final comprehensive review; the P2-16 restore scope was device-confirmed in round 12 and again here).
+
 ## Round 12 / P2-16 (2026-11-26) — cleanup-time helper re-apply (device retest passed for the restore scope; rc=2 timeout separate and OPEN)
 
-This section is authoritative for the **literal/current head** of
-`fix/native-exploit-robustness`: the documentation commit that adds the
-"Device retest" subsection below. Its immediate parent is
-`7a855c51c8c48e4882a0c715164898ad0bcfd272` (the round-12 docs commit), and the
+> **Historical section.** The round-13 section above is authoritative for the upcoming documentation commit and the current validation boundary; this section describes the round-12 documentation head `39a376f` and the P2-16 code head `376f5e2` only.
+
+This section is historical: it describes the round-12 documentation head
+`39a376f` and the P2-16 code head `376f5e2`; the round-13 section above is
+authoritative for the upcoming documentation commit and the current validation
+boundary. The round-12 docs commit's immediate parent is
+`7a855c51c8c48e4882a0c715164898ad0bcfd272`, and the
 **code head** remains `376f5e277713c1008386624f85ef74f200f14f2c` (Phase 1 native
 fix `fix(native): re-arm crash_dump64 helper patch during cleanup`); that code
 head's own immediate parent is `0f0a2ad4b8546b07b8ec0e82a88e84449d03a7ed`, the
 **pre-fix device-run head**. The P2-15 fix code head is `7e18b13`, the Phase B /
 P2-14 code head is `0ea022f` and the round-8 reviewed head was `36a11bc`; none
-of these is the literal head. The round-11 section below is authoritative for
-`7e18b13` and round 8 for the Phase B code head `0ea022f`; all earlier sections
-are historical. Round-10 totals (**0 new findings, 0 P2 open, 3 P1 open**) and
+of these is the current literal head. The round-11 section below is historical
+for `7e18b13` and round 8 for the Phase B code head `0ea022f`; all earlier
+sections are historical. Round-10 totals (**0 new findings, 0 P2 open, 3 P1 open**) and
 round-11 totals are **not retroactively changed**.
 
 ### Two S23 device attempts at the pre-fix head (`0f0a2ad`)
@@ -150,16 +194,16 @@ created, nothing was published and the release job remains unexecuted.
 
 ## Round 11 / P2-15 (2026-11-26) — release-JNI debug-symbol stripping; packaging fix (host-only)
 
-This section is authoritative for head
+This section is historical: it describes head
 `7e18b138090abfd6c0af5cc02cb031938e6ace2a` (Phase 1 fix
-`fix(app): preserve reviewed loader bytes in release APK`); the round-12
-section above is now authoritative for the **literal/current head**
-`376f5e277713c1008386624f85ef74f200f14f2c`. Its immediate
+`fix(app): preserve reviewed loader bytes in release APK`); the round-13
+section above is authoritative for the upcoming documentation commit and the
+current validation boundary. Round 12 (`376f5e2`) is likewise historical. Its immediate
 parent is the docs commit `74b12df` (`docs: refresh round-8 validation ledger
 and evidence scope`). The **Phase B / P2-14 code head** remains `0ea022f`
 (`fix(ci): verify loader bytes inside every distributable APK`), and the
-round-8 reviewed head was `36a11bc`; neither is the literal head. The round-8
-section below is authoritative for the Phase B code head `0ea022f`; all
+round-8 reviewed head was `36a11bc`; neither is the current literal head. The round-8
+section below is historical for the Phase B code head `0ea022f`; all
 earlier sections are historical.
 
 **Round-10 scope (not retroactively changed).** The consolidated round-10
@@ -377,9 +421,10 @@ Locally verified at the final increment (`0ea022f`; host-only):
 
 ## Round-6 repair (2026-11-25) — historical (round-6 head `d72838d`)
 
-> **Historical section.** The round-12 section above is authoritative for the
-> literal head (round 11 for `7e18b13`; round 8/P1-08 for the Phase B code head
-> `0ea022f`); this section describes the round-6 head only.
+> **Historical section.** The round-13 section at the top is authoritative for
+> the upcoming documentation commit and the current validation boundary (round
+> 12 for `376f5e2`; round 11 for `7e18b13`; round 8/P1-08 for the Phase B code
+> head `0ea022f`); this section describes the round-6 head only.
 
 This section was authoritative for the round-6 head of
 `fix/native-exploit-robustness` (`d72838d`). **Every section below is
@@ -444,8 +489,9 @@ device validation.
 ## Round-5 repair (2026-11-25) — historical (round-5 head)
 
 > **Historical section.** It was authoritative for the pre-round-6 head; the
-> round-11 section at the top is authoritative for the literal head (round 8 for
-> the Phase B code head `0ea022f`). Its counts,
+> round-13 section at the top is authoritative for the upcoming documentation
+> commit and the current validation boundary (round 8 for the Phase B code head
+> `0ea022f`). Its counts,
 > CI shape and dispositions describe the round-5 implementation only.
 
 ### Stable-ID disposition (round-5, 9 findings carried forward)
@@ -525,8 +571,9 @@ build is not a safety certificate.
 ## Historical — PR #1 hardening (CI build reliability), integrated into the rebased head
 
 > **Historical section.** It describes the PR #1 baseline as integrated before
-> round 6; the round-11 section at the top is authoritative for the literal head
-> (round 8 for the Phase B code head `0ea022f`).
+> round 6; the round-13 section at the top is authoritative for the upcoming
+> documentation commit and the current validation boundary (round 8 for the
+> Phase B code head `0ea022f`).
 
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
@@ -600,8 +647,9 @@ distribution SHA-256; AGP **9.5.0** effective through
 ### Post-rebase integration
 
 PR #1 is now merged into the base (`origin/master`); PR #3 was rebased onto that
-head. The round-11 section at the top is authoritative for the literal head
-(round 8 for the Phase B code head `0ea022f`); the
+head. The round-13 section at the top is authoritative for the upcoming
+documentation commit and the current validation boundary (round 8 for the Phase
+B code head `0ea022f`); the
 round-5 section above and the host-suite counts, stable-ID disposition table and
 validation boundary in the round-4 section below are historical. run6/run8 and
 every prior CI run predate
@@ -614,9 +662,9 @@ the gated `v*` tag path.
 ## Unreleased — round-4 (2026-11-25) — PR #3 repair: truthful docs and lifecycle/failure-path evidence
 
 > **Historical section.** Its counts (49 native status, 28 JVM, 15 packaged-KO)
-> describe the round-4 implementation, not the literal head. The round-11
-> section at the top is authoritative for the literal head (round 8 for the
-> Phase B code head `0ea022f`).
+> describe the round-4 implementation, not the literal head. The round-13
+> section at the top is authoritative for the upcoming documentation commit and
+> the current validation boundary (round 8 for the Phase B code head `0ea022f`).
 
 **All evidence in this section is host-only.** No hardware run validates the
 current head of `fix/native-exploit-robustness`; a green build does not certify
@@ -693,10 +741,10 @@ build does not certify safe privileged execution.
 
 ## Unreleased — round-3 PR #3, phase 3 (preference integrity / launch gating)
 
-> Historical section. The round-11 section at the top of this file is
+> Historical section. The round-13 section at the top of this file is
 > authoritative for current counts (workflow policy 92), cleanup timing, the
-> recovery channel and the literal head (round 8 for the Phase B code head
-> `0ea022f`). This section, the round-4 section above it and the phase
+> recovery channel and the upcoming documentation commit (round 8 for the Phase
+> B code head `0ea022f`). This section, the round-4 section above it and the phase
 > sections below are kept for provenance only.
 
 **All changes in this section are host-tested only and UNVALIDATED on device.**
@@ -861,8 +909,10 @@ not be published.
   `cleanup()` returns -1 if any restore fails, a status-flow cleanup failure
   downgrades a success rc 0 to 1, and `main()` reports rc 3 when preflight
   fails before any file is touched.
-- Status protocol (replaces the multi-marker scheme): a **single** final
-  outcome is atomically published to `/dev/dffinal` (world-readable 0644 temp,
+- Status protocol (replaces the multi-marker scheme; historical — under D2 the
+  authoritative channel is the `dfroot.final` property and `/dev/dffinal` is no
+  longer produced): a **single** final outcome was atomically published to
+  `/dev/dffinal` (world-readable 0644 temp,
   mode pinned with `fchmod()` against umask, `+ fsync + rename`; the token has
   no secrets and must be readable by the app uid). The old terminal markers
   `/dev/dfmsr`, `/dev/dfm6`, `/dev/dfmw2`,
@@ -995,8 +1045,9 @@ Residual risks / **release gates** (not closed by this PR):
   **historical implementation** — the old multi-marker status protocol and the
   then-current KO pins — only; they predate the post-PR #1 rebase. Every change
   in this "Unreleased" section is **host-tested only and UNVALIDATED on
-  device**; no new hardware run has exercised the single-`/dev/dffinal` flow,
-  the new build policy, or the new Java persistence paths.
+  device**; no new hardware run has exercised the historical single-`/dev/dffinal`
+  flow (`/dev/dffinal` is no longer produced under D2), the new build policy, or
+  the new Java persistence paths.
 - **No release may ship with obsolete KO pins.** The byte gate rejects unknown
   bytes but still accepts the two known obsolete pins; if a DDK rebuild
   produces a hash outside them, stop and verify out of band. Withhold release

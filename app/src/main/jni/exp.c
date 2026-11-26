@@ -55,7 +55,10 @@ static int df_helper_block_matches(const uint8_t observed[16],
 #include "elf_parser.h"
 #include "device_version.h"
 
-#define DF_FINAL_PATH "/dev/dffinal"
+/* The single authoritative final status is the dfroot.final system property
+ * (DF_FINAL_PROPERTY in final_status_publish.h). The app can read it but
+ * AOSP neverallow prevents it from setting it, so no /dev final-status file
+ * is read or created on the normal path. Progress markers stay informational. */
 /* The 128-bit run nonce is generated here and persisted before the hook is
  * armed; bootstrap reads it and binds every final token to it. */
 #define DF_FILES_DIR   "/data/user_de/0/df.root/files"
@@ -1244,54 +1247,43 @@ static int write_recovery_status(const char *status, const char *nonce)
     return write_atomic(DF_RECOVER_PATH, DF_RECOVER_TMP, status, len);
 }
 
-/* An invocation identity is ambiguous when an existing /dev/dffinal token is
- * not bound to the nonce we just generated, or when an app-private file could
- * not be created/cleared. A nonce merely read from shared persistent state is
- * NOT proof of identity, so in either case we refuse to arm the hook. */
+/* An invocation identity is ambiguous when the dfroot.final property already
+ * holds a token that is not bound to the nonce we just generated, or when an
+ * app-private file could not be created/cleared. A nonce merely read from
+ * shared persistent state is NOT proof of identity, so in either case we
+ * refuse to arm the hook. The app cannot clear the property, so an existing
+ * foreign token must block arming. */
 static int identity_is_ambiguous(const char *nonce, int app_state_ready)
 {
-    int fd;
-    struct stat st;
     char buf[DF_FINAL_TOKEN_CAP];
-    size_t off = 0;
+    size_t len = 0;
     enum df_outcome o = DF_OUTCOME_NONE;
 
     if (!app_state_ready || !df_nonce_is_valid(nonce)) {
         printf("identity: app-private state unavailable; refusing to arm\n");
         return 1;
     }
-    fd = open(DF_FINAL_PATH, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (fd < 0) {
-        if (errno == ENOENT) return 0; /* no existing publisher: unambiguous */
-        printf("identity: /dev/dffinal unreadable; refusing to arm\n");
-        return 1;
-    }
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
-        st.st_size <= 0 || st.st_size >= (off_t)sizeof(buf)) {
-        close(fd);
-        printf("identity: /dev/dffinal is not a bounded regular file; refusing to arm\n");
-        return 1;
-    }
-    while (off < (size_t)st.st_size) {
-        ssize_t n = read(fd, buf + off, (size_t)st.st_size - off);
-        if (n < 0 && errno == EINTR) continue;
-        if (n <= 0) {
-            close(fd);
-            printf("identity: short read of /dev/dffinal; refusing to arm\n");
-            return 1;
-        }
-        off += (size_t)n;
-    }
-    close(fd);
-    if (df_parse_final_token(buf, off, nonce, &o) != 0) {
-        printf("identity: existing /dev/dffinal is not bound to this run; refusing to arm\n");
+#ifdef __ANDROID__
+    /* A missing property is unambiguous; any present value must parse as a
+     * canonical token byte-bound to THIS run's nonce. Our cap (96) exceeds
+     * PROP_VALUE_MAX (92), so a read failure here means absent/empty: a
+     * leftover stale or foreign token cannot be silently overwritten. */
+    if (df_read_property(buf, sizeof(buf), &len) != 0)
+        return 0; /* absent/empty: no existing publisher */
+    if (!df_property_value_ok(buf, len, sizeof(buf)) ||
+        df_parse_final_token(buf, len, nonce, &o) != 0) {
+        printf("identity: existing dfroot.final token is not bound to this run; refusing to arm\n");
         return 1;
     }
     return 0;
+#else
+    (void)buf; (void)len; (void)o;
+    return 1; /* no Android property service on host: fail closed, do not arm */
+#endif
 }
 
 /* ---- Consumer-side status_io operations ----
- * The app only reads the single atomically published /dev/dffinal outcome.
+ * The app only reads the single dfroot.final system property outcome.
  * Progress markers are logged once each for diagnostics and are NEVER used to
  * derive the result (no marker precedence, no "root verified" claim). */
 static const struct {
@@ -1346,10 +1338,15 @@ static int exp_read_final(void *ctx, char *buf, size_t cap, size_t *out_len)
     }
 
     if (!buf || cap == 0 || !out_len) return -1;
-    /* Strict real-file adapter: O_NOFOLLOW, regular file, bounded exact read.
-     * The protocol parses the exact byte count, so an embedded NUL, a truncation
-     * or extra bytes can never be mistaken for a valid token. */
-    return df_read_final_file(DF_FINAL_PATH, buf, cap, out_len);
+    /* Strict property adapter: absent/empty/oversize values fail closed; the
+     * exact byte count is handed to the protocol parser, so an embedded NUL or
+     * a truncation can never be mistaken for a valid token. No /dev or app-
+     * private file participates in the normal final-status path. */
+#ifdef __ANDROID__
+    return df_read_property(buf, cap, out_len);
+#else
+    return -1; /* no Android property service on host */
+#endif
 }
 
 /* Separate app-owned channel for a bootstrap failure observed before a run
@@ -1362,11 +1359,16 @@ static int exp_read_bootstrap_failure(void *ctx, char *buf, size_t cap,
     return df_read_final_file(DF_BOOTFAIL_PATH, buf, cap, out_len);
 }
 
-/* The consumer never publishes; these are fail-closed no-ops kept so the
- * injected vtable is complete. They are never called on the consumer path. */
+/* The consumer is a strict ONE-WAY reader: it must never be able to write the
+ * authoritative final-status channel, even if a future REBOOT_PENDING path
+ * reaches this vtable slot. Only the root/bootstrap producer may set the
+ * property; SELinux alone is not the enforcement point. Fail closed here. */
 static int exp_publish_final(void *ctx, const char *nonce, enum df_outcome outcome)
 {
-    (void)ctx; (void)nonce; (void)outcome; return -1;
+    (void)ctx;
+    (void)nonce;
+    (void)outcome;
+    return -1;
 }
 static int exp_late_load_state(void *ctx)
 {
@@ -1419,7 +1421,7 @@ static int exploit(struct preflight *pf) {
 
     /* Establish the run identity BEFORE any patch, usleep or hook arming.
      * Bootstrap binds its tokens to the nonce it reads from dfinv; a token
-     * already in /dev/dffinal with a different nonce, or an app-private file
+     * already in dfroot.final with a different nonce, or an app-private file
      * we cannot create/clear, makes this invocation ambiguous. Clearing shared
      * state at entry is ONLY hygiene, NEVER proof that later publications
      * belong to this invocation. In the ambiguous case the hook is NOT armed

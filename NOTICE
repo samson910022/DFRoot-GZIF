@@ -212,10 +212,12 @@ historical implementations or pre-rebase heads, not this head.
   KO gate status for auditing, and fail closed on a missing/stale KO manifest;
   they are not an independent reproducible-build proof, and splicehelper is
   not claimed to be bit-for-bit deterministic across toolchains.
-- **Validation status at the current code head (`376f5e2`; the literal head is
-  this documentation update).** Host-only except for the P2-16 restore-scope
-  device retest recorded in the P2-16 bullet below.
-  Its immediate parent is `0f0a2ad` (the pre-fix device-run head); the P2-15 fix
+- **Validation status at the current code base (D2, uncommitted working tree on
+  `d39a278`; the upcoming documentation commit's immediate parent is `d39a278`
+  and is authoritative).** Host-only except for the scoped device retests
+  recorded in the P2-16 and P2-17 bullets below. Round-12 heads (`39a376f` docs,
+  `376f5e2` code), the reverted relabel attempt `0f9bf69` and its revert
+  `d39a278` are historical; the P2-15 fix
   code head is `7e18b13`, the Phase B / P2-14 code head is `0ea022f` and the
   round-8 reviewed head is `36a11bc` — none of those is the literal head. The
   round-8 review covered `36a11bc`; the post-review
@@ -234,11 +236,12 @@ historical implementations or pre-rebase heads, not this head.
   **45697296267** (`bb83849`) are also completed `success` but are **earlier
   heads**. The counts below are confirmed by the Phase B code-head log; no
   literal-head count is asserted from an earlier log and no completed-green CI
-  conclusion is claimed for `7e18b13` or `376f5e2` (a run had started but not
-  concluded at documentation time; no new CI run number is claimed for
-  `376f5e2`). The P2-16 restore-scope device retest at the code head is recorded
-  in the P2-16 bullet below; no device run validates the PR as a whole, no tag was
-  created and no release was published.
+  conclusion is claimed for `7e18b13`, `376f5e2` or the D2 working tree (a run
+  had started but not concluded at documentation time; **no new CI run number**
+  is claimed for D2). The P2-16 restore-scope retest and the P2-17
+  final-status-observability retest are recorded in the bullets below; both are
+  **scoped**, no device run validates the PR as a whole, no tag was created and
+  no release was published.
 - **No APK from non-tag CI; separate LKM artifact.** Non-tag events upload no
   DFRoot app APK: the only DFRoot upload is the `DFRoot-CI-evidence` bundle
   (`GPL-3.0.txt`, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`). The
@@ -392,7 +395,7 @@ historical implementations or pre-rebase heads, not this head.
   `bd8a17836effcac027b719b61bff0abfea4b309289e47c4d6d9732947e0bcbd9`, was
   installed with a **disposable local test key** (no tag, no publish, no
   official signing claim). Preconditions were clean in `pre3.txt` (Enforcing;
-  no `su`; no `/dev/df`; no `/dev/dffinal`; no `ksud`; `persist.log.tag` empty;
+  no `su`; no `/dev/df`; no `/dev/dffinal` (historical channel); no `ksud`; `persist.log.tag` empty;
   vendor size 529568 B, mtime 2022-01-01). The 15:20:48Z run (device-local
   23:20:48) reached full root (`su -v` = `3.4.2:KernelSU`, `su -c id` =
   `uid=0(root) … u:r:ksu:s0`, Enforcing; `pre3.txt`, `logcat3.txt`,
@@ -406,9 +409,10 @@ historical implementations or pre-rebase heads, not this head.
   args` 0, `got 0 bytes` 0, `restore FAILED` 0, `recovery-failed bit` 0,
   `helper patch re-established` 1, vendor `restore OK` 1 — the rc has **no bit
   64**, so **P2-16's restore defect is closed on device** for this scope.
-  **Separate and still OPEN:** `status: timeout waiting for final status (rc=2)`
+  **Separate and still OPEN in the pre-D2 runs:** `status: timeout waiting for final status (rc=2)`
   and `cleanup: unbound observation; recovery gate stays closed`, with
-  `/dev/dffinal` absent — a pre-existing issue also present in the two pre-fix
+  `/dev/dffinal` (historical channel, **no longer produced** under D2) absent —
+  a pre-existing issue also present in the two pre-fix
   attempts, **not caused by P2-16**. Post-reboot (15:23:08Z,
   `post-reboot3.txt`): Enforcing, uptime 62.73, no `su`, all checked `/dev/df*` + `ksud`
   absent, vendor size/mtime unchanged, S23 connected; no panic evidence (pstore
@@ -419,6 +423,43 @@ historical implementations or pre-rebase heads, not this head.
   not release-ready; no tag or publish.** P1-02, P1-07 and P1-08 remain OPEN —
   P1-07 restore verification is now device-confirmed but quiescence and
   failure-interruption remain unproven. See `CHANGELOG.md` round 12.
+- **P2-17 (D2; uncommitted working tree on `d39a278`, to be committed after
+  review) — final-status observability, scoped device retest PASSED.** The old
+  `/dev/dffinal` final channel was published on time with the correct nonce but
+  carried `u:object_r:device:s0`, so the app domain could not observe it and
+  every run ended rc=2 unbound observation. A `fsetxattr` relabel attempt
+  (`0f9bf69`, copying `dfinv`'s `app_data_file` label) was denied, never created
+  `/dev/dffinal`, and its bootfail fallback also failed; it was reverted at
+  `d39a278`. A zero-code pre-flight eliminated publishing to a file in the
+  `/data` root (root got `Permission denied`). D2 makes the **non-persistent
+  Android property `dfroot.final`** the single authoritative final channel:
+  root/bootstrap sets it, the app reads it, its context is
+  `u:object_r:default_prop:s0`, unprivileged `setprop` is denied, and the
+  canonical token / nonce binding / strict parse / fail-closed publication are
+  unchanged. **`/dev/dffinal` is no longer produced**; device diagnostics now
+  use `dfroot.final`.
+  **Device retest (S23, 2026-11-27, scoped PASS):** APK sha256
+  `a7f6e02ebb44cb39f583ca3c32d1b818ad046be3019ce540ee4bf9be2ec001af` with a
+  **disposable local test key** (no tag, no publish, no official signing claim):
+  `final: ROOT_ONLY - no reboot requested; root not verified` then
+  `status: final status observed (rc=0)`; property `dfroot.final` =
+  `dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only`; root via
+  `3.4.2:KernelSU` / `u:r:ksu:s0`, SELinux Enforcing; all four restores
+  `restore OK (verified)` with **no bit 64** (P2-16 restore scope still green);
+  no unbound observation. Evidence: `/mnt/240G_SSD/opencode_tmp/s23-final/`
+  (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`,
+  `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`).
+  `post-reboot8.txt` records the device not reconnecting (`adb: device
+  'R5CW21C8PLR' not found`), so no post-reboot state claim is made. Counts are
+  unchanged (policy 92; helper-size 30; CMake 23/25/3/7/6/16; native 61 +
+  `final_publish`, proc 13, ELF 28, version 16+14+10, loader-stage 40; JVM 39;
+  markers 7/7 + 3/3); `final_publish` gains an unnumbered pure truth-table test;
+  **no new CI run number**. **Limits:** the rc=0 is a SCOPED confirmation of
+  final-status observability only — not full-chain, quiescence, loader or
+  release validation. **P1-02 / P1-07 / P1-08 remain OPEN**; the PR as a whole
+  is **not device-verified, not independently merge-ready and not
+  release-ready**. Auto Soft Reboot and Start on Boot remain disabled and
+  unvalidated. See `CHANGELOG.md` round 13.
 
 References
 ----------
