@@ -362,7 +362,7 @@ performed, and the release job remains unexecuted. No completed-green CI
 conclusion is claimed for the literal head: a run had started but not concluded
 when this ledger was written.
 
-### Disposition
+### Disposition (round 11 / P2-15)
 
 - **P2-15 is addressed in Phase 1 (`7e18b13`), pending final comprehensive
   review** — not claimed finally closed here.
@@ -490,7 +490,7 @@ Locally verified at the final increment (`0ea022f`; host-only):
   **45697296267** (`bb83849`) are also completed `success`, but are **earlier
   heads**. No exact code-head count is asserted from an earlier log.
 
-### Disposition
+### Disposition (round 8 / P1-08)
 
 - **P1-08 remains OPEN — RELEASE GATE.** The root-owned staging contract is
   implemented in both halves and built from reviewed source, but it is
@@ -653,7 +653,7 @@ or pre-rebase heads, never this head. No tag was created by us.
   `marker-release-evidence`, plus the nonempty gate index and a single upload
   choke point. No required gate uses `continue-on-error`.
 
-### Validation boundary
+### Validation boundary (round-5)
 
 All current verification is host-only. P1-02/P1-07 are proven with host mocks
 and real-file adapters; device timing, quiescence, Android publication/access
@@ -917,7 +917,7 @@ unchanged; none of them constitutes device validation.
   release claim. Provenance is informational evidence, not attestation or
   reproducible-build proof.
 
-### Validation boundary
+### Validation boundary (round-4)
 
 P1-02/P1-07 are proven only with host mocks and real-file adapters; device
 timing, quiescence and privileged-state safety are UNVALIDATED. P2-04/P2-06/
@@ -1533,6 +1533,319 @@ assembly still requires the gitignored `app/src/main/jni/ko/dfroot-android13-5.1
 (built via podman + DDK or fetched from CI). The 2026-11-17 device runs below are
 historical evidence only, not validation of this architecture.
 
+## Historical — PR #4 documentation record (2026-11-24/25; written on old base `9f60e16`)
+
+> **Historical record, not the current state.** This section preserves PR #4's
+> dated dependency snapshots, review caveats and notice/license discussion as
+> they stood before the PRs merged. Master is authoritative for the current
+> state: PRs #1, #2 and #3 have merged into master (`cdec576`); PR #5 is being
+> merged. PR #3's fail-closed KO SHA-256 gate and packaged-byte verification
+> are present in master, while P1-08 staging integrity remains an OPEN release
+> blocker. None of the heads below is a current head, and separate green PR CI
+> runs are not integrated CI or release validation.
+
+- At its snapshot, PR #5 may change the LKM bytes (unverified at that point);
+  only if a rebuilt artifact's bytes actually change must PR #3's
+  `KO_EXPECTED_SHA256S` and the quoted KO hashes/sizes be re-pinned in a
+  reviewed commit — see the conditional gate below.
+
+### 4.8-gzif maintenance (2026-11-24; PR #4 snapshot)
+
+**Dependency snapshot (dated 2026-11-25 review points, Taiwan time).** These
+SHAs are **historical review snapshots**, not a live or final integration
+record; do not chase moving heads. **PRs #1, #2 and #3 have since merged into
+master (`cdec576`)**; PR #5 is being merged. PR #1's shipped changes are
+recorded in the "Historical — PR #1 hardening" section above, and the snapshot
+rows below remain dated review points only. At that snapshot, live heads were
+checked with `gh pr view <n> --json headRefOid`; none of the listed heads is a
+current head.
+
+| PR | Snapshot head (2026-11-25) | Material delta vs earlier snapshot |
+|---|---|---|
+| #1 `fix/ci-build-reliability` | `ed4b30d` | Gradle wrapper 9.9.2 (checksum `971fcd71…`), test/smoke coverage, single shipped-KMI local build + `scripts/ddk-image.sh` digest extraction, separate signed-release/publish jobs, GPL-3.0.txt and notice assets |
+| #2 `fix/app-correctness-safety` | `ffe8056` | JUnit 4.13.2 / Robolectric 4.18.1 (test-only), service-owned lifecycle, confirmed configuration, modal consent, new host/app tests |
+| #3 `fix/native-exploit-robustness` | `492e46d` | revised truthful status contract, preference/config integrity handling, artifact/provenance validation, additional host tests |
+| #5 `fix/lkm-kernel-compatibility` | `bdbdd65` | revised CI/Makefile/docs and release-gate wording |
+
+Earlier snapshots (`38eebc3`, `5893dfa`, `8dd66ea`, `a9acd3a`) are historical
+review points, not current heads; do not deny or assert features from an old
+422 response — the listed snapshot heads were resolved against GitHub at that
+time.
+
+**Integration order (suggested at that snapshot):** CI → LKM → app → native →
+docs. The code branches overlap in source **and documentation**; integration
+requires
+resolving conflicts (a normal merge or squash is fine — no mandatory rebase).
+Listed commits are review snapshots, not proof of final integration.
+
+**Merge / release gates — UNSATISFIED at the PR #4 snapshot.** #5's description
+then framed the artifact comparison and hardware validation as **release
+blockers with conditional re-pinning**; #3's older description contained an
+unconditional re-pin claim that does **not** describe master. Master has PR #3's
+fail-closed KO SHA-256 gate and packaged-byte verification, and re-pinning is
+conditional on bytes actually changing. PR #4's own description must not say
+re-pin is unconditional. The explicit gate remains: final integrated artifact
+comparison, review of any changed pins, hardware evidence and integrated CI —
+separate green branch CI runs do **not** satisfy it and are not release
+validation. Do not treat the historical pins (`94f8be98…` / `9dfb8b71…`,
+covering the pre-CFI blob) as current usable build inputs, and do not substitute
+unverified hashes for a new source revision.
+
+**Additional release blocker from #3 (P1-08) — STILL OPEN IN MASTER.** A
+residual privileged staging-integrity issue remains open: the loader's
+hard-coded `/data/local/tmp/.ksud-stage` path can still be replaced by a
+`shell`-uid process between `close()` and the loader's `rename()`. The
+`stage_file()` hardening does not fully close that threat model. Integrated CI,
+artifact comparison and device validation alone are **not** sufficient for
+release; this gate must be resolved or explicitly accepted, and the PR #4
+documentation merge does not close it. Do not claim the historical validation
+covers it.
+
+**KO pins — conditional, not automatic.** At #5's 2026-11-25 snapshot head,
+whether the UMH typedef/CFI change alters compiled `.ko` bytes is **not
+established** (affected
+indirect calls are `__nocfi`). If and only if a rebuilt module's bytes change
+must both pins be reviewed and re-pinned in a **reviewed commit** before release.
+Do not assume new hashes are required, and do not claim a stale approved blob
+represents the new source. Historical run6/run8 validation is tied to the old
+artifact (CI pin `9dfb8b71…`, 13384 B); this batch has **no** new hardware
+validation. At that snapshot, merging this docs branch alone would have put
+documentation ahead of the code; master now contains the merged PR #1/#2/#3
+code and PR #5 is being merged.
+
+Health-check / hardening batch applied on top of the 2026-11-17 GZIF port
+(master commits `3fbb7ed` and `ae627f1` are included and preserved). Scope is
+unchanged: SM-S9180 `dm3q`, build `S9180ZHU8GZIF`, Android 17 / One UI 9.0,
+kernel `5.15.197-android13-8-34343818-abS9180ZHU8GZIF` only. Root is still
+**volatile** (late-load only) and was verified only on this build; no support
+or verification is claimed for any other device, build, KMI or One UI version.
+
+Local modifications vs upstream, grouped by the four change sets. The
+file-level list below is a central change record; it is **not** by itself a
+substitute for the per-file notices that GPL-2.0 §2(a) requires inside each
+modified covered source file. At the **dated snapshots** listed above, dated
+2026-11-24 change notices exist on Makefile, `app/build.gradle.kts`,
+`build.gradle.kts`, `gradle.properties`, `gradle/libs.versions.toml`,
+`ExploitRunner.java`, `app/src/main/jni/bootstrap.c:2` (added by #3 `8dd66ea`)
+and `lkm/dfroot.c:16–30` (dated `MAINTENANCE NOTE (2026-11-24)` added by #5
+`a9acd3a`). Newly authored files are tracked separately from modified ones.
+That inventory is **as of the dated snapshots above only**. At that snapshot the
+latest #1/#2/#3/#5 revisions modified many more files, some with dated
+2026-11-25 notices, so a complete file-level compliance audit of the final
+integrated tree has **not** been demonstrated here; do not treat this historical
+inventory as a completed audit of the current tree. Re-verify the inventory from
+the final integrated tree, distinguishing newly authored files from modified
+covered files. Completing
+per-file notices across every touched covered file is a **condition** of
+distributing the modified GPL-covered sources/binaries, not a voluntary
+follow-up; a central list does not supply those notices. (The 2026-11-17 port files listed
+above do carry their per-file notices. Separate master/CI commits
+`3fbb7ed`/`ae627f1` and the `fix/ci-build-reliability` branch also touched
+`.github/workflows/build.yml` (the CI notice gap below); `.gitignore` and
+`README.md` were touched by the 2026-11-17 port (`a616148`) and the docs
+commits respectively, and their notice status follows those entries.)
+
+Build / CI reliability (`fix/ci-build-reliability`, `38eebc3`):
+
+- `.github/workflows/build.yml` — least-privilege `permissions` (the default
+  is `contents: read`; the `build-dfroot` job is granted `contents: write`,
+  with the release step additionally tag-gated — GitHub permissions are
+  job-level, not step-level);
+  per-ref `concurrency` with `cancel-in-progress`; job timeouts (DDK 60 min,
+  APK 30 min); signing-secret validation and `signing.properties` generation
+  run only for non-PR events, with secrets passed via `env:` and escaped for
+  `java.util.Properties`; DDK container image digest-pinned and `--privileged`
+  removed; KMI matrix reduced 8→1 (`android13-5.15` only, the sole KMI CMake
+  embeds); single named artifact download; `softprops/action-gh-release`
+  v1→v3. Master's Gradle 429 retry loop (`ae627f1`) is retained.
+- `Makefile` — signing credentials no longer required at parse time (so
+  `make clean` and other non-signing queries work without them); exported to
+  the recipe environment and passed to `keytool` via `-storepass:env` /
+  `-keypass:env`; `signing.properties` written with Properties escaping,
+  `umask 077` and mode 0600; DDK release extraction tolerates the `@sha256`
+  digest; bundled `jniLibs/*.so` added to `APK_SRCS`.
+- `build.gradle.kts` — AGP applied via `alias(libs.plugins.android.application)`
+  so 9.5.0 is declared in exactly one place (it was hardcoded 9.4.0 here while
+  the catalog declared 9.5.0).
+- `app/build.gradle.kts` — `signing.properties` is optional at configuration
+  time (fresh clones / PR builds no longer fail); missing keys produce a
+  readable error; the release variant stays unsigned when it is absent; AGP
+  via the version-catalog alias; NDK `28.2.13676358` (r28c) and CMake `3.22.1`
+  pinned.
+- `gradle.properties` — removed the inert `android.useAndroidX=true` (the app
+  has no AndroidX dependencies and AGP 9.x enables AndroidX by default).
+- `gradle/libs.versions.toml` — removed the unused appcompat / material /
+  constraintlayout / preference declarations; only the AGP plugin alias
+  remains (single source of truth, 9.5.0).
+- `gradle/wrapper/gradle-wrapper.properties` — at #1's 2026-11-25 snapshot
+  (`ed4b30d`, now historical — PR #1 is merged into master `cdec576`) this pins **Gradle 9.9.2** with
+  `distributionSha256Sum=971fcd71…` and download `retries` 3 (distinct from
+  master's build-time Maven Central 429 retry). The same PR adds smoke tests,
+  a single-shipped-KMI local build and digest extraction via
+  `scripts/ddk-image.sh`, and separate signed-release/publish jobs with
+  GPL-3.0.txt / NOTICE / THIRD_PARTY_NOTICES.md assets. These are **candidate
+  snapshot** facts, not verified final integration or proof that an advisory
+  is remediated in the released artifact.
+- `THIRD_PARTY_NOTICES.md` — removed the AndroidX Apache-2.0 row. At the #2
+  snapshot (`ffe8056`) `app/build.gradle.kts:207–208` declares **test-only**
+  JUnit 4.13.2 / Robolectric 4.18.1; there are no third-party **runtime**
+  Java/Kotlin dependencies (framework `android.preference.*` UI).
+
+App correctness / safety (`fix/app-correctness-safety`, `b071923`, 2026-11-25
+snapshot head `ffe8056`):
+
+- `app/src/main/AndroidManifest.xml` — `QUERY_ALL_PACKAGES` replaced by a
+  narrow `<queries>` whitelist of the two supported SU managers; `INTERNET`
+  retained (required for the exploit's AF_INET/UDP sockets, loopback included).
+- `app/src/main/java/df/root/BootReceiver.java` — null-check `PowerManager`;
+  timed partial WakeLock (10 min) acquired on the boot path and released only
+  if held.
+- `app/src/main/java/df/root/ExploitRunner.java` — at the earlier `b071923`
+  snapshot: manager enumeration limited
+  to a known-package whitelist and `hasBundledLoader()` replaces `hasKsud()`
+  (the loader is bundled in this APK, so the manager's own `libksud.so` is
+  never staged); Next→classic loader fallback emits an explicit warning
+  (`su -v` will report 3.3.0); named result codes 0–5 with a documented
+  Java/native contract and a full UI mapping, including rc=4 soft-reboot
+  pending; native rc=2 is translated to a distinct setup-failure code;
+  IpSec/UDP/SPI resources closed by a nested try/finally ownership ladder.
+- `app/src/main/java/df/root/MainActivity.java` — at the earlier
+  `b071923`/`5893dfa` snapshot only: manager list from the same
+  whitelist plus a bundled-loader warning; `onDestroy()` lifecycle guard
+  (`mDestroyed`, executor shutdown) prevents UI/Toast updates after Activity
+  destruction; full result-code→message mapping including rc=4; timed
+  WakeLock on the manual path; preference writes use `commit()` (synchronous
+  write to remove the async race for native's direct DE-XML read; the boolean
+  result is currently ignored, so a failed write is not surfaced — persistence
+  is not guaranteed).
+- `app/src/main/java/df/root/SettingsFragment.java` — at the earlier
+  `b071923`/`5893dfa` snapshot, an EXPERIMENTAL hard-reboot warning Toast on
+  first enable within a Settings visit (instance boolean, not a durable
+  once-ever acknowledgement); preference writes used `commit()`
+  because native `bootstrap.c` reads the DE prefs XML directly (same caveat:
+  success is assumed, not verified). At #2's snapshot (`ffe8056`) the
+  implementation changed again: service-owned lifecycle, confirmed
+  configuration, modal consent (`SettingsFragment.java:169–196`) and new
+  host/app tests. These were candidate snapshot changes, not the final
+  integrated contract; master's merged contract is authoritative (see #16).
+- `app/src/main/res/xml/preferences.xml` — soft-reboot summary now states it
+  is EXPERIMENTAL and may cause a full hard reboot on S9180/GZIF.
+
+Native exploit robustness (`fix/native-exploit-robustness`, snapshot `d3f3356`):
+
+- `app/src/main/jni/exp.c` — bound-check the hook position in `patch_hook`;
+  drop `SPLICE_F_GIFT` for the stack buffer; `read_device_versions()` now fails
+  closed, adds a `getprop` fallback and fixes a dangling-pointer bug; strict
+  hex / port / SPI validation and fail-loud `bind()` / `detect_ko_target()`;
+  secret material wiped after use; soft-reboot rc=4 contract — `/dev/dfmsr`
+  is ordered before `/dev/dfm6` and warning markers `/dev/dfmw2` /
+  `/dev/dfmw3` are informational only.
+- `app/src/main/jni/elf_parser.c` — `fstat()`-based file-size checks, range
+  checks and short-read handling for the program/section-header tables and
+  `.dynstr` / `.dynsym`.
+- `app/src/main/jni/include.inc` — corrected `push` / `pop` assembly macros
+  (writeback addressing, `Rn` parameter name).
+- `app/src/main/jni/bootstrap.c` — `TEMP_FAILURE_RETRY(waitpid(...))`; marker
+  files created 0600 (debug/create_mark modes 0600); secure `stage_file()`
+  staging (`unlink` + `O_CREAT|O_EXCL|O_NOFOLLOW`, 0700, full-write loop,
+  `fchmod`/`fsync`); soft-reboot path touches `/dev/dfmsr` before `/dev/dfm6`,
+  bounds the late-load wait to 60 s and emits `/dev/dfmw2` / `/dev/dfmw3`
+  warning markers instead of hanging or misreporting success.
+- `app/src/main/jni/status_poll.c` / `status_poll.h` — at the dated `8dd66ea`
+  snapshot these were **new**, an injectable marker-poll state machine (70 s
+  bound, rc=4 precedence, late warnings never downgrade rc). At #3's 2026-11-25
+  snapshot head `492e46d` they were **deleted**, replaced by
+  `status_protocol.{c,h}` with nonce-bound v2 final tokens, a non-terminal
+  `REBOOT_PENDING` grace window and a 70 s budget / 85 s overall deadline.
+- `app/src/main/jni/CMakeLists.txt` — build-time SHA-256 gate for the embedded
+  KO with two accepted pins and a `DFROOT_SKIP_KO_HASH_CHECK` option (rejected
+  in CI); the verification target runs before `exp.c` is compiled;
+  `splicehelper` is generated in the build directory rather than the source
+  tree.
+- `app/src/main/jni/verify_ko_sha256.cmake` (new) — verifies the blob against
+  the pins, rejects unknown/missing blobs (CI rejects hash-skip), validates pin
+  format and writes a stamp so the check runs on every build without needless
+  recompiles.
+- `tests/native/status_poll_test.c` — at the `8dd66ea` snapshot this was the
+  new host marker-protocol test; at #3's 2026-11-25 snapshot head `492e46d` it
+  was replaced by `status_protocol_test.c` plus additional host tests. Wired
+  into CI.
+
+The LKM compatibility fix (snapshot `a9acd3a`; 2026-11-25 snapshot head
+`bdbdd65`) is included in this batch;
+see the LKM subsection below. At that snapshot the upstream PR #182 selinuxfs
+approach remained unimported and was tracked as a separate limitation.
+
+LKM CFI type-ID correctness (`fix/lkm-kernel-compatibility`, snapshot head
+`a9acd3a`):
+
+- `lkm/dfroot.c` — UMH function-pointer typedefs `umh_setup_t` / `umh_exec_t`
+  were corrected against the real `<linux/umh.h>` prototypes (`const char
+  *path`, `struct subprocess_info *`), `info` typed `struct subprocess_info *`,
+  with an explicit `<linux/umh.h>` include and `__nocfi` handling. At this
+  head a dated `MAINTENANCE NOTE (2026-11-24)` states that **whether the
+  typedef change alters compiled `.ko` bytes is NOT established** (affected
+  indirect calls are in `__nocfi` functions, so type IDs may not be emitted),
+  and that target vendor headers were not checked. Known-limitation comments
+  record the selinux_state field-order assumption, kprobes dependency, and
+  `insn_patch_text` failure being only `pr_warn`-ed. The earlier `%px`
+  pointer-logging sites have been **removed** at this head — no kernel address
+  is disclosed there — superseding the historical hashed/`kptr_restrict`
+  comment. No runtime/branch logic changed; **do not assume** the compiled
+  bytes are unchanged or changed: compare/re-verify the final artifact before
+  merge, and re-pin only if bytes actually changed (release gate, see merge
+  order above). No hardware validation was performed for this batch.
+
+Three cross-cutting caveats:
+
+- **Soft reboot is EXPERIMENTAL.** On S9180/GZIF it has caused a full hard
+  reboot; leave the setting OFF unless that risk is accepted. At the **earlier
+  `8dd66ea`/`5893dfa` snapshot only**, enabling it made the native side report
+  rc=4 via the `/dev/dfmsr` marker before `/dev/dfm6` (loader returned zero;
+  the marker is not independent root-readiness evidence). At #3's 2026-11-25
+  candidate the status protocol changed (see the result-contract caveat below).
+  No status message
+  proves root or a reboot outcome; independent verification is always required.
+- **Result contracts are NOT interchangeable across the 2026-11-25 candidate
+  branches (#16).**
+  #2's `NativeResultMapper.java` still maps rc=4 to a "root active" pending
+  message, while #3's `StatusRc.java` explicitly says "root not verified" /
+  "soft-reboot command issued; not confirmed", adds codes 5/6/7/8/9 and an
+  additive recovery-failed bit; #2 also has its own configuration protocol.
+  Neither branch's mapping was the final integrated contract at that snapshot;
+  master's merged mapping is authoritative, and separate green CI runs do not
+  establish compatibility. Do not claim root or reboot
+  confirmation from a status message; require independent review/validation of
+  the actual combined result before approval.
+- **Embedded KO SHA-256 double pin.** At that snapshot `verify_ko_sha256.cmake`
+  checked `dfroot-android13-5.15.ko` against two candidate accepted pins. Their
+  **reported historical** fingerprints below are repository records; the
+  same-source relationship is reported, not independently established
+  provenance (see the caveat at the end of this item and the single reference in
+  PORTING-GZIF.md §7):
+  `94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7`
+  (reported local `make` output, 13504 B, with `.note.gnu.build-id`) and
+  `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68` (reported
+  CI artifact, 13384 B, post-processed with `llvm-objcopy --strip-unneeded`
+  and several `-R …` section removals (including `.note.gnu.build-id`;
+  see `build.yml`), reported as byte-for-byte the KO in the v4.8-gzif release
+  APK).
+  Unknown blobs are rejected (fail-closed). At this historical input-only
+  snapshot `DFROOT_SKIP_KO_HASH_CHECK=ON` bypassed the build-input gate;
+  at #3's 2026-11-25 candidate the source-only skip option was
+  deprecated/unsupported and final linked/packaged-byte verification was
+  mandatory. Master now has that fail-closed gate and packaged-byte
+  verification from PR #3; PR CI still skips real publishing gates and is not
+  release validation. Re-verify for **every** source or build-input change, and
+  re-pin **only the bytes that actually
+  changed** (in `app/src/main/jni/CMakeLists.txt`, in a reviewed commit) before
+  a new artifact is usable; do not assume every textual edit changes the blob
+  (see #5's unverified CFI byte-impact note). A pinned hash proves equality to
+  an approved blob, not provenance from the current checkout; record the DDK
+  digest and source revision where verified and mark unknown identities
+  explicitly. The CI image digest recorded at that snapshot does not prove the
+  historical build used it.
+
 ## 4.8-gzif (2026-11-17)
 
 Fork of `diabl0w/DFRoot @ 7a6513a` for the Samsung Galaxy S23 Ultra
@@ -1561,6 +1874,9 @@ carries a per-file notice):
 - `Makefile` — no default signing credentials; `SIGN_PASS`/`SIGN_ALIAS` must
   now be set explicitly (no change in what CI does; CI already requires the
   `KEYSTORE` secrets).
+- `.gitignore` — `lkm/dfroot.ko` (and `app/src/main/jni/ko/*.ko`) ignored;
+  the duplicate `lkm/dfroot.ko` was removed from the tree.
+- `README.md` — GZIF port notice/app label and build notes (see README).
 
 New files: `NOTICE`, `THIRD_PARTY_NOTICES.md`, `CHANGELOG.md`,
 `PORTING-GZIF.md`, `app/src/main/jniLibs/arm64-v8a/libksud.so` (KernelSU

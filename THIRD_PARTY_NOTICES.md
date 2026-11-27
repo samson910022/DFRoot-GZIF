@@ -54,21 +54,11 @@ GitHub CI green run after push remains a POST-PUSH gate.
 | Gradle / Android Gradle Plugin / Gradle wrapper | build | Apache-2.0 | gradle.org / Google Maven |
 | `GPL-3.0.txt` | licence text conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv3 (official text) | https://www.gnu.org/licenses/gpl-3.0.txt |
 | `LICENSE` | repository's own GPL-2.0-only licence, conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv2 | this repository |
-| `aes256.c/h`, `libcxx.h` etc. under `app/src/main/jni/` | payload sources | see file headers (GPL-2.0-only unless marked otherwise) | this repository |
+| `aes256.h`, `include.inc` and other `app/src/main/jni/` sources | payload sources | see file headers (GPL-2.0-only unless marked otherwise; `include.inc` is BSD-3-Clause — see notice below) | this repository |
 
 Notes
 
-- The app declares no third-party Java/Kotlin libraries: `dependencies {}` in
-  `app/build.gradle.kts` is empty, the settings UI uses the deprecated but
-  functional framework `android.preference.*` API, and its themes inherit the
-  **platform** `android:Theme.Material` / `android:Theme.Material.Light`
-  (`app/src/main/res/values*/themes.xml`). Those are Android framework
-  resources, **not** the Material Components library
-  (`com.google.android.material`). Consequently the app has **no AndroidX or
-  Material Components dependency** and no corresponding Apache-2.0 notice
-  applies. `gradle/libs.versions.toml` declares the AGP version
-  (`agp = "9.5.0"`) plus the `android-application` plugin alias and is the
-  single source of truth for AGP (no root `build.gradle.kts` pin).
+- At the earlier snapshot `dependencies {}` was empty (framework `android.preference.*` UI and platform themes, not Material Components or AndroidX). At #2's newer snapshot `app/build.gradle.kts:207–208` declares JUnit 4.13.2 / Robolectric 4.18.1 as **test-only** dependencies; there are still no third-party **runtime** Java/Kotlin libraries. `gradle/libs.versions.toml` is the single source of truth for AGP (`agp = "9.5.0"`), with no root `build.gradle.kts` pin.
 - The applicationId (`df.root`) and the app UI credit the upstream authors;
   upstream's credits section in README.md is retained verbatim.
 - `libksudnext.so` embeds four KMI modules (`android12-5.10`, `android13-5.15`,
@@ -125,3 +115,17 @@ the closing `*/`):
   ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
   POSSIBILITY OF SUCH DAMAGE. */
 ```
+
+**Binary-distribution delivery (verification item).** The Odzhan licence's
+second condition requires the copyright/conditions/disclaimer to accompany
+binary distributions. At #1's 2026-11-25 review snapshot (`ed4b30d`, **historical**
+— #1 is merged into master `9f60e16`), the separate signed-release/publish jobs
+stage and publish `GPL-3.0.txt`, `NOTICE` and `THIRD_PARTY_NOTICES.md` alongside
+the signed APK — this supersedes the older "APK-only" description. Those jobs
+were **skipped** in the reviewed PR run, and ordinary CI APK artifacts take a
+different distribution path, and the newer unmerged #3 candidate proposes yet
+another non-tag artifact design (Debug-only, UNVERIFIED); actual notice
+delivery for **each** binary-distribution path remains unverified. Preserve
+this notice and #1's license assets when merging the overlapping #1/#4 edits.
+This is a verification gap, not a claim of inspected APK contents or a legal
+violation.

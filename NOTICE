@@ -8,13 +8,18 @@ This repository is a fork of diabl0w/DFRoot
 
 Upstream DFRoot is licensed under the GNU General Public License,
 version 2 (GPL-2.0-only). See LICENSE (verbatim, unchanged). The DFRoot
-application source in this repository remains GPL-2.0-only.
+application source in this repository is GPL-2.0-only, incorporating
+BSD-3-Clause code in `app/src/main/jni/include.inc` (see
+THIRD_PARTY_NOTICES.md).
 
 Local modifications (2026-11-17, samson910022), made for the Samsung
 Galaxy S23 Ultra (SM-S9180) build S9180ZHU8GZIF (Android 17 / One UI 9.0 /
 SPL 2026-10-05 / kernel 5.15.197-android13-8-34343818-abS9180ZHU8GZIF):
-see CHANGELOG.md ("4.8-gzif") for the file-level diffs, each of which also
-carries a per-file change notice (GPL-2.0 §2(a)).
+see CHANGELOG.md ("4.8-gzif") for the file-level diffs. The code files changed
+in `bd8f814` (the port commit) carry per-file change notices (GPL-2.0 §2(a));
+`.gitignore` and `README.md` were also touched in that batch and carry **no**
+dated notice. Separate master/CI commits and the CI branch also touched
+`.github/workflows/build.yml` (CI notice gap).
 The application was renamed: label is now "DFRoot GZIF" (was "DFRoot FZG1");
 `applicationId` remains `df.root` by design (the bootstrap staging protocol
 depends on it).
@@ -78,6 +83,49 @@ not rewritten by any of the 2026-11-25 rounds):
 
 - `libksud.so` → `aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`
 - `libksudnext.so` → `679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`
+
+Historical record — 2026-11-24 maintenance batch
+-------------------------------------------------
+
+The following is a **historical** change record for the 2026-11-24
+health-check / hardening batch (samson910022), originally reviewed against
+master `ae627f1`; that documentation branch was subsequently rebased onto the
+then-current master `9f60e16` (which includes PR #1 and
+`3fbb7ed`/`ae627f1`). It is preserved here for historical context, not as the
+current state: **PR #1, #2 and #3 are merged into master (`cdec576`); PR #5 is
+being merged.** The batch covered CI and build reliability
+(`fix/ci-build-reliability`), LKM CFI type-ID correctness
+(`fix/lkm-kernel-compatibility`), app correctness and safety
+(`fix/app-correctness-safety`) and native exploit robustness
+(`fix/native-exploit-robustness`). The authoritative dated snapshot table is
+in CHANGELOG.md ("4.8-gzif maintenance (2026-11-24)") — earlier SHAs in that
+record are historical review points, not "current verified heads".
+
+The scope at that snapshot was unchanged — SM-S9180 / S9180ZHU8GZIF,
+Android 17 / One UI 9.0, volatile late-load root verified only on this build.
+Suggested integration order then: CI → LKM → app → native → docs. See
+CHANGELOG.md ("4.8-gzif maintenance (2026-11-24)") for the per-file list,
+manager whitelist, rc=4 soft-reboot flow and build pins of that snapshot. At
+that snapshot dependency gates were recorded as **unsatisfied**: #5 required
+artifact comparison and CFI hardware validation before merge, and whether the
+UMH typedef change alters `.ko` bytes was **unverified** at #5's head — re-pin
+only if a rebuilt blob's bytes actually change, in a reviewed commit.
+
+That central CHANGELOG list was a change record only: by itself it does
+**not** satisfy GPL-2.0 §2(a), which requires a notice inside each modified
+covered source file. Unlike the 2026-11-17 changes described above, not every
+file touched by the 2026-11-24 batch carried a per-file change notice — only
+some did (listed in that CHANGELOG entry). Dated 2026-11-24 notices existed on
+`app/src/main/jni/bootstrap.c:2` (added by #3 `8dd66ea`) and on
+`lkm/dfroot.c:16–30` (a dated `MAINTENANCE NOTE (2026-11-24)` added by #5
+`a9acd3a`, whose §2(a) sufficiency is assessed separately). The remaining gaps
+in that snapshot included `gradle/wrapper/gradle-wrapper.properties`, the
+other native files changed in `d3f3356` (`exp.c`, `elf_parser.c`,
+`include.inc`, `CMakeLists.txt`) and the new `verify_ko_sha256.cmake`.
+Completing per-file notices across every touched covered file (including all
+files changed by `a9acd3a`) is a **condition** of distributing the modified
+GPL-covered sources/binaries, not a voluntary follow-up. The sha256 values and
+licence statements for the bundled loaders above are unchanged.
 
 Aggregated third-party components
 ----------------------------------
@@ -180,9 +228,11 @@ trees are the ones shipped in the payloads repository. The bundled loader
 binaries are **rebuilt from those patched sources** on branch
 `fix/p1-08-root-owned-staging` (commit `891e897`), not verbatim copies of the
 older artifacts committed there; the exact bundled bytes are pinned by sha256
-and size above and by `verify_loader_hashes.cmake` at build time. DFRoot's own
-modifications vs upstream are listed in CHANGELOG.md and shown as per-file
-notices in the modified sources.
+and size above and by `verify_loader_hashes.cmake` at build time. This source
+offer is made available for at least three years from the date of
+distribution, on terms no less favourable than those under which the binaries
+themselves are distributed. DFRoot's own modifications vs upstream are listed
+in CHANGELOG.md and shown as per-file notices in the modified sources.
 
 Build-host paths
 ----------------
@@ -203,11 +253,13 @@ digest-pinned image
 resolved via `scripts/ddk-image.sh`) or by CI
 (`.github/workflows/build.yml`), and copied to
 `app/src/main/jni/ko/dfroot-android13-5.15.ko` (all `*.ko` under that directory
-are gitignored). CI strips `.note.gnu.build-id`, so the CI/release artifact
-(13,384 B, sha256
-`9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`) is not
-byte-identical to the local `make` build (13,504 B, sha256 `94f8be98…`, which
-retains the build-id note). Fresh clones must run the LKM build
+are gitignored). CI post-processes the LKM with `llvm-objcopy --strip-unneeded`
+plus `-R …` section removals (including `.note.gnu.build-id`), so a stripped CI
+artifact and an unstripped local `make` output are not byte-identical. Their
+**reported historical** fingerprints are recorded in the qualified note below
+("Embedded LKM integrity pin") and consolidated in PORTING-GZIF.md §7; they are
+repository records, not verified output of this checkout or an established
+same-source build identity. Fresh clones must run the LKM build
 (or download CI artifacts) before `assembleRelease`; see README.md and
 PORTING-GZIF.md §8.
 
@@ -555,6 +607,47 @@ historical implementations or pre-rebase heads, not this head.
   P1-07 / P1-08 remain OPEN**; the PR as a whole is **not independently
   device-verified, not merge-ready and not release-ready**. Auto Soft Reboot
   and Start on Boot remain disabled and unvalidated. See `CHANGELOG.md` round 13.
+
+Embedded LKM integrity pin (gate present in master from PR #3)
+---------------------------------------------------------------
+
+The fail-closed KO SHA-256 gate and the final packaged-byte verification
+summarized in "Validation status and release gates" above are **present in
+master from PR #3** (merged into master at `cdec576`) and are enforced by a
+build from this checkout. At the earlier historical base (`9f60e16`) the KO
+was only an input dependency of `app/src/main/jni/CMakeLists.txt`, with no
+verification target; that snapshot is retained below only as a historical
+record.
+
+`app/src/main/jni/verify_ko_sha256.cmake` checks the SHA-256 of the
+gitignored, build-supplied `app/src/main/jni/ko/dfroot-android13-5.15.ko` at
+build time, before the blob is embedded into `exp.c`. The two reported
+fingerprints below are **repository records from that earlier snapshot, not
+verified output of the current build or a recorded source/build-input
+identity**:
+
+  - 94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7
+        local `make` output from `lkm/`, 13504 B, WITH `.note.gnu.build-id`.
+  - 9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68
+        CI artifact, 13384 B, post-processed after the DDK build with
+        `llvm-objcopy --strip-unneeded` plus several `-R …` section removals
+        (including `.note.gnu.build-id`; see `build.yml`); reported as the KO
+        shipped in the v4.8-gzif release APK.
+
+Any other blob is rejected by the gate (fail-closed); an unknown or tampered
+module cannot satisfy the check. At the historical input-only snapshot
+`DFROOT_SKIP_KO_HASH_CHECK=ON` disabled that check for local experiments; in
+the current master gate the source-only skip option is deprecated/unsupported
+and the final linked/packaged bytes are verified mandatorily. Skip mode is
+forbidden in CI/release builds, and PR-level CI skips the real publishing
+gates and is not distributable-artifact validation. Re-verify for **every**
+source/build-input change, and re-pin **only the bytes actually shown to
+change** in `app/src/main/jni/CMakeLists.txt` in a reviewed commit before a new
+artifact is usable; do not assume every edit changes the blob. A pinned hash
+proves equality to an approved blob, not that the blob was built from the
+current checkout; the historical source revision and build inputs are not
+established by these pins and should be marked unknown. A mutable local
+image tag is not equivalent to the CI digest pin.
 
 References
 ----------

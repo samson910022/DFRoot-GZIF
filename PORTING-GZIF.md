@@ -1,6 +1,6 @@
 # PORTING-GZIF.md — DFRoot (CVE-2026-43284) port to Galaxy S23 Ultra SM-S9180 / S9180ZHU8GZIF
 
-**Date written:** 2026-11-17 · **Author:** subagent for the GZIF port effort · **Scope:** documentation only — this file is the single artifact it produces. No code, scripts, logs, or other files are created or modified by this document.
+**Date written:** 2026-11-17 · **Author:** subagent for the GZIF port effort · **Scope:** documentation only — this file is the primary artifact. It was updated on 2026-11-24 to record the maintenance batch (CI `38eebc3`, LKM `9bc4ba9`, app `b071923`/`5893dfa`, native `d3f3356`); those code changes live on their own branches and are not part of this document's own edits.
 **Repository:** published at `samson910022/DFRoot-GZIF` — a fork of [diabl0w/DFRoot](https://github.com/diabl0w/DFRoot) @ `7a6513a` ("Fall back to libbase when libc++ hook selection fails (#185)", 2026-11-06), branch `master`.
 **Campaign record (device-validation doc):** `samson910022/Root-My-Galaxy-Payloads-Next` → `docs/SM-S9180-S9180ZHU8GZIF.md`
 **Log archive (host-side, never committed):** `GZIF-port/` (run logs, dropbox dumps, forensic reports — see §11 "Evidence locator").
@@ -352,6 +352,7 @@
   - `app/src/main/jniLibs/arm64-v8a/libksudnext.so` — Next **3.4.2** generic Samsung-patched ksud, P1-08 rebuilt (sha256 `7f28f1fb…`, 4,728,320 B).
 - End-to-end hardware validation was achieved **twice** on the same firmware build on 2026-11-17: **run6** (16:49, classic loader, `ksud start: SUCCESS`, `su -c id` → `uid=0(root) … context=u:r:ksu:s0`, SELinux **Enforcing**, `su -v` = `3.3.0:KernelSU`) and **run8** (17:53, Next loader, identical verification with `su -v` = `3.4.2:KernelSU`).
 - Root is **volatile** (RAM-only). Every reboot wipes it. **Start on Boot / Auto Soft Reboot are not validated — do not enable them on this model.**
+- A 2026-11-24 maintenance batch (CHANGELOG.md / NOTICE / README.md / this file in this worktree; §6 below) added manager whitelisting, a bundled-loader check, synchronous prefs writes, a non-misleading rc=4 soft-reboot report, native parsing/bounds hardening, build pins and a build-time KO SHA-256 gate. **It is defensive/correctness work with no new hardware run after run8; the record below stays at exactly two successful cold boots.**
 
 ---
 
@@ -388,7 +389,7 @@ All three candidate CVEs were triaged against the extracted GZIF kernel Image (s
 |---|---|---|---|
 | **CVE-2026-43499** | "GhostLock" rtmutex/futex-PI UAF (`remove_waiter` sign-gate) | **PATCHED** | Both upstream fix hunks binary-confirmed present (`remove_waiter()` @ `0xffffffc0096f7474`; `rt_mutex_start_proxy_lock()` @ `0xffffffc0096f9464`; Samsung integrated `3bfdc63936dd` + `40a25d59e85b` by GZIF). Listed **High** in SMR-Oct-2026. Do not port. |
 | **CVE-2026-98260** | POSIX-CPU-timer exec-path UAF ("timer payload") | **OPEN (bug present)** | `begin_new_exec()` @ `0xffffffc0084cabd4` decodes to the unpatched 5.15.197 ordering (`posix_cpu_timers_exit()` NOT moved before `unshare_files`/`exec_mmap`). `fs/exec.c` identical between v5.15.197 and v5.15.212; fix only reached 6.1.171/6.6.158 (2026-10-03) — **no 5.15 fix exists anywhere**. **Never ported to dm3q/5.15** (pa3q/6.6-only); listed in **neither** SMR-Oct-2026 nor SMR-Nov-2026. |
-| **CVE-2026-43284** | "DirtyFrag" — xfrm ESP in-place CBC decrypt page-cache write | **OPEN (route-gated) — the winning route** | `esp6_input()` @ `0xffffffc00954c888` **and** `esp_input()` (esp4) @ `0xffffffc009489c20` both implement the unpatched fast path verbatim (no `skb_has_shared_frag()`/`SKBFL_SHARED_FRAG` test before `skip_cow`). `CONFIG_INET_ESP=y`/`CONFIG_INET6_ESP=y` built-in; **`# CONFIG_USER_NS is not set`** (desktop userns route dead at kernel level); app-reachable route = **Android `IpSecManager` transport-mode ESP-in-UDP** (netd installs the SA as root; untrusted apps need no permission). Listed **High** in SMR-Nov-2026 (published 2026-11-03) — expect it to close in a later SMR. |
+| **CVE-2026-43284** | "DirtyFrag" — xfrm ESP in-place CBC decrypt page-cache write | **OPEN (route-gated) — the winning route** | `esp6_input()` @ `0xffffffc00954c888` **and** `esp_input()` (esp4) @ `0xffffffc009489c20` both implement the unpatched fast path verbatim (no `skb_has_shared_frag()`/`SKBFL_SHARED_FRAG` test before `skip_cow`). `CONFIG_INET_ESP=y`/`CONFIG_INET6_ESP=y` built-in; **`# CONFIG_USER_NS is not set`** (desktop userns route dead at kernel level); app-reachable route = **Android `IpSecManager` transport-mode ESP-in-UDP** (netd installs the SA as root; the app needs the normal `INTERNET` permission for the AF_INET/UDP sockets — no additional privileged permission). Listed **High** in SMR-Nov-2026 (published 2026-11-03) — expect it to close in a later SMR. |
 
 **Sanity facts from the campaign** (`docs/SM-S9180-S9180ZHU8GZIF.md` §6.5): every gate for the IpSecManager route was cleared on the real unit — `C1-SPI-OK`, `C2-ENCAP-OK`, `C3-TRANSFORM-OK`, `C4-APPLY-OK`. The xfrm/SELinux model checks out; the esp4 path is fully app-reachable.
 
@@ -398,13 +399,15 @@ All three candidate CVEs were triaged against the extracted GZIF kernel Image (s
 
 Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK). Sources below are the upstream DFRoot files with the local port applied.
 
-**(0) Preconditions / staging.** App is launched → user presses **LAUNCH ROOT**. `ExploitRunner.run()` now first calls `PreferenceIntegrity.init(ctx)` and the pure `earlyExitRc(devDfExists, prefsQuarantined)`: `/dev/df` existing yields **rc 9** (`DF_RC_ALREADY_HOOKED`, "already hooked ... launch skipped" — never rc 0), and a quarantined SharedPreferences state yields **rc 8** (`RC_PREF_STATE_UNCERTAIN`, launch blocked); `/dev/df` wins when both hold (phase 3, host-tested only). It then prints device info (Model/Manufacturer/Android/SPL/Kernel) and refuses if Developer Options → "Log buffer size" is Off. The SU manager selected in the spinner is validated (`hasKsud()` `:40-43` — the *manager APK* must ship `nativeLibraryDir/libksud.so`; this is only an eligibility gate, not the loader that runs — see §6), then `stageAssets()` (`:123-135`) copies the **bundled Samsung-patched loader** (see §6, patch 1) to `/data/user_de/0/df.root/ksud` and `libbootstrap.so` to `/data/user_de/0/df.root/bootstrap`.
+**(0) Preconditions / staging.** App is launched → user presses **LAUNCH ROOT**. `ExploitRunner.run()` now first calls `PreferenceIntegrity.init(ctx)` and the pure `earlyExitRc(devDfExists, prefsQuarantined)`: `/dev/df` existing yields **rc 9** (`DF_RC_ALREADY_HOOKED`, "already hooked ... launch skipped" — never rc 0), and a quarantined SharedPreferences state yields **rc 8** (`RC_PREF_STATE_UNCERTAIN`, launch blocked); `/dev/df` wins when both hold (phase 3, host-tested only). It then prints device info (Model/Manufacturer/Android/SPL/Kernel) and refuses if Developer Options → "Log buffer size" is Off. The SU manager selected in the spinner must be one of the two whitelisted packages and this APK must ship the matching pinned bundled loader (`hasBundledLoader()`; the old `hasKsud()` check of the *manager APK's* `nativeLibraryDir/libksud.so` and the manager-APK loader fallback are historical — §6), then `stageAssets()` (`:123-135`) copies the **bundled Samsung-patched loader** (see §6, patch 1) to `/data/user_de/0/df.root/ksud` and `libbootstrap.so` to `/data/user_de/0/df.root/bootstrap`.
 
-**(1) IpSecManager ESP transform.** The app opens a `UdpEncapsulationSocket` + `SecurityParameterIndex` via `android.net.IpSecManager`, builds an **AES-CBC / HMAC-SHA256 transport-mode `IpSecTransform`** (`ExploitRunner.java:77-98`). No app permission needed; netd (root, SELinux-allowed) installs the IPv4 ESP-in-UDP SA. The app then execs `libdfroot.so` (the native payload, disguised as a JNI lib — AGP only packages `lib*.so` — and exec'd from `nativeLibraryDir`, which is executable; `runBinary()` `:137`, `ProcessBuilder` + `redirectErrorStream(true)`).
+**(1) IpSecManager ESP transform.** The app opens a `UdpEncapsulationSocket` + `SecurityParameterIndex` via `android.net.IpSecManager`, builds an **AES-CBC / HMAC-SHA256 transport-mode `IpSecTransform`** (`ExploitRunner.java:77-98`). No *additional privileged* permission is required beyond the normal declared `INTERNET` permission (retained for these AF_INET/UDP sockets, loopback included); netd (root, SELinux-allowed) installs the IPv4 ESP-in-UDP SA. The app then execs `libdfroot.so` (the native payload, disguised as a JNI lib — AGP only packages `lib*.so` — and exec'd from `nativeLibraryDir`, which is executable; `runBinary()` `:138`, `ProcessBuilder` + `redirectErrorStream(true)`).
 
 **(2) crash_dump64 splicehelper bridge.** `crash_dump64` (`/apex/com.android.runtime/bin/crash_dump64`) is a privileged binary that runs in the `u:r:crash_dump` SELinux domain via exec-label transition — a domain `untrusted_app` cannot reach directly. The exploit patches it **in the page cache** with `splicehelper` (a freestanding static binary, built on the fly by CMake; see `app/src/main/jni/CMakeLists.txt`). The patch mechanism: AES-CBC in-place decrypt — `IV = AES_ECB_DEC(key, current_content) ⊕ desired_content` — so the kernel's ESP decrypt rewrites the page-cache bytes to the desired shellcode (`exp.c:34-53`). splicehelper has two modes: **splice mode** (pipe a 16-byte page chunk out to the parent, used for writing the `.ko` and patching `crash_dump64`/`libc++.so`) and **read mode** (`argv[3]="r"`, dumps 16 bytes of file content to a pipe for IV computation, `exp.c:189-206`). The vendor file bridge exists because `crash_dump` can open `vendor_file`-labeled files but app-untrusted_app cannot.
 
 **(3) dfroot.ko → vendor file.** The **android13-5.15** LKM `app/src/main/jni/ko/dfroot-android13-5.15.ko` (DDK-built; two distinct fingerprints — the **CI/release artifact is 13,384 B**, sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`, because CI strips `.note.gnu.build-id` with `llvm-objcopy --strip-unneeded`, while the **local `make` build is 13,504 B**, sha256 `94f8be98…`, retaining `.note.gnu.build-id`; they are not byte-identical — vermagic `5.15.202-android13-5.15.202_r00-dirty`, modversions satisfied via KMI CRC) is written via the crash_dump bridge (splicehelper splice mode) into **`/vendor/lib64/AIAwbModel_v2.2.tflite`** — a vendor asset that is never executed by the system. File presence is proven by the splice patch; size and `vendor_file` label are unverified (no retained `stat`/`ls -Z` evidence). (Original upstream candidates `libbinderdebug.so` / `libstagefrighthw.so` / `libstagefright_aidl_bufferpool2.so` are **absent** on this build; the local port hard-codes the tflite in `exp.c:443` and `libcxx.S:22`.) The exploit targets GZIF's `KMI=android13-5.15` (`Using KMI: android13-5.15`).
+
+**Historical note (2026-11-24).** These two fingerprints are **reported repository records**, not a re-verified build of today's checkout; older wording calling the blobs "byte-identical twins" was wrong, and the same-source provenance is reported rather than independently established (§7, §6 "Provenance scope"). Re-pin only if rebuilt bytes actually change.
 
 **(4) libc++.so sentry hook → init tid=1.** The exploit patches `/system/lib64/libc++.so` at `std::ostream::sentry::sentry()` (symbol `_ZNSt3__113basic_ostreamIcNS_11char_traitsIcEEE6sentryC1ERS3_`): **trampoline @ `+0xb4ae0`**, **shellcode @ `+0x10faa8`**, hook site `0xb4ae8`; a BTI/PAC preamble at the hook site was detected and the landing pad advanced (+4) — all printed in-run (`run8_logcat.txt:7777-7782`). The `createOrphanProcess()` double-fork makes the grandchild an orphan; **init (PID 1) reaps it**, and init's main thread (**tid=1**) then calls through the hooked function. The shellcode (`libcxx.S`):
 - verifies `getuid()==0 && gettid()==1`, returns otherwise;
@@ -421,7 +424,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
 - **returns `-ENODEV` on purpose** ("intentionally fail init to unload immediately; avoids triggering mrdump module-loaded callbacks on MTK devices", `dfroot.c:186-188`).
 
 **(6) bootstrap.c — `app/src/main/jni/bootstrap.c`.** Kernel UMH runs the shell: `/dev/dfm0` touched → exec context set to `u:r:init:s0` → `exec /data/user_de/0/df.root/bootstrap`. The kernel runs this with **stdio → /dev/null** (umh setup stdio pointers are NULL), so all diagnostics go to the `/dev/dfm*` marker files, not to the app. Bootstrap:
-- `touch /dev/dfm1`; reads prefs `/data/user_de/0/df.root/shared_prefs/dfroot.xml` (`su_manager`, `soft_reboot`, `disable_modules`);
+- `touch /dev/dfm1`; reads prefs `/data/user_de/0/df.root/shared_prefs/dfroot.xml` (`su_manager`, `soft_reboot`, `disable_modules`) — the Java side writes these keys with `commit()` so a successful synchronous write removes the asynchronous-write race for this direct DE-XML read; it does not by itself guarantee the value reached disk (the `commit()` result is currently ignored — see §6, patch 1);
 - **`adopt_zygote_env()`** — clones zygote64's `environ` (SELinux/label propagation for later children);
 - **`set_partitions_ro()`** — `BLKROSET=1` on `super`, `misc`, `steady`, and any `*_a`/`*_b` block device under `/dev/block/by-name`;
 - if `disable_modules` pref set: creates `/data/adb/modules/*/disable` for every installed module (bootloop recovery);
@@ -467,7 +470,7 @@ Notation: **(stage N)** = pipeline position. "App" = `df.root` (DFRoot GZIF APK)
   after the first valid bound status observation (or once on the shared deadline
    if none arrives), charged to that SAME deadline with the clock rechecked;
    a failed restore sets the additive 64 recovery-failed
-  bit on every app rc. Device timing/quiescence remain UNVALIDATED.
+  bit on every app rc. Device timing/quiescence remain UNVALIDATED. The **2026-11-24 historical flow** (rc=4 via `/dev/dfmsr` before `/dev/dfm6`, `/dev/dfmw2`/`dfmw3`, `/data/local/tmp/.ksud-stage`) is detailed in §6; those terminal markers are no longer published or polled under the current protocol.
 
 **(7) Samsung-patched ksud late-load.** The bundled loader (classic FZG1 v3.3.0 — log tag **`KernelSU`**; or Next generic 3.4.2 — log tag **`KernelSU Next`**):
 - logs `ksud::cli: command: LateLoad {… package_name: "…"}` (`ksud::late_load: late-load command triggered!` … `Detected KMI: android13-5.15` — **2-part KMI always**, verified);
@@ -517,6 +520,27 @@ are no longer published or polled. The old `dfmsr_ok = touch(...)` check was
 inverted (`touch()` returns 0 on success), which made a *successful* root
 publication report failure; it is removed entirely.
 
+**Historical marker table (2026-11-17 / 2026-11-24 snapshots, superseded by the merged #2/#3 protocol — useful only for reading old logs):**
+
+| File | Meaning |
+|---|---|
+| `/dev/df` | hook armed (libc++ shellcode ran, one-shot per boot) |
+| `/dev/dfm0` | dfroot.ko ran; UMH launched bootstrap |
+| `/dev/dfm1` | bootstrap started; prefs read OK |
+| `/dev/dfm2` | zygote env cloned |
+| `/dev/dfm3` | partitions set ro |
+| `/dev/dfm4` | module-disable pass (only if `disable_modules` pref) |
+| `/dev/dfm5` | bootstrap reached "starting SU daemon" |
+| **`/dev/dfmsr`** | **2026-11-24: soft-reboot pending — native rc=4 emitted because the loader returned zero (the marker is not independent root-readiness evidence; rc=4 is an unverified pending state, not proof of root); app prints "DFRoot: root active — device may soft-reboot shortly". Touched *before* dfm6 so it wins the marker poll.** |
+| **`/dev/dfm6`** | **`.ksud-stage late-load` exited 0 → DFRoot prints `ksud start: SUCCESS` (rc=0). With soft reboot enabled both exist and dfmsr wins (rc=4); dfm6 semantics unchanged.** |
+| `/dev/dfme0` | prefs read failed |
+| `/dev/dfme1` | disable-modules failed |
+| **`/dev/dfme2`** | **`.ksud-stage` exited nonzero (or the cp to `.ksud-stage` failed) → DFRoot prints `ksud start: ERROR - ksud nonzero exit`** |
+| `/dev/dfmw0`/`dfmw1` | zygote-env / partitions-ro warnings (non-fatal) |
+| `/dev/dfmw2` / `/dev/dfmw3` | 2026-11-24 soft-reboot warnings: late-load wait timed out (soft-reboot skipped) / `ksud soft-reboot` command failed. Informational only (rc unchanged; native rc=4 was emitted because the loader returned zero, and the marker is not independent root-readiness evidence). |
+
+These markers are historical: under the current protocol they are informational at most, and the old terminal markers (`dfmsr`, `dfm6`, `dfmw2`, `dfmw3`, `dfme2`) are no longer published or polled.
+
 > [!NOTE]
 > **"root_only" only means `.ksud-stage late-load` exited 0. It does NOT prove
 > `kernelsu.ko` finished loading or that root is usable.** In runs 2 and 3 the
@@ -549,7 +573,7 @@ All times local. "KP" = kernel panic (abnormal reset; dumped as XBL/ABL-only `SY
 
 ### 5.1 What "two independent runs, both managers" means — precisely
 
-- Two manager APKs are installed on the unit and both are selectable in DFRoot's spinner (each ships `nativeLibraryDir/libksud.so`, satisfying `hasKsud()`): **`me.weishu.kernelsu`** (classic) and **`com.rifsxd.ksunext`** (KernelSU-Next).
+- Two manager APKs are installed on the unit and both were selectable in DFRoot's spinner during the 2026-11-17 validation: **`me.weishu.kernelsu`** (classic) and **`com.rifsxd.ksunext`** (KernelSU-Next). These remain the only two packages in the app's whitelist (2026-11-24); eligibility is now the APK's **bundled** `libksud.so`/`libksudnext.so` via `hasBundledLoader()`, which replaced `hasKsud()`, and the manager's own `libksud.so` is no longer required or staged.
 - The hardware-validated end-to-end chains were both run with **`com.rifsxd.ksunext` selected** (run6 = bundled classic loader; run8 = bundled generic-Next loader). Selecting `me.weishu.kernelsu` would stage the **same** bundled classic loader (`stageAssets()` prefers the bundled one when present — patch 1), differing only in the `--package-name` argument; the classic manager itself is userspace-broken on this build regardless (see §9.5), and that path has **not** been separately exercised.
 - Two KSU **lineages** have now been validated end-to-end on this firmware: the Samsung-patched **classic KernelSU 3.3.0** (FZG1-validated build, run6) and the Samsung-patched **KernelSU-Next 3.4.2** (generic build embeds four 2-part KMIs incl. `android13-5.15`, run8).
 - Failure runs run2/run3 prove the **stock vanilla** modules of *both* managers panic in the same place — i.e., the manager ABI is not the variable; the module's Samsung accommodation is.
@@ -589,9 +613,7 @@ private static void stageAssets(Context ctx, String suManagerPackage) throws Exc
 }
 ```
 
-The 2026-11-17 port staged from the app's own `nativeLibraryDir` when available,
-with an upstream fallback. That fallback has since been **removed**: current code
-is shown below (Phase 1, §15).
+The port as validated on 2026-11-17 (`ExploitRunner.java:123-135` in that tree) staged from the app's own `nativeLibraryDir` when available, with an upstream fallback. That fallback has since been **removed** as part of merged PR #2: current code is shown below (Phase 1, §15).
 
 ```java
 // Current: SuManager is a canonical allowlist; each entry owns exactly one
@@ -602,18 +624,29 @@ File loader = new File(nativeLibraryDir, manager.getLoaderName());
 // regular-file + no-symlink + SHA-256 pin checks ... then stage that loader.
 ```
 
-Semantics and consequences:
+Semantics and consequences (merged master):
 - `me.weishu.kernelsu` selected → **bundled classic** `libksud.so`; the selected manager only supplies the `--package-name` argument.
 - `com.rifsxd.ksunext` selected → **bundled Next** `libksudnext.so`; same.
 - **No implicit fallback.** A missing, symlinked, renamed, or hash-mismatched
   bundled loader aborts the run during side-effect-free preflight. The manager
   APK's `libksud.so` is never used as a loader; only its presence is an
   eligibility/installation check.
-- The staged loader is executed **not** by the app or by bootstrap directly:
-  bootstrap execs it as `/data/local/tmp/.ksud-stage`; the two bundled loaders
-  were built for exactly this (their embedded path constant is shared).
+- The staged loader is executed **not** by the app or by bootstrap directly.
+  **Historical (run4/run6/run8) loaders:** bootstrap execs it as
+  `/data/local/tmp/.ksud-stage`, their baked-in path constant. **Current
+  rebuilt loaders:** bootstrap stages to and execs the root-owned
+  `/data/adb/.ksud-stage` (§4 step 7, round-8 note above).
 
-Why this is the correct change: the stock managers' embedded modules **panic** on this firmware (run2/run3), and the upstream flow staged exactly those modules. The Samsung-patched loaders survive (run6/run8). This patch swaps module provenance without touching the exploit.
+**Historical semantics (2026-11-17 validation tree).** `hasKsud()` (`ExploitRunner.java:40-43` in that tree) was the spinner eligibility check on the *manager's* `nativeLibraryDir/libksud.so`; if neither bundled lib existed, the app silently fell back to the manager APK's loader, and KSUN with no bundled `libksudnext.so` was not distinguished. `stageBin()` (`:115-121`) copied to `/data/user_de/0/df.root/ksud` and set it executable. These behaviors were superseded in the 2026-11-24 batch (now merged): the two-package whitelist, `hasBundledLoader()` on this APK's bundled loaders, removal of the manager-APK fallback, explicit KSUN→classic warning and `commit()` prefs (below).
+
+Why this was the correct change: the stock managers' embedded modules **panic** on this firmware (run2/run3), and the upstream flow staged exactly those modules. The Samsung-patched loaders survive (run6/run8). This patch swaps module provenance without touching the exploit.
+
+**2026-11-24 app-side refinement of patch 1 (static change; no new hardware run).** The `fix/app-correctness-safety` batch (`b071923`) tightened the selection path:
+- Manager enumeration is limited to `KSU_MANAGER_PACKAGES = { "me.weishu.kernelsu", "com.rifsxd.ksunext" }`; the Manifest swaps `QUERY_ALL_PACKAGES` for a matching narrow `<queries>` whitelist. Other managers are not recognized (a code change to the whitelist is required).
+- `hasBundledLoader()` checks existence of **this APK's** `libksud.so` / `libksudnext.so` in `nativeLibraryDir`; `hasKsud()` and the manager's `libksud.so` requirement are gone. If neither bundled loader exists, MainActivity reports `WARNING: no bundled Samsung-patched ksud loader found in this APK`.
+- KSUN selected but `libksudnext.so` missing → the app warns explicitly: "WARNING: KernelSU-Next loader (libksudnext.so) not bundled — falling back to classic KernelSU 3.3.0 loader; `su -v` will report 3.3.0" and stages the classic loader. **Never a silent downgrade.** A missing bundled classic loader throws `IOException` (fail-closed); the manager-APK fallback is a dead path, removed.
+- **Prefs contract:** `su_manager`, `soft_reboot` and `disable_modules` are written from Java with `commit()` (synchronous disk write), not `apply()`. Native `bootstrap.c` reads `/data/user_de/0/df.root/shared_prefs/dfroot.xml` **directly** in the same run; `apply()` only mutates in-memory state and flushes asynchronously, so the native read could observe the previous value (e.g. soft reboot still 0 in XML while the UI shows it on). A successful `commit()` addresses that race; it is not a guarantee that the value reached disk, because the boolean result of `commit()` is currently ignored (MainActivity/SettingsFragment). Treating persistence as guaranteed would require failure handling in #2. This is correctness hardening, not a change to the validated chain.
+- Named result codes 0–5 with a full UI mapping (`RESULT_OK=0`, `KSUD_ERROR=1`, `PRECHECK_FAILED=2`, `PATCH_FAILED=3`, `SOFT_REBOOT_PENDING=4`, `NATIVE_SETUP_FAILED=5`); native rc=2 is translated to the distinct setup-failure code. IpSec/UDP/SPI resources are closed with a nested try/finally ladder; BootReceiver gets a null `PowerManager` check and a timed 10-min WakeLock; MainActivity has an `onDestroy()` guard and a timed WakeLock. None of this was exercised on hardware after run8.
 
 ### Patch 2 — `app/src/main/jni/bootstrap.c`: create `/data/adb`, stage `/data/local/tmp/.ksud-stage`, then exec it
 
@@ -626,13 +659,7 @@ if (run_ctx(NULL, (char *[]){ KSUD_STAGE, "late-load", "--package-name", su_mana
 
 where upstream `KSUD_STAGE` = `/data/user_de/0/df.root/ksud` — the Samsung-patched loaders **first** perform `utils::stage_daemon_from("/data/local/tmp/.ksud-stage")` (rename `.ksud-stage` → `/data/adb/ksud`, or fail). With no `/data/adb` present and no `.ksud-stage` present, that step failed → run4 (`Error: Failed to stage ksud`, `Failed to rename /data/local/tmp/.ksud-stage to /data/adb/ksud: No such file or directory`). In the current code `KSUD_STAGE_SRC` is the app-staged source (`/data/user_de/0/df.root/ksud`) and `KSUD_STAGE` remains `/data/local/tmp/.ksud-stage` because the bundled loaders have that literal path baked in.
 
-The port's staging portion is unchanged (`mkdir /data/adb` + `stage_file()`),
-but the old port snippet containing the **inverted `dfmsr` check** has been
-removed. The `touch()` helper returns 0 on success, so the old
-`dfmsr_ok = touch("/dev/dfmsr")` followed by `if (!soft_reboot || dfmsr_ok)`
-actually rejected the success case. The
-current code delegates the entire terminal decision to the pure producer and
-publishes exactly one final file:
+The port as validated on 2026-11-17 (`bootstrap.c:223-238` in that tree) included an old, unconditional soft-reboot path. Its staging portion is unchanged (`mkdir /data/adb` + `stage_file()`), but the old snippet containing the **inverted `dfmsr` check** has been removed. The `touch()` helper returns 0 on success, so the old `dfmsr_ok = touch("/dev/dfmsr")` followed by `if (!soft_reboot || dfmsr_ok)` actually rejected the success case. The current code delegates the entire terminal decision to the pure producer and publishes exactly one final file:
 
 ```c
 /* Excerpt from app/src/main/jni/bootstrap.c:272-307 (function-level indentation
@@ -657,6 +684,8 @@ return df_outcome_to_rc(decide_and_publish(late_load_rc, soft_reboot));
  * is gone: /dev/dffinal is no longer produced. */
 ```
 
+The dated 2026-11-24 snippet (`/dev/dfmsr`, `/dev/dfm6`, `/dev/dfmw2`/`dfmw3`, `touch()` markers) appears in the historical refinement note below; it is superseded by this current code.
+
 This matches the documented FZG1 loader contract of the **historical (run4/run6/run8) binaries** (`kernelsu/README.md:154-156` in the payloads repo; `next-failure-analysis.md` §3.2/§6; those binaries contained the strings `/data/local/tmp/.ksud-stage`, `Failed to stage ksud`, `/data/adb/ksud`). The rebuilt loaders now bundled here contain `/data/adb/.ksud-stage` instead. `.ksud-stage` and `/data/adb/ksud` are on the same `/data` filesystem so the loader's `rename(2)` never crosses devices (`EXDEV` avoided). A secure-staging failure or a nonzero `late-load` exit now both publish the single `error` token in the `dfroot.final` property (rc=1; **`/dev/dffinal` is no longer produced**); distinguishing the sub-step requires logcat with **both** KSU tags.
 
 > [!NOTE]
@@ -665,12 +694,70 @@ This matches the documented FZG1 loader contract of the **historical (run4/run6/
 > [!WARNING]
 > **Residual staging risk (P1-08, release gate).** Historically (run4/run6/run8 loaders), `/data/local/tmp` is `0771 shell:shell` on stock Android, not a root-owned directory; `stage_file()` prevented symlink attacks and races at creation (`O_EXCL|O_NOFOLLOW`, 0700), but a `shell`-uid process could still replace the file after `close()` and before the loader's `rename()`. **That risk could not be closed by DFRoot-side changes alone**: it required rebuilding the loaders. Those rebuilds are now integrated — the bundled loaders consume a root-owned `/data/adb/.ksud-stage` validated by fd before promotion — but **P1-08 stays OPEN pending re-review and fresh on-device full-chain validation**. Do not treat this PR as a complete fix for that threat model.
 
+**2026-11-24 soft-reboot flow refinement (`fix/native-exploit-robustness`, `d3f3356`; static change, no new hardware run).** The staging contract above is unchanged; the post-success branch is now:
+
+```c
+if (run_ctx(NULL, (char *[]){ "/data/local/tmp/.ksud-stage", "late-load",
+                              "--package-name", su_manager, NULL }) == 0) {
+    if (soft_reboot) touch("/dev/dfmsr");   /* rc=4 — BEFORE dfm6 */
+    touch("/dev/dfm6");                     /* rc=0 — ksud late-load SUCCESS */
+    if (soft_reboot) {
+        int waited = 0;
+        while (waited < 60 && late_load_running()) { sleep(1); waited++; }
+        if (late_load_running()) {
+            touch("/dev/dfmw2");            /* timed out: skip soft-reboot (native rc=4 already emitted; marker is not root-readiness evidence) */
+        } else if (run_ctx("u:r:ksu:s0",
+                   (char *[]){ KSUD, "soft-reboot", NULL }) != 0) {
+            touch("/dev/dfmw3");            /* command failed, root still active */
+        }
+    }
+} else {
+    touch("/dev/dfme2");                    /* genuine failure — no dfmsr */
+}
+```
+
+Why the ordering matters: `/dev/dfmsr` (rc=4) must precede `/dev/dfm6` (rc=0)
+so the soft-reboot path cannot print the old SUCCESS string before a reboot.
+With soft reboot off, dfmsr is absent and the original rc=0 path is unchanged.
+The late-load wait is bounded at **60 s**, the `ksud soft-reboot` return code
+is checked, and both warnings are informational — native rc=4 was emitted
+because the loader returned zero; the marker is not independent root-readiness
+evidence (unverified pending state). `waitpid()` uses `TEMP_FAILURE_RETRY` and
+marker files are created 0600.
+
+**Result-contract compatibility is unresolved (#16).** The current #2 candidate
+(`ffe8056`, `NativeResultMapper.java`) still renders rc=4 as "root active",
+whereas #3 (`492e46d`, `StatusRc.java`) says "root not verified" / "soft-reboot
+command issued; not confirmed", adds codes 5–9 and an additive recovery-failed
+bit; #2 also has its own configuration protocol. These contracts are **not
+interchangeable**, neither is the final integrated contract, and separate green
+branch CI runs do not establish that they can be combined. No message alone
+proves root or a reboot outcome. Require independent review/validation of the
+actual combined result; the historical run ledger is unchanged.
+
+**Polling protocol — old snapshot vs current candidate.** The historical
+account above describes a poll that stopped at the first terminal marker.
+The dated `8dd66ea` snapshot added `status_poll.c` with an injectable state
+machine: 10 ms marker scans within a 70 s budget; it let
+rc=4 (root-active pending) win over stale errors, and continues after rc=4
+to observe `dfmw2`/`dfmw3` reboot-outcome markers, emitting a warning if the
+outcome is not reported. At #3's **current verified head** (`492e46d`),
+`status_poll.{c,h}` is deleted and replaced by `status_protocol.{c,h}`: a
+nonce-bound v2 final token is atomically published, `REBOOT_PENDING` opens a
+non-terminal grace window, and the budget is **70 s with an 85 s overall
+deadline**. Neither snapshot is the final integrated contract. These are
+configured windows, not independently measured wall-clock guarantees. This 70 s budget is a configured polling window,
+**not** a measured hard wall-clock bound on the entire reboot command, and it
+does not prove root or a successful reboot outcome. The app/native UI contract
+for these messages is still pending integration; the historical run ledger
+(run6/run8) is unchanged. These were pre-merge candidate snapshots: #2 and #3 are now merged, and the authoritative integrated contract is the `dfroot.final` token/rc map in §4 and §14 item 13. The risk note in §9.6/§10 still applies verbatim.
+
 ### Other local port deltas vs upstream (for completeness — these are *not* one of the two named patches)
 
 `git diff` in `DFRoot-fzg1/` additionally shows:
 
 - `app/build.gradle.kts` — `compileSdk`/`targetSdk` 37→36 (host SDK tops at 36);
-- `gradle/libs.versions.toml` — AGP 9.4.0→9.5.0. This is now the **single source of truth**: the root `build.gradle.kts` no longer pins `version "9.4.0" apply false` (it applies `alias(libs.plugins.android.application) apply false`) and `app/build.gradle.kts` applies the same alias, so the **effective AGP is 9.5.0**. The old root pin made the catalog bump inert; that pin is gone;
+- `gradle/libs.versions.toml` — AGP 9.4.0→9.5.0. This is now the **single source of truth**: the root `build.gradle.kts` no longer pins `version "9.4.0" apply false` (it applies `alias(libs.plugins.android.application) apply false`) and `app/build.gradle.kts` applies the same alias, so the **effective AGP is 9.5.0**. The old root pin made the catalog bump inert; that pin is gone; unused appcompat/material/constraintlayout/preference declarations were removed.
 - `app/src/main/AndroidManifest.xml` — label "DFRoot" → **"DFRoot GZIF"**;
 - `app/src/main/jni/CMakeLists.txt` — keeps only `ko/dfroot-android13-5.15.ko` (drops the other 7 KMI entries);
 - `app/src/main/jni/exp.c` — embedded KO assets trimmed to `dfroot_ko_13_5_15`; `detect_ko_target()` now hard-codes `/vendor/lib64/AIAwbModel_v2.2.tflite`; `KO_TARGET` selection comment updated for libbase fallback (hook selection via `patch_hook` → `/system/lib64/libc++.so`, falling back to `libbase.so`);
@@ -680,6 +767,49 @@ This matches the documented FZG1 loader contract of the **historical (run4/run6/
 
 None of these change the exploit mathematics. All are required to make the chain run on this exact firmware (missing vendor files, missing KMI images, compileSdk).
 
+### 2026-11-24 maintenance batch — post-validation hardening (static/build-time only)
+
+Everything in this subsection landed **after** run6/run8. It is defensive/correctness work and build hygiene; **no new hardware run has validated it**, and it does not remove any of the risks in §10. **Line-number caveat:** every file:line reference in this document — including bare `:NN` ranges — that is not explicitly marked as the 2026-11-24 tree refers to the 2026-11-17 validation tree; this batch shifted those lines (e.g. §9.1 `MainActivity.java:134` / `ExploitRunner.java:46`, §9.2 `bootstrap.c:235-237`, §14 item 13 `exp.c:540-552`). See CHANGELOG.md §"4.8-gzif maintenance (2026-11-24)" and NOTICE for the file-level list.
+
+**LKM CFI type-ID correctness** (`fix/lkm-kernel-compatibility`, head `a9acd3a`):
+- `lkm/dfroot.c` — UMH function-pointer typedefs `umh_setup_t` / `umh_exec_t` were corrected against `<linux/umh.h>`; `info` typed `struct subprocess_info *`; explicit `<linux/umh.h>` include and `__nocfi` handling. A dated `MAINTENANCE NOTE (2026-11-24)` states that whether the typedef change alters compiled `.ko` bytes is **not established** (affected calls are `__nocfi`; target vendor headers unchecked). Known-limitation comments retain the selinux_state field-order assumption, kprobes dependency and `pr_warn`-only `insn_patch_text` failure. The earlier `%px` pointer-logging sites were removed at this head. No runtime/branch logic changed; do not assume the bytes changed or did not — compare/re-verify the final artifact before merge and re-pin only if bytes actually changed (release gate). No hardware validation; PR is DRAFT with artifact/hardware gates before merge.
+
+**Native robustness** (`fix/native-exploit-robustness`, `d3f3356`):
+- `exp.c` — bound-check the hook position in `patch_hook`; removed `SPLICE_F_GIFT` from the stack-buffer `vmsplice` (it would promise the pages are never modified again); fail-loud `bind()`, `detect_ko_target()` and `patch_helper`; strict hex/port/SPI validation and up-front port range checks; secret material wiped after use; `read_device_versions()` now fails closed, adds a `getprop` fallback (`ro.vendor.build.version.release` → `ro.build.version.release`) and fixes a dangling `release[]` pointer (it had been block-scoped but used after the block); soft-reboot rc=4 marker flow (§4, §9.6).
+- `elf_parser.c` — `fstat()`-based file-size checks, range checks and short-read handling for the program/section-header tables and `.dynstr`/`.dynsym`; name buffers terminated at the number of bytes actually read.
+- `include.inc` — corrected `push`/`pop` assembly macros (pre-indexed writeback `str \Rn, [sp, #-16]!`; `pop` now uses its actual `R` parameter with `#16` post-index).
+- `bootstrap.c` — `TEMP_FAILURE_RETRY(waitpid(...))`; marker files created 0600; `/dev/dfmsr` before `/dev/dfm6`, 60 s bounded late-load wait, `/dev/dfmw2`/`/dev/dfmw3` warnings, soft-reboot return checked (§6 patch 2).
+- `CMakeLists.txt` + new `verify_ko_sha256.cmake` — build-time SHA-256 gate for the embedded KO (below).
+
+**Embedded KO SHA-256 gate — double pin, fail-closed.** `verify_ko_sha256.cmake` runs before `exp.c` is compiled and accepts exactly two candidate pins. Their **reported historical** fingerprints (repository records; the same-source relationship is reported, not independently established provenance — see "Provenance scope" below and the single reference in §7) are:
+- `94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7` — reported local `lkm/Makefile` output, **13,504 B, with `.note.gnu.build-id`**;
+- `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68` — reported CI artifact, **13,384 B, post-processed with `llvm-objcopy --strip-unneeded` and several `-R …` section removals (including `.note.gnu.build-id`; see `build.yml`)**, reported as byte-for-byte the KO inside the v4.8-gzif release APK.
+
+An unknown or missing blob fails the build (fail-closed). At this **historical
+input-only snapshot**, `DFROOT_SKIP_KO_HASH_CHECK=ON` bypassed the build-input
+gate for local experiments. At #3's current candidate (`ba86ab0`/`492e46d`
+lineage), the source-only skip option is deprecated/unsupported: a **mandatory
+final linked-byte verification** of the packaged artifact cannot be skipped,
+and a separate final distributable-artifact verification boundary is
+documented. #3's passing PR CI covers host-level checks but **skips** the real
+publishing/packaged-APK gates. Re-verify every source/build-input change and
+re-pin only bytes actually shown to change; do not advertise an unsupported
+bypass or treat PR CI as distributable-artifact validation. This corrects the
+older §4/§7 claim that the local and CI blobs were byte-identical twins.
+
+**Provenance scope.** A pinned hash proves equality to an approved blob, not that the blob was compiled from the current checkout. The exact source revision and build inputs of the historical variants (`9dfb8b71…` / `94f8be98…`) are **not established** here — they derive from the 2026-11-17 port based on upstream `7a6513a`, but no APK-level or build-input record pins that identity; mark it unknown rather than asserting it. Whether a post-CFI rebuild differs in bytes is **unverified** at #5's head, so do not call it a "different blob". A mutable local tag is not the CI digest pin; at #1's 2026-11-25 snapshot (`ed4b30d`, now historical) the local `Makefile` derives the exact digest-pinned image via `scripts/ddk-image.sh:49–54` and supports the single shipped KMI, unlike the older eight-KMI/mutable-tag description. Any source or build-input change requires re-verification; re-pin only bytes actually shown to change.
+
+**Build / CI reliability** (`fix/ci-build-reliability`, `38eebc3`; master's Gradle 429 retry loop `ae627f1` retained):
+- AGP catalog 9.5.0 is the single source of truth via the version-catalog alias (above); `app/build.gradle.kts` pins NDK `28.2.13676358` (r28c) and CMake `3.22.1`; Gradle wrapper **9.7.1** at the **older `38eebc3` snapshot** with `distributionSha256Sum` and download `retries` 0→3. PR #1 has since merged to master with Gradle **9.9.2** (see CHANGELOG "Unreleased — PR #1 hardening"); that newer value is the shipped state, not a claim about the historical snapshot.
+- **Historical `38eebc3` snapshot only:** CI LKM matrix reduced 8→1; DDK container had no `options:` and a digest-pinned image; `--pid=host --network=none` belonged to a local `Makefile` invocation of a *mutable tag*, not CI; least-privilege permissions, per-ref concurrency and job timeouts added; the top-level `Makefile` still listed eight KMIs. **Merged master (`9f60e16`) supersedes this:** the local `Makefile` now performs one digest-derived `android13-5.15` DDK build via `scripts/ddk-image.sh`, with no eight-KMI loop or mutable tag — see §8.1 and CHANGELOG "Unreleased — PR #1 hardening".
+- `signing.properties` optional at configure time: a **missing file** yields an unsigned release variant (for inspection or later signing); a **present-but-incomplete** file fails configuration with a readable error. `Makefile` exports signing env and writes `signing.properties` with `umask 077`/0600; removed inert `android.useAndroidX=true`; AndroidX rows removed from THIRD_PARTY_NOTICES.
+
+**App correctness / safety** (`fix/app-correctness-safety`, `b071923`) — detailed under patch 1 above: whitelist + `hasBundledLoader()`, explicit KSUN→classic warning, `commit()` prefs contract, named result codes with rc=4, timed WakeLocks, lifecycle guard, narrowed Manifest `<queries>`.
+
+**Upstream PRs — verified via `gh pr view` on 2026-11-24; both are OPEN upstream and are *not* in this fork's 7a6513a baseline.** They are noted for cross-reference only; no code was imported and no equivalence is claimed:
+- [PR #182](https://github.com/diabl0w/DFRoot/pull/182) "Fix SELinux enforcement detection and improve exploit reliability" (hexlo404) overlaps several of the native fixes above (`bind()` validation, `waitpid()` check, `getprop` fallback, ELF short-read termination, `push`/`pop` macros, IpSec resource cleanup, LKM Makefile `OBJCOPY` guard). Its main change — deciding SELinux enforcement from `/sys/fs/selinux/enforce` via selinuxfs instead of a `struct selinux_state` layout assumption — is tracked in the LKM compatibility work (`9bc4ba9`); the selinuxfs approach itself remains **unimported**. PR #182 is still OPEN upstream; no code was imported from it and no equivalence is claimed (as stated above).
+- [PR #186](https://github.com/diabl0w/DFRoot/pull/186) "fix: use ro.build.version.release for Android version detection" (HarshalR8) prefers the OS-version property over the frozen kernel KMI tag; related to, but not the same as, this fork's fallback, which is only used when `uname -r` has no `android` tag at all.
+
 ---
 
 ## 7. In-repo artifacts that matter
@@ -688,7 +818,7 @@ In `DFRoot-fzg1/` (all paths relative to its root):
 
 | Path | Size / fingerprint | Role |
 |---|---|---|
-| `app/src/main/jni/ko/dfroot-android13-5.15.ko` | **CI/release artifact: 13,384 B · sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`**; **local `make` build: 13,504 B · sha256 `94f8be98…`** (retains `.note.gnu.build-id`) | The android13-5.15 LKM. **Not committed** (gitignored; rebuilt by the single-KMI `make` or CI). Built against the digest-pinned DDK GKI image `ghcr.io/ylarod/ddk-min:android13-5.15-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd` (top-level `make` resolves this exact reference through `scripts/ddk-image.sh`). CI runs `llvm-objcopy --strip-unneeded -R .note.gnu.build-id …`, so its KO (13,384 B) differs from the local build's (13,504 B, `94f8be98…`); both compile the same source and load on GZIF. Modversions satisfied via KMI CRC; intentionally `module_init → return -ENODEV` (unload-immediately; avoids MTK mrdump callbacks). `lkm/dfroot.ko` was removed from the tree during public release hygiene (it was a duplicate of this file). |
+| `app/src/main/jni/ko/dfroot-android13-5.15.ko` | **CI/release artifact: 13,384 B · sha256 `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`**; **local `make` build: 13,504 B · sha256 `94f8be98…`** (retains `.note.gnu.build-id`) | The android13-5.15 LKM. **Not committed** (gitignored; rebuilt by the single-KMI `make` or CI). Built against the digest-pinned DDK GKI image `ghcr.io/ylarod/ddk-min:android13-5.15-20260828@sha256:9e68cd9fcab748584755d31ba88ef134efc938dbde17f258c2652315f6cd81cd` (top-level `make` resolves this exact reference through `scripts/ddk-image.sh`). CI runs `llvm-objcopy --strip-unneeded -R .note.gnu.build-id …`, so its KO (13,384 B) differs from the local build's (13,504 B, `94f8be98…`); both compile the same source and load on GZIF. **Historical provenance caveat:** these fingerprints are reported repository records, not a re-verified build of the current checkout; re-pin only if rebuilt bytes actually change (P1-08 remains OPEN) — see §6 "Provenance scope". Modversions satisfied via KMI CRC; intentionally `module_init → return -ENODEV` (unload-immediately; avoids MTK mrdump callbacks). `lkm/dfroot.ko` was removed from the tree during public release hygiene (it was a duplicate of this file). |
 | `app/src/main/jniLibs/arm64-v8a/libksud.so` | 5,127,584 B · sha256 **`731c3fa1f83fe698ec0b749413065b25c12d4d433b2aed6c3ba7152fdfbefee4`** (`731c3fa1…`) | **Samsung-patched classic KernelSU 3.3.0** loader (v3.3.0, uapi 2, code 32601), `ksud-dm3q-S9180ZHS8FZG1-kdp` **rebuilt from the P1-08-patched source** on `fix/p1-08-root-owned-staging` (`891e897`), not copied verbatim from the payloads artifacts (CI source-build run 45674540939). It consumes `/data/adb/.ksud-stage` (no old `/data/local/tmp/.ksud-stage` string). Loads 5.15.197-GZIF (vermagic rewrite via ksuinit). Embedded asset: **`android13-5.15_kernelsu.ko`** (2-part/family name — correct for this firmware). Log tag `KernelSU`. **run6 device evidence is historical and applies to the previous loader, not these bytes.** |
 | `app/src/main/jniLibs/arm64-v8a/libksudnext.so` | 4,728,320 B · sha256 **`7f28f1fb5d3238f606330945b2694df140fea97527507c865f411db704ec2414`** (`7f28f1fb…`) | **Samsung-patched KernelSU-Next 3.4.2** loader (uapi 5, code 33355), `ksud-next-generic-kdp` **rebuilt from the same patched source** (CI source-build run 45674545588), not the old verbatim `support/kernelsu-generic.json` artifact. It consumes `/data/adb/.ksud-stage`. Embedded assets: **`android12-5.10_kernelsu.ko`, `android13-5.15_kernelsu.ko`, `android14-6.1_kernelsu.ko`, `android15-6.6_kernelsu.ko`** (all 2-part/family names). Log tag `KernelSU Next`. **run8 device evidence is historical and applies to the previous loader, not these bytes.** Do **not** substitute `ksud-next-dm3q-S9180ZHS8FZF5-kdp` (`f23ede9b…`, 3.4.1) — it embeds only `android13-5.15.189_kernelsu.ko` and provably fails pre-load on this build (17:00 evidence). |
 | `app/src/main/jni/libcxx.S` | source | tid=1 shellcode + `ko_target` patch point + `/dev/df` mutex + `vendor_modprobe` exec. |
@@ -721,14 +851,43 @@ The APK is currently **dual-mode**: both loaders are inside one APK; the spinner
   - **NDK `28.2.13676358`** (i.e. **r28c**) — cited by the build metadata; AGP's default SDK at `~/Android/Sdk` (also present on this host, with `platforms/android-37.0`, NDKs r28c and r29, cmake 3.22.1) would equally resolve. `ANDROID_HOME` was unset in the shell; if reproducing elsewhere, pin `sdk.dir` in `local.properties` or export `ANDROID_HOME` to wherever android-36 lives.
   - CMake **3.22.1** + ninja at `…/cmake/3.22.1`,
   - JDK: toolchain **21** pinned in `gradle/gradle-daemon-jvm.properties` (auto-provisioned via foojay; host JDK 25 also present but the Gradle daemon JVM is 21); CI also uses temurin 21 (`.github/workflows/build.yml`),
- HEAD
   - Gradle wrapper **9.9.2** (`gradle/wrapper/gradle-wrapper.properties`, distribution SHA-256 pinned), AGP **9.5.0** declared in `gradle/libs.versions.toml` and consumed via the version-catalog alias — no root pin, so the catalog value is effective (§6 note).
-- `signing.properties` at repo root with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (**do not commit; it is gitignored**) is **optional at configuration time**. When it is absent or incomplete, a harmless placeholder is installed and the release variant and every release task are disabled/fail closed, while debug builds and JVM tests still configure; no unsigned or dummy-signed Release APK is emitted. **Debug** is always signed with the standard Android debug keystore via `signingConfigs.getByName("debug")`. For local `make`, `SIGN_PASS` / `SIGN_ALIAS` must be **exported in the environment**; command-line assignments (`make SIGN_PASS=…`) are rejected. In CI the four `KEYSTORE*` secrets exist only in the protected `release` environment and are referenced only on `v*` tag pushes; PR/branch/manual builds use no secrets, build the Debug APK only as a compile/content gate, and upload **no APK** — only the `DFRoot-CI-evidence` licence/notice bundle (no signed release, no GitHub Release). The unconditional `host-gates` job gates every event including tags; see §19. The `KEYSTORE` secret/environment value must be a **base64-encoded JKS** (e.g. `base64 -w0 keystore.jks`); the CI writer decodes and validates it before publishing signing material. Signed releases use a **new key identity** — uninstall an existing installation before installing one.
+- `signing.properties` at repo root with `KEYSTORE_FILE` / `KEYSTORE_PASSWORD` / `KEY_ALIAS` / `KEY_PASSWORD` (**do not commit; it is gitignored**) is **optional at configuration time**. When it is absent or incomplete, a harmless placeholder is installed and the release variant and every release task are disabled/fail closed, while debug builds and JVM tests still configure; no unsigned or dummy-signed Release APK is emitted. **Historical (2026-11-17 / `38eebc3` snapshots):** an absent `signing.properties` then produced an **unsigned** Release APK (Gradle warning, no configuration failure); that behavior is superseded by the fail-closed placeholder in merged master. **Debug** is always signed with the standard Android debug keystore via `signingConfigs.getByName("debug")`. For local `make`, `SIGN_PASS` / `SIGN_ALIAS` must be **exported in the environment**; command-line assignments (`make SIGN_PASS=…`) are rejected. In CI the four `KEYSTORE*` secrets exist only in the protected `release` environment and are referenced only on `v*` tag pushes; PR/branch/manual builds use no secrets, build the Debug APK only as a compile/content gate, and upload **no APK** — only the `DFRoot-CI-evidence` licence/notice bundle (no signed release, no GitHub Release). The unconditional `host-gates` job gates every event including tags; see §19. The `KEYSTORE` secret/environment value must be a **base64-encoded JKS** (e.g. `base64 -w0 keystore.jks`); the CI writer decodes and validates it before publishing signing material. Signed releases use a **new key identity** — uninstall an existing installation before installing one.
 - NDK sysroot builds: `splicehelper` is compiled freestanding at CMake time (`-nodefaultlibs -nostartfiles -ffreestanding -static`).
 - LKM rebuild (**required** — the `.ko` is not committed): `cd lkm && make KDIR=<kdir> LLVM=1` (or CI workflow `.github/workflows/build.yml`, which uses digest-pinned `ghcr.io/ylarod/ddk-min:<kmi>-20260828@sha256:…` containers). Top-level `Makefile` runs exactly **one** podman DDK build for `android13-5.15` (no eight-KMI loop); the image reference is derived from CI by `scripts/ddk-image.sh` and is digest-pinned, and the container runs with `--network=none`, `--cap-drop=ALL` and `no-new-privileges`, then `:app:assembleRelease`.
 - `lkm/dfroot.ko` is intentionally GPL with `module_init` returning `-ENODEV`; §4 step (5).
 
-### 8.2 Build
+Gradle/AGP versions for the **2026-11-17** on-host build are not recorded in this section; the values below are merged-master configuration records, not claims about that historical build.
+
+**Merged master (`9f60e16`) configuration — not the 2026-11-17 host build.** Gradle wrapper **9.9.2** (`gradle/wrapper/gradle-wrapper.properties`, distribution SHA-256 pinned) and AGP **9.5.0** declared in `gradle/libs.versions.toml` and consumed via the version-catalog alias (no root pin, so the catalog value is effective — §6 note) are the **shipped merged-master** values introduced by PR #1 (GHSA-3cfg-jpcr-gfp3). The earlier `38eebc3` snapshot used Gradle **9.7.1** (adding `distributionSha256Sum` and `retries` 3). These are configuration records for the current checkout, not a claim about the historical on-host build or its generated `android_gradle_build.json`.
+
+### 8.2 Build prerequisites (must be in place before the recipe)
+
+> [!IMPORTANT]
+> These prerequisites apply to the **merged master / #4 checkout**, which now
+> includes merged PR #2 and PR #3. The fail-closed KO SHA-256 gate and the
+> final packaged-byte verification **are enforced here** (`verify_ko_sha256.cmake`
+> and the tagged-path APK/loader gates); a green host CI run still does not
+> certify device results (§19). Pre-#3 snapshots without these gates are
+> historical records in §6/§8.1.
+
+- **LKM artifact** (gitignored, not in the clone): `app/src/main/jni/ko/dfroot-android13-5.15.ko`, either built
+  (`cd lkm && make …`) or downloaded from CI. In merged master the build
+  enforces the fail-closed SHA-256 gate on the embedded/final `.dfroot_ko`
+  bytes (reported historical pins `94f8be98…` / `9dfb8b71…`) with no skip
+  option, and tag CI repeats packaged-byte verification before upload (§4, §8.3).
+  The pins are **reported repository records**, not a re-verified build of
+  today's checkout; whether the 2026-11-24 CFI typedef change altered bytes is
+  unverified, so re-pin only if rebuilt bytes actually change. Release remains
+  withheld by policy (reviewed re-pin, OPEN P1-08, device validation).
+- **Toolchain**: JDK 21, Android SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
+- **Signing (required for any installable output)**: a complete `signing.properties`; an unsigned
+  build is not installable. Omit it only for local inspection builds.
+- **Historical vs. current**: the 2026-11-17 environment notes above describe the host that
+  produced the validated `v4.8-gzif` artifact; the 2026-11-24 batch adds the wrapper checksum/
+  retry and the AGP catalog alias but does not change these prerequisites.
+
+### 8.3 Build
 
 ```sh
 git clone https://github.com/samson910022/DFRoot-GZIF.git && cd DFRoot-GZIF
@@ -746,7 +905,7 @@ release is withheld by policy — a reviewed re-pin, OPEN P1-08 and device
 validation — not by the hash gate alone, and passing the gate is not device
 validation.
 
-### 8.3 Install & run (device)
+### 8.4 Install & run (device)
 
 1. Enable **Developer options → USB debugging** (needed for adb verification; not required for the exploit itself). Connect the unit; authorize the host's RSA key.
 2. `adb install -r app/build/outputs/apk/release/DFRoot_4.8-gzif.apk`
@@ -768,9 +927,16 @@ validation.
    terminal marker (see the "Result contract" section of `README.md`).
 6. **After every reboot: re-run LAUNCH ROOT.** There is no persistence. Do **not** enable "Start on Boot" or "Auto Soft Reboot" until you have tested them (see §9.6 / §10).
 
-### 8.4 What the app does each run (compressed)
+**Historical (2026-11-17 / pre-#2 checkout, as documented by PR #4).** The spinner then listed every installed non-system package whose own `nativeLibraryDir` contained `libksud.so` (`hasKsud()`, `MainActivity.java:71–77`; `QUERY_ALL_PACKAGES`), with no two-package whitelist and no bundled-loader warning; on LAUNCH ROOT it staged the bundled loader when present and otherwise fell back to the manager APK's own `nativeLibraryDir/libksud.so` (`ExploitRunner.java:124–135`). That behavior is **superseded in merged master** by the whitelist, `hasBundledLoader()`, removal of the manager fallback and the named result codes (§6). Verify root with the `su` oracle regardless of any UI message.
+
+> [!NOTE]
+> **2026-11-24 batch — merged into master.** PR #2 (`fix/app-correctness-safety`, `b071923`) and PR #3 are now merged: the two-package whitelist (`me.weishu.kernelsu`, `com.rifsxd.ksunext`) with a narrow `<queries>` filter, `hasBundledLoader()` on this APK's `libksud.so`/`libksudnext.so`, removal of the manager-APK fallback, the `WARNING: no bundled Samsung-patched ksud loader found in this APK` and explicit KSUN→classic warnings, named result codes including rc=4, and the `dfroot.final` status protocol **are present in master** (§4, §6). The 2026-11-24 `/dev/dfmsr`/`dfmw2`/`dfmw3` marker flow is historical and superseded by that protocol. Older docs describing these as pending/unmerged are historical. Verify root with the `su` oracle regardless of any UI message.
+
+### 8.5 What the app does each run (compressed)
 
 Fresh boot → press LAUNCH ROOT → (a) app stages bundled `libksudnext.so`/`libksud.so` + `libbootstrap.so` to its protected storage, (b) execs `libdfroot.so` with the IpSec SPI/key args, (c) `crash_dump64` + vendor tflite + `libc++.so` get patched in page cache, (d) `createOrphanProcess()` arms the init-tid-1 hook, (e) kernel UMH spawns `bootstrap`, (f) `bootstrap` stages `.ksud-stage`, (g) Samsung-patched ksud renames it to `/data/adb/ksud` and `init_module()`s its embedded `android13-5.15_kernelsu.ko`, (h) `bootstrap` publishes one token in the non-persistent property `dfroot.final` (`/dev/dffinal` is no longer produced) and the app reports the corresponding rc — never "root verified" and never a guaranteed reboot.
+
+**Historical (2026-11-17 / pre-#2 tree).** Step (f) staged via `system("cp …")` from `/data/local/tmp/.ksud-stage` and step (h) printed `ksud start: SUCCESS` from `/dev/dfm6`; the rc=4 `/dev/dfmsr` branch and the #2/#3 status protocol are now merged into master (§4/§6).
 
 ---
 
@@ -794,7 +960,7 @@ surfaces the authoritative preflight reason ("Run unavailable: …") without
 starting, staging, or substituting anything.
 
 ### 9.2 Toast "DFRoot: Error - bootstrap failed" / final token `error` (rc=1)
-Semantics (current code): the `dfroot.final` property contains `error` (rc=1) after a nonzero `late-load`/secure-staging failure (**`/dev/dffinal` is no longer produced**); the app log line is `final: ERROR - bootstrap failed before root`. Under the **old marker protocol** this was `/dev/dfme2` present and `/dev/dfm6` absent; the historical run evidence below uses that old scheme and is **not** a validation of the current flow. Causes seen in the field, in probability order:
+Semantics (current code): the `dfroot.final` property contains `error` (rc=1) after a nonzero `late-load`/secure-staging failure (**`/dev/dffinal` is no longer produced**); the app log line is `final: ERROR - bootstrap failed before root`. Under the **old marker protocol** this was `/dev/dfme2` present and `/dev/dfm6` absent; the historical run evidence below uses that old scheme and is **not** a validation of the current flow. In that historical tree (`bootstrap.c:236-238`) the toast was `DFRoot: Error - ksud nonzero exit` / log `ksud start: ERROR - ksud nonzero exit` with `/dev/dfme2` present and `/dev/dfm6` absent. Causes seen in the field, in probability order:
 
 1. **Bundled Next loader with wrong embedded KMI asset name** (the 17:00 class; `libksudnext.so` embeds `android13-5.15.189_kernelsu.ko` only). Detect: `strings app/src/main/jniLibs/arm64-v8a/libksudnext.so | grep _kernelsu.ko` from host. **Fix:** keep `libksudnext.so` = `ksud-next-generic-kdp` (embeds `android13-5.15_kernelsu.ko`).
 2. **`/data/adb` missing / `.ksud-stage` not created / rename failed** (run4 class). Detect on device: `ls -l /data/local/tmp/.ksud-stage /data/adb/ksud` — `.ksud-stage` gone + `/data/adb/ksud` present = staging step succeeded and the failure was later; both absent = secure staging failed (e.g. `/data` full?); both present = ksud never consumed the stage (should not happen on this code path — re-check with full-tag logcat).
@@ -815,10 +981,15 @@ The KernelSU / KernelSU-Next manager UI reads the KSU driver fd; no module resid
 Two deterministic **app-side** defects, independent of root:
 - **SIGABRT** — `Check failed: system_class_loader != nullptr … java.lang.SecurityException: Writable dex file '/data/user_de/0/me.weishu.kernelsu/cache/main.jar' is not allowed.'` (Android 14+ ReadOnlyJavaDcl W^X for dex; uid 10052, `app_process64`, `/system/bin/app_process64`; dropbox `SYSTEM_TOMBSTONE` entries ~15:33:09, and identical on FZG1 — `manager-compat-analysis.md` §3).
 - **SIGSYS (`SYS_SECCOMP`, arm64 syscall 142 = `reboot(2)`)** — the manager's `libksud.so feature check` probes die: `x0=0xdeadbeef x1=0xcafebabe`. Unlike the init-context daemon (which runs with `Seccomp: 0`), the probes run under the app's zygote seccomp-bpf filter and are killed before any KSU hook can answer on fresh boots (`manager-compat-analysis.md` §4).
-The classic manager therefore cannot manage root on this firmware **even on a fully working day**. Use KernelSU-Next as the UI, or ignore the manager UI entirely and use `adb shell su -c id` as the oracle. (The *classic* loader binaries bundled in the APK are unaffected — they were never executed as an app.)
+The classic manager therefore cannot manage root on this firmware **even on a fully working day**. Use KernelSU-Next as the UI, or ignore the manager UI entirely and use `adb shell su -c id` as the oracle. (The *classic* loader binaries bundled in the APK are unaffected — they were never executed as an app.) The 2026-11-24 app batch makes this visible in-product: the spinner entry is labelled **"(classic; Next recommended)"** and MainActivity shows a bundled-loader warning if the APK is missing its loader. These are UI additions; they do not repair the SIGABRT/SIGSYS defects above.
 
 ### 9.6 Auto Soft Reboot / Start on Boot
-- **Auto Soft Reboot** (DFRoot setting) triggered a **full hard reboot once** on this model (bootstrap's soft-reboot path → `ksud soft-reboot`), documented in the campaign record §6.6 ("which on this build is a full kernel reboot — /proc/uptime resets, Enforcing remains"). Upstream DFRoot FAQ points the same way (diabl0w Discussion #69: "try disabling Auto Soft Reboot"). **Do not enable it on this device until you have tested it.**
+- **Auto Soft Reboot** (DFRoot setting) triggered a **full hard reboot once** on this model (bootstrap's soft-reboot path → `ksud soft-reboot`), documented in the campaign record §6.6 ("which on this build is a full kernel reboot — /proc/uptime resets, Enforcing remains"). Upstream DFRoot FAQ points the same way (diabl0w Discussion #69: "try disabling Auto Soft Reboot"). **Do not enable it on this device until you have tested it.** It remains **EXPERIMENTAL and OFF by default**; the preference summary says so and at the earlier `b071923`/`5893dfa` snapshot SettingsFragment showed a hard-reboot warning Toast on first enable in a Settings visit (an instance boolean, not a durable acknowledgement); #2's current candidate uses modal confirmed configuration instead.
+- **2026-11-24 flow (not hardware-validated):** with soft reboot enabled, bootstrap touches `/dev/dfmsr` **before** `/dev/dfm6`, so `exp.c` reports native **rc=4** and the app prints **"DFRoot: root active — device may soft-reboot shortly"** instead of the old SUCCESS implementation string followed by a reboot (the new
+string is itself an unverified pending-status message, not a verified result). `/dev/dfm6` still means ksud late-load exited 0 (rc=0) when soft reboot is off. The late-load wait is bounded to **60 s**; a timeout emits `/dev/dfmw2` (soft-reboot skipped) and a failed `ksud soft-reboot` emits `/dev/dfmw3` — both informational: native rc=4 was emitted because the loader returned zero, and
+the marker is not independent root-readiness evidence (unverified pending
+state). `soft_reboot` is written with `commit()`; a successful write removes
+the async race, but persistence is not guaranteed (see §6). **This changes reporting, not the underlying risk**: the once-observed full hard reboot is still possible and this path has never been validated on hardware. The quoted UI string ("DFRoot: root active — device may soft-reboot shortly") is the implementation text of the **earlier `8dd66ea`/`5893dfa` snapshot**, not a verified fact and not the contract of the newer #2/#3 candidates (see the result-contract mismatch above).
 - **Start on Boot** re-runs the whole chain per boot. Risks: (a) if a KSU module is broken, bootloop; mitigation = boot to Safe Mode (hold Vol-Down), or DFRoot Settings → "Disable KSU Modules", or uninstall DFRoot; (b) unverified for stability on this firmware — not validated on this unit. Leave off unless you have a specific reason and a recovery plan.
 - Both are controlled by the `BootReceiver` (blocked unless enabled; manifest has `android:enabled="false"` for the receiver) and the `soft_reboot` pref in `SettingsFragment`.
 - Round 4 (host-only, UNVALIDATED on device) adds fail-closed gating: a durable
@@ -850,6 +1021,8 @@ The classic manager therefore cannot manage root on this firmware **even on a fu
 - `KernelSU version: 0` lines are expected on fresh boots (nothing loaded when the probe runs) — not an error.
 - If modules fail to load/bootloop after a successful root: DFRoot Settings → **Disable KSU Modules** (bootstrap honors it via `/data/adb/modules/*/disable` before ksud runs), or boot into Safe Mode, or uninstall the offending module, or remove DFRoot.
 
+**Historical (2026-11-24 candidate tree):** native rc=2 was translated to rc=5 `RESULT_NATIVE_SETUP_FAILED` ("DFRoot: Error - native setup/timeout (see logcat & dmesg)"); the current protocol uses the rc map in §4.
+
 ### 9.8 Forensic triage after a fatal run (KP)
 The device never captures panic text (ABL: `Failed to get KlogOffset, Not Found` → `SamsungLogFlush KlogOffset:0x0`; `[[TRUNCATED]]`; `PonReason.HARD_RESET=1`; `Bootloader: S9180ZHU8GZIF`). Post-mortem sources:
 - `dropbox` entries `SYSTEM_LAST_KMSG_<n>_YYYYMMDD_HHMMSS_KP` — only XBL/ABL text; `PonReason.HARD_RESET=1` confirms panic vs watchdog;
@@ -860,7 +1033,7 @@ The device never captures panic text (ABL: `Failed to get KlogOffset, Not Found`
 
 ## 10. Safety & limitations
 
-- **Volatile root.** Nothing persists across reboot — not the KSU module, not the SELinux flip, not `su`, not DFRoot's `/dev/df` mutex. Reboot = clean slate (Enforcing). To re-root: open the app, LAUNCH ROOT, verify.
+- **Volatile root privilege.** Nothing about *root itself* persists across reboot — not the KSU module, not the SELinux flip, not `su`, not DFRoot's `/dev/df` mutex. Reboot = clean slate (Enforcing). To re-root: open the app, LAUNCH ROOT, verify. This does **not** mean no persistent side effects: preference/`shared_prefs` writes, module-disable state, and filesystem changes made while rooted can survive the reboot.
 - **Not persistent, not boot-image.** No bootloader unlock, no boot image/vbmeta/`dtbo` touch, no Knox counter increment **by this port** (but: any crash dump flagging, warranty, or OTA integrity consequences of running an exploit are the user's own responsibility; Knox `Warranty Void` is not set by this process, but Samsung may classify unexpected behavior per its own terms — do not take this as legal advice).
 - **Kernel panic risk is real on this build.** Stock vanilla KSU/KSUN modules panic on 34343818 (two runs, two managers). The Samsung-patched loaders in this APK survived twice — but **kernel exploits and LKM-based root are inherently unstable**: no uptime guarantee, no module-signature chain to lean on, and each cold boot re-exposes the same attack surface.
 - **One-time per boot.** `/dev/df` is armed once per boot and the app refuses
@@ -870,8 +1043,11 @@ The device never captures panic text (ABL: `Failed to get KlogOffset, Not Found`
 - **CVE-2026-43284 could be patched at any time** (it is listed High in SMR-Nov-2026) — after that, this chain is dead. Keep OEM/firmware changelog hygiene in mind before updating.
 - **This port is not upstream.** The older local port folder (`DFRoot-fzg1/`) remains an uncommitted working tree on top of `diabl0w/DFRoot @ 7a6513a`; the `fix/native-exploit-robustness` PR branch is separately committed at `e823fb4`. Pulling upstream or re-cloning the older folder loses the two patches and the bundled loaders. **Never push to `origin`** (which points at `github.com/diabl0w/DFRoot`) — fork if you need to publish.
 - **Legality/ethics:** only on your own device; the exploit patches page-cache contents of files the system executes. It does not unlock anything, and it violates no signature checks *because it does not need to* — but Samsung's warranty/Knox terms are your affair.
-- **Verification hygiene:** never trust the on-screen toast. Verify with the §8.3 oracle each time, on every boot.
+- **Verification hygiene:** never trust the on-screen toast. Verify with the §8.4 oracle each time, on every boot.
 - **Residual preference risk:** if the SU-manager `SharedPreferences` write/removal fails, a stale package name may remain on disk. Round-4 quarantine blocks manual launch (rc 8) and makes `BootReceiver` skip while the key is ambiguous, so a stale value is not acted on; the failed write still does not erase the stale bytes (fail-closed gating, not a repair). Save the same setting again or clear app data to recover; this path is host-tested only and UNVALIDATED on device.
+- **Historical (2026-11-24 `a9acd3a` LKM snapshot).** `lkm/dfroot.c` then still assumed `selinux_state`'s first field was `enforcing`, depended on `CONFIG_KPROBES`, only `pr_warn`ed an `insn_patch_text` failure, and had not been checked against target vendor headers; the earlier `%px` pointer-logging sites were removed at that head, the crash_dump64 cache-invalidation race remains, and whether the CFI typedef change alters `.ko` bytes was **unverified** (§6). These limitations are not removed by the merged gates.
+- **Historical staging risk.** The old `/data/local/tmp/.ksud-stage` path was world-traversable (`0771 shell:shell`); the rebuilt bundled loaders now consume a root-owned, fd-validated `/data/adb/.ksud-stage`, but **P1-08 stays OPEN** pending re-review and device validation (§6).
+- **Historical soft-reboot reporting.** In the 2026-11-24 snapshot the terminal `/dev/dfmsr` marker could end the poll before `dfmw2`/`dfmw3`; the merged `dfroot.final` protocol with a nonce-bound token supersedes that marker flow (§4).
 
 ---
 
@@ -898,10 +1074,11 @@ Logs live host-side under `GZIF-port/`. They are large (up to 142k lines) and co
 | `dropbox_all.txt` | all dropbox entries (18987 lines) | KP189/191-195 KP-flagged resets; classic-manager SIGABRT `:15085-15154`; SIGSYS battery `:15433-17517` |
 | `kmsg_195.txt` | run3's KP boot dump (XBL-only) | dropbox header `:1-15`; `PonReason.HARD_RESET = 1` `:403`; `Failed to get KlogOffset` `:1047-1049`; `Last boot reason: reboot` `:1069`; `Hyp version: 1` (present) `:702` |
 | `dfroot_screen.png` | screenshot of the app output at failure (not inlined) | — |
-| `DFRoot-fzg1/` | the ported tool (working tree, uncommitted) | `app/`, `lkm/`, `gradle/` |
+| `DFRoot-fzg1/` | the ported tool at the 2026-11-17 validation snapshot (then an uncommitted local tree) | `app/`, `lkm/`, `gradle/` |
 | Payloads repo `docs/SM-S9180-S9180ZHU8GZIF.md` | **campaign record** — start here | §1 identity; §3 CVE matrix; §6.5 dry-run; §6.6 (first "SUCCESS" then hard reboot); **§6.7 FULL ROOT ACHIEVED 16:49**; **§6.8 FULL ROOT ACHIEVED 17:53 (Next)** |
 | Payloads repo `kernelsu/README.md` | Samsung KSU build records + FZG1 loader provenance | v3.4.2 generic row (line ~12); FZG1 loader row (line ~471) |
 | Payloads repo `support/kernelsu-generic.json` | Next generic feed row (daemon 3.4.2, `679504dd…`) | lines ~36-46 |
+| `CHANGELOG.md` §"4.8-gzif maintenance (2026-11-24)" / `NOTICE` / `README.md` / `PORTING-GZIF.md` | **2026-11-24 hardening batch** (dated 2026-11-25 PR-head snapshots: CI `ed4b30d`, LKM `bdbdd65`, app `ffe8056`, native `492e46d`; master `ae627f1` retained) — per-file list, KO hash pins, limitations, LKM CFI work | no hardware evidence: `/dev/dfmsr`, `/dev/dfmw2`, `/dev/dfmw3` and rc=4 exist only in the new code, not in any run6/run8 log |
 
 ---
 
@@ -950,14 +1127,14 @@ Passing the gate is not device validation.
 | 4 | Stock vanilla classic v3.3.0 **panics** inside/around `init_module()` | **Device-validated** — 1 run (run2, KP194) | `run2_logcat.txt:1673-1851`; `kmsg_195.txt` (sibling); `manager-compat-analysis.md` §6-7 |
 | 5 | Stock vanilla Next v3.4.2 **panics** at the identical locus | **Device-validated** — 1 run (run3, KP195) | `run3_logcat.txt:1529-1705`; `kmsg_195.txt:8,403,1047-1069` |
 | 6 | FZF5-pair Next 3.4.1 loader fails pre-load on KMI `android13-5.15` asset miss (no panic) | **Device-validated** — 1 run (17:00) + static binary proof | `next-failure-evidence.txt:3-86`; `next-failure-analysis.md` §3.3-4, §6 |
-| 7 | run4 failure (`Failed to stage ksud`) → fixed by patch 2 → success (run6) | **Device-validated** | `run4_logcat.txt:30782-30788`; `bootstrap.c:301-334`; run6 |
+| 7 | run4 failure (`Failed to stage ksud`) → fixed by patch 2 → success (run6) | **Device-validated** | `run4_logcat.txt:30782-30788`; `bootstrap.c:301-334` (historical 2026-11-17 tree: `bootstrap.c:223-238`); run6 |
 | 8 | CVE-2026-43499 patched; CVE-2026-98260 present-unported; CVE-2026-43284 open | **Binary-verified** (kernel Image triage, static) | `docs/SM-S9180-S9180ZHU8GZIF.md` §3, §6.5 |
 | 9 | IpSecManager dry-run (SPI/encap/transform/apply/remove) all OK | **Device-validated** (read-only probe APK; not root) | campaign doc §6.5 (`C1-…C4-REMOVE-OK…DRYRUN-COMPLETE`) |
 | 10 | DFRoot "SUCCESS" ≠ root obtained (su Oracle required) | **Observed, mechanism understood** | run2 `:1679` (SUCCESS) vs `:1688` (Loading…); run3 `:1535` vs `:1544`; campaign doc §6.6 note |
 | 11 | End-to-end oracle `su -c id` → uid 0 / `su -v` / `getenforce` | **Device-validated** — both loaders (run6, run8) | campaign doc §6.7, §6.8 (UID 0; Enforcing; `3.3.0`/`3.4.2` stamps) |
 | 12 | `me.weishu.kernelsu` manager path end-to-end | **Not separately validated** (and manager app is userspace-broken; §9.5) | inference from patch 1 only — **unverified** |
-| 13 | Auto Soft Reboot behavior on this model | **Unverified/unstable** — one full hard reboot observed | campaign doc §6.6; `README.md` FAQ; §10 |
-| 14 | Start on Boot stability | **Unverified** — never run long-term | — |
+| 13 | Auto Soft Reboot behavior on this model | **Unverified/unstable** — one full hard reboot observed; the 2026-11-24 rc=4 / `/dev/dfmsr` / bounded-wait flow is **implemented but untested on hardware** | campaign doc §6.6; `README.md` FAQ; §9.6/§10; no `dfmsr`/`dfmw2`/`dfmw3` in run6/run8 logs |
+| 14 | Start on Boot stability | **Unverified** — not validated on this unit at all | — |
 | 15 | Multi-boot / multi-run reliability (7-day soak) | **Unverified** — exactly 2 successful cold runs to date | — |
 | 16 | Exact panic mechanism for runs 2/3 (EL2? KDP? DEFEX? KCFI/SCS mismatch?) | **UNVERIFIED — panic text absent from every artifact** | `manager-compat-analysis.md` §7, §10; `kmsg_195.txt` (XBL-only, `KlogOffset:0x0`) |
 | 17 | KDP/RKP/DEFEX enforcement semantics on 34343818 (vs FZG1's 33413713) | **Unmeasured** | campaign doc §5 ("unmeasured"); `samsung-lateload-forensics.md` §6.5 |
@@ -1030,6 +1207,7 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
     The PR as a whole is **not device-verified, not merge-ready and not
     release-ready**; no tag, no publish. See `CHANGELOG.md` round 12 and the
     round-12 note at the top of this file.
+11. **Historical (2026-11-24 batch) re-validation note.** The hardening changes (rc=4 `/dev/dfmsr` flow, whitelist/`commit()` prefs, native bounds/parsing, KO SHA-256 gate, build pins) were static/build-time work with no new hardware run, so the rollup stayed at two cold boots. With #2/#3 now merged into master this is historical context, **not** a claim that those gates are absent from master.
 
 ---
 
@@ -1043,13 +1221,15 @@ Confidence rollup: **the historical chain worked on this firmware in exactly two
 6. The pre-packaged Next FZF5 daemon shipped as `libksudnext.so` could never load (embeds `android13-5.15.189_kernelsu.ko`; runtime KMI is `android13-5.15`) — 52 ms exit, no panic; fixed by shipping `ksud-next-generic-kdp` (3.4.2, generic KMIs) instead (17:00 evidence → swapped 17:50 → run8 success).
 7. run4 exposed the missing staging step; patch 2 (`mkdir /data/adb` + securely stage `/data/local/tmp/.ksud-stage`, now with `O_EXCL|O_NOFOLLOW`) fixed it; run6 validated end-to-end (`su -v` = `3.3.0:KernelSU`, Enforcing).
 8. run8 validated the dual-mode APK with KernelSU-Next selected (`su -v` = `3.4.2:KernelSU`, Enforcing). Both KSU lineages now hardware-proven; both manager APKs present on the unit.
-9. Patch 1 (`ExploitRunner.stageAssets()`) prefers bundled Samsung loaders by selected package (`com.rifsxd.ksunext`→`libksudnext.so`; else bundled classic `libksud.so`; else upstream manager APK fallback).
-10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon to `/data/local/tmp/.ksud-stage` (no symlink/TOCTOU), exec it, then publish root/reboot markers.
+9. Patch 1 (`ExploitRunner.stageAssets()`) prefers bundled Samsung loaders by selected package (`com.rifsxd.ksunext`→`libksudnext.so`; else bundled classic `libksud.so`) under the merged two-package whitelist/`hasBundledLoader()`; the upstream manager-APK fallback is historical and removed.
+10. Patch 2 (`bootstrap.c`) implements the FZG1 staging contract: create `/data/adb`, securely stage the daemon (historical loaders used `/data/local/tmp/.ksud-stage`; current rebuilt loaders use the root-owned `/data/adb/.ksud-stage`), exec it, then publish the single `dfroot.final` token (the rc=4 `/dev/dfmsr` marker flow is historical).
 11. Load-bearing artifacts (historical run6/run8 chain): `app/src/main/jni/ko/dfroot-android13-5.15.ko` (13,504 B, DDK `android13-5.15`; built, not committed), `app/src/main/jniLibs/arm64-v8a/libksud.so` and `libksudnext.so` (then `aab76943…`/`679504dd…`; current bundles are the P1-08 rebuilds `731c3fa1…`/`7f28f1fb…` — see §6 and the round-8 note), and the APK `DFRoot_4.8-gzif.apk` (5.88 MB, `df.root`, "DFRoot GZIF").
 12. Build: JDK 21 (toolchain-pinned), SDK 36, NDK **r28c** (`28.2.13676358`), CMake 3.22.1, Gradle **9.9.2** (distribution SHA-256 pinned) with AGP **9.5.0** via the version catalog → `./gradlew :app:assembleRelease` (release needs complete signing material; otherwise the variant is disabled) → `adb install -r`, LAUNCH ROOT — root is **volatile**, gone on reboot; re-run per boot.
 13. Troubleshooting: `/dev/df` ⇒ button disabled (rc 9 "already hooked", not rc 0); quarantined preferences ⇒ launch blocked (rc 8); Permissive ⇒ exploit ran, KSU missing; **`getprop dfroot.final`** (the non-persistent property root sets and the app reads; **`/dev/dffinal` is no longer produced**) ⇒ single nonce-bound v2 token (`error` = ksud/staging/nonce failed, `root_only` = no reboot requested/root not verified, `reboot_pending` = attempt awaiting bounded outcome, `reboot_attempt_unknown` = attempt result unknown/rc 7, other `reboot_*` = reboot states); rc ≥ 64 ⇒ "recovery verification failed" appended to any message; dual-tag logcat capture is mandatory (`KernelSU` **and** `KernelSU Next`); Not installed ⇒ module never resident; `/dev/dfm*` are informational progress markers only. **This final-status and Java-gate flow is host-tested but UNVALIDATED on device.**
 14. Limitations: volatile only; untested Auto Soft Reboot (hard reboot once) and Start on Boot; exploit could be closed by a Samsung patch at any time; no exact panic text exists for the two stock panics (XBL-only dumps).
 15. Confidence: 2/2 recent cold runs fully successful (run6, run8); stock modules 2/2 panics; everything else (98260 port, long-term stability, `me.weishu.kernelsu`-selected run, soak testing) unverified — treat this file as the starting map, not the final word.
+
+Historical §14 wording (2026-11-24, from PR #4) described the then-unmerged whitelist/rc=4 batch and Gradle 9.7.1; those dated records are preserved in §6/§8 and are superseded by merged #2/#3 here.
 
 ---
 

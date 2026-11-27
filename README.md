@@ -4,7 +4,9 @@
 
 # DFRoot [DirtyFrag (CVE-2026-43284)]
 
-DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a kernel page cache write primitive — to load a custom kernel module without requiring an unlocked bootloader. This fork supports exactly two SU managers (see [Supported managers](#supported-managers)); it is **not** manager-agnostic and does not accept arbitrary KernelSU-compatible managers.
+DFRoot is an Android rooting tool that exploits CVE-2026-43284 (DirtyFrag) — a kernel page cache write primitive — to load a custom kernel module without requiring an unlocked bootloader. This fork supports exactly two SU managers (see [Supported managers](#supported-managers)); it is **not** manager-agnostic and does not accept arbitrary KernelSU-compatible managers. The APK bundles Samsung-patched `libksud.so` / `libksudnext.so` loaders built for this specific firmware; they have been validated for this build only — vanilla (unpatched) KernelSU / KernelSU-Next modules panic inside `init_module()` on this build and must not be substituted.
+
+**Historical note (2026-11-17 validated `v4.8-gzif` release only):** that release had **no** two-package whitelist and still checked the manager's own loader; see [Usage](#usage) for the dated release record. The whitelist is present in merged master (see [Supported managers](#supported-managers)); it is no longer pending or release-only.
 
 > [!IMPORTANT]
 > Before hitting that fork button, consider making a pull request instead :)
@@ -638,6 +640,92 @@ are no longer reachable from the shipped UI.
 - **An unconfirmed attempt is a durable admission barrier.** It is persisted in device-protected storage before any privileged work or `run_config` publication. A new process loads it and rejects both manual and boot requests fail-closed until a trusted caller clears the barrier, regardless of boot count. On indeterminate results `RunCoordinator` keeps the lease, the frozen configuration, and single-flight rejection; recovery is a single-claim, trusted-caller API with **no in-app UI** — an ordinary user is intentionally locked out until a trusted caller clears the barrier. **Resetting app data is NOT safe recovery**: it only discards the barrier and is not evidence that privileged effects stopped, so it must not be presented as a way out of the lockout. `engineFinished` only proves the Java engine call returned/threw, not that externally owned effects ceased; no in-app retry/clear control is exposed from it.
 - **Soft reboot is unavailable in production** (R9): unattended remains disabled and manual is refused at write, artifact and native decision with a hard `0`; legacy acknowledged configs are migrated OFF on load. It was experimental and unvalidated on GZIF and has previously caused a full hard reboot on this model; no completed soft reboot was observed, so the risk is retained (issue #6). Root is volatile late-load: re-run LAUNCH ROOT after every reboot; no `boot.img` is flashed, and no root probe is added.
 
+## Known limitations / health-check status
+
+None of the items below were resolved by the 2026-11-24 maintenance batch (a
+historical snapshot whose changes are now merged into master); they are stated
+plainly so the fork is not mistaken for a finished, general-purpose root
+solution.
+
+- **Root privilege is volatile.** Root itself does not persist across reboot
+  (LAUNCH ROOT must be run again; no `boot.img` is flashed), but the run can
+  still leave persistent side effects — preference/`shared_prefs` writes,
+  module-disable state, and any filesystem changes made while rooted. Reboot
+  removes the privilege, not necessarily every change made with it.
+- **Only `S9180ZHU8GZIF` is validated.** No support is claimed for any other
+  build, model, KMI, or One UI / Android version.
+- **Soft reboot was EXPERIMENTAL** and has caused a full hard reboot on
+  S9180/GZIF; it is **unavailable in production (R9, issue #6)**, not merely
+  OFF by default. **Start on Boot** was never validated on this unit and is
+  likewise unavailable in production (R9); no recovery plan makes it safe.
+- **Classic manager UI is known-broken** on One UI 9 / Android 17 (Writable-dex
+  SIGABRT + seccomp SIGSYS) for `me.weishu.kernelsu`; the bundled loader itself
+  is unaffected. KernelSU-Next (`com.rifsxd.ksunext`) is recommended.
+- **Samsung EL2 (RKP/KDP/DEFEX) is not measured** on this kernel; the kernel
+  panic risk is real, not theoretical.
+- **CVE-2026-43284 may be patched in a future Samsung SMR**, which would break
+  the whole chain.
+- **The AES key is still passed via `argv`** and is therefore visible in
+  `/proc/<pid>/cmdline`; a fix requires changing the Java/native contract
+  together.
+- **No automated hardware tests** — verification relies on device runs. PR #1
+  (now merged) added signing/workflow/Make smoke tests; PRs #2 and #3 (now
+  merged) add JUnit/Robolectric and host-native tests. These are **not**
+  device validation, and separate green branch CI runs do not establish
+  integrated behavior.
+- **The LKM's SELinux/kprobe assumptions are unfixed.** At #5's verified head
+  (`a9acd3a`), `lkm/dfroot.c` still assumes `selinux_state`'s first field is
+  `enforcing`, still relies on `CONFIG_KPROBES` for symbol resolution, and only
+  `pr_warn`s an `insn_patch_text` failure. The earlier `%px` kernel-pointer
+  logging has been **removed** at that head (no address is disclosed at those
+  sites), and target vendor header prototypes remain unchecked. Whether the
+  UMH typedef/CFI change alters `.ko` bytes is **unverified** — all affected
+  indirect calls are `__nocfi`. The crash_dump64 cache-invalidation race also
+  remains. None of these are fixed in this batch.
+- **Privileged staging integrity is an open release blocker (#3 P1-08).**
+  Historically the bundled loaders consumed a `shell`-writable
+  `/data/local/tmp/.ksud-stage`, where a `shell`-uid process could replace the
+  file between staging `close()` and the loader's `rename()`; `O_EXCL|O_NOFOLLOW`
+  staging hardening does not fully close that threat model, and the historical
+  run6/run8 validation does not cover it. Both loaders have since been rebuilt
+  from the P1-08-patched source to consume a root-owned
+  `/data/adb/.ksud-stage` (fd-validated before promotion), and the producer
+  stages to that exact path with the rebuilt bytes pinned by sha256 and size at
+  build time. That was a loader-side fix: **P1-08 remains OPEN pending
+  re-review and fresh on-device full-chain validation** — documentation and a
+  build-time pin are not a fix, and unverified privileged content must not be
+  consumed or distributed. It must be resolved or explicitly accepted before
+  release.
+- **Historical result-contract divergence (2026-11-24 snapshots) — now
+  integrated.** The then-pending #2 `NativeResultMapper` rendered rc=4 as
+  "root active" while #3's `StatusRc` said "root not verified" and added
+  further codes/recovery flags; separate green CI runs did not prove
+  compatibility. In merged master those candidates are integrated: rc=4 is
+  "soft-reboot command returned success" in the
+  [Result contract](#result-contract-what-success-means) below, and the single
+  authoritative final outcome is the nonce-bound `dfroot.final` property (D2).
+  No status message proves root or a reboot outcome.
+- **Soft-reboot outcome reporting can be incomplete.** The older poll ended on
+  the terminal `/dev/dfmsr` marker and could mask `/dev/dfmw2` / `/dev/dfmw3`;
+  the dated `8dd66ea` snapshot's `status_poll.c` continued within a 70 s
+  budget; the historical #3 candidate head `492e46d` used `status_protocol.c`
+  with a nonce-bound v2 token, 70 s budget and 85 s overall deadline (§9.6 of
+  `PORTING-GZIF.md`), while merged master publishes the final outcome through
+  the nonce-bound `dfroot.final` property (D2). That budget is not a measured
+  wall-clock guarantee, and
+  the UI message is an implementation string asserting an **unverified**
+  pending status, not a verified root outcome.
+
+Addressed at the **earlier 2026-11-24 snapshots** (see `CHANGELOG.md` →
+`## 4.8-gzif maintenance (2026-11-24)`): manager/loader selection whitelist
+with an explicit KSUN→classic fallback warning, named result codes including
+rc=4, `commit()` preference writes, timed WakeLocks, native parsing/bounds
+hardening and an input-only KO hash gate. PR #1's build/signing work and the
+newer #2/#3 result/status and configuration architecture are **now merged into
+master** (the earlier input-only KO gate has been replaced by the fail-closed
+final-byte / packaged-artifact verification); merging them does not make them
+hardware-validated, and none remove the risks above.
+
 ## FAQ
 
 **Q: Log says patching failed and that my device isn't vulnerable**
@@ -650,6 +738,8 @@ A: Sorry, there is no fix. Either:
 **Q: Log says "SUCCESS" or "ksud exited with error", but I don't have root**
 
 A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final result now waits for a run-scoped terminal marker, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). Manual soft reboot is unavailable in the shipped build (R9) and was experimental and unvalidated on GZIF; it has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6). There is no "Auto Soft Reboot" toggle to disable in R9.
+
+**Historical (validated `v4.8-gzif` release and earlier `8dd66ea`/`5893dfa` snapshots only):** no rc=4 message existed in the validated release; at those earlier snapshots the soft-reboot path replaced the SUCCESS string with "root active — device may soft-reboot shortly" (rc=4, an unverified pending state), and the setting was marked EXPERIMENTAL with a per-Settings-visit warning. Those snapshots are not current: in merged master rc=4 is "soft-reboot command returned success" in the [Result contract](#result-contract-what-success-means), soft reboot is unavailable in production (R9), and the authoritative final outcome comes from the nonce-bound `dfroot.final` property. Do not expect the historical messages from a current build. Always verify with the `su` oracle; if you still have no root, see https://github.com/diabl0w/DFRoot/discussions/69
 
 **Q: I installed a module and now I can't launch root without crashing**
 
@@ -669,12 +759,48 @@ A: Typically Android will detect bootloops and boot you into Safe Mode, otherwis
    - [KernelSU](https://github.com/tiann/KernelSU/releases/latest) — package `me.weishu.kernelsu` (uses bundled `libksud.so`)
    - [KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases/latest) — package `com.rifsxd.ksunext` (uses bundled `libksudnext.so`)
 
-> Other managers (including KowSU and unlisted forks) are **not supported** and are rejected by preflight. Adding a manager requires a matching pinned bundled loader and device validation — it is not a spinner-list change.
+> Other managers (including KowSU and unlisted forks) are **not supported** and are rejected by preflight. Adding a manager requires a matching pinned bundled loader and device validation — it is not a spinner-list change. The two-package whitelist, `hasBundledLoader()` selection and the absence of fallback to the manager APK's own `libksud.so` (all introduced by the 2026-11-24 maintenance batch) are present in merged master; preflight rejects a missing, renamed, symlinked or mismatched bundled loader (see [Supported managers](#supported-managers)).
+
+### Historical validated release (`v4.8-gzif`, tag resolves to master `ae627f1`) — superseded
+
+The historical validated release was the **fork's** `v4.8-gzif` tag
+([DFRoot 4.8-gzif](https://github.com/samson910022/DFRoot-GZIF/releases/tag/v4.8-gzif),
+`DFRoot_4.8-gzif.apk`), not an upstream build; at that historical snapshot the
+upstream APK lacked this fork's Samsung-patched loaders and could panic this
+device, so it was not a substitute for that validated build. Its embedded KO is
+reported as the CI pin `9dfb8b71…`, matching the 2026-11-17 run6/run8 working
+tree. A matching embedded KO does **not** establish that the full APK bytes are
+identical to the tested ones: full APK-level identity is **independently
+unverified**, so treat the release as **associated with** the historical
+validation, not as byte-identical to a tested APK or as proof that every file
+in the tag was individually re-tested. In that historical release the app
+still checked the manager's own `libksud.so` and could fall back to the
+manager APK — there was no two-package whitelist, no `hasBundledLoader()` and
+no rc=4 flow. Those behaviors belong to the 2026-11-24 maintenance batch and
+are now integrated in master, not pending. KernelSU classic's UI was already
+known-broken on One UI 9 / Android 17 (Writable-dex SIGABRT + seccomp SIGSYS);
+KernelSU-Next (`com.rifsxd.ksunext`) was recommended.
+
+### Historical 2026-11-24 maintenance batch — now merged
+
+The 2026-11-24 batch introduced the two-package whitelist, `hasBundledLoader()`
+replacing `hasKsud()`, no fallback to the manager APK, the explicit
+KSUN→classic warning, the rc=4 soft-reboot flow, native bounds hardening and
+the KO hash/build pins. At the time of that snapshot it was unreleased,
+unpublished and without hardware validation; those features are now present in
+merged master (PRs #2/#3), and the current status and distribution gates are
+described above and in Known limitations / health-check status. Merging them
+does not constitute hardware validation.
 
 ## Features
 
 - Start on Boot — **unavailable in production (R9)**: production authorization is an unconditional refusal; the retained claim/dedup mechanism remains for audit (issue #6)
 - Soft reboot — **unavailable in production (R9)**: refused at write, artifact and native decision; manual soft reboot was experimental/unvalidated on GZIF (issue #6)
+- RO Partition Protection
+- Disable all KernelSU modules, to recover from a broken one
+- Shizuku not needed — regain root without WiFi!
+
+> **Historical (validated `v4.8-gzif` release and earlier `b071923`/`5893dfa` snapshots only):** Start on Boot was unvalidated on this unit and soft reboot was an EXPERIMENTAL feature (off by default, with a first-enable warning Toast at those snapshots). Neither behavior is enabled in master's shipped UI.
 - RO Partition Protection
 - Disable all KernelSU modules, to recover from a broken one
 - Shizuku not needed — regain root without WiFi!
@@ -687,7 +813,7 @@ The exploit uses this primitive to patch shellcode into `libc++.so` in the kerne
 
 ### Exploit chain
 
-1. **IpSec transform** — App allocates a `UdpEncapsulationSocket` + SPI and builds an AES-CBC/HMAC-SHA256 ESP transform via `IpSecManager`.
+1. **IpSec transform** — App allocates a `UdpEncapsulationSocket` + SPI and builds an AES-CBC/HMAC-SHA256 ESP transform via `IpSecManager`. The `INTERNET` permission is required for these AF_INET/UDP sockets (loopback included) and must be retained.
 
 2. **splicehelper → crash_dump64** — The splicehelper binary is spliced into `crash_dump64` via the CBC primitive. `crash_dump64` runs in the `crash_dump` SELinux domain (via exec label transition), which can open `vendor_file` labeled files (untrusted_app context cannot read these files so we need this bridge). The splicehelper serves two modes: splice mode (pipe a 16-byte page chunk out to the parent for write) and read mode (`argv[3]="r"`, write 16 bytes of file content to a pipe fd for IV computation).
 
@@ -729,6 +855,17 @@ SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
 
 ### Building this fork (DFRoot GZIF)
 
+> [!IMPORTANT]
+> This recipe applies to merged master, which includes PR #3. Master's build
+> uses the fail-closed `app/src/main/jni/verify_ko_sha256.cmake` target: the KO
+> SHA-256 gate, packaged-byte verification and re-pin policy below **are
+> enforced** by a build from this checkout and cannot be skipped for a
+> distributable artifact. **Historical (2026-11-24 maintenance batch / pre-#3
+> `9f60e16` base only):** at those snapshots CMake declared the KO merely as an
+> input dependency and had no such target; a green APK CI from that checkout
+> proved nothing about #3's verification and must not be used to permit a
+> release on that assumption.
+
 The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 `app/src/main/jni/ko/*.ko`). Before `assembleRelease` you must either:
 
@@ -737,17 +874,28 @@ The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
 - build only the `android13-5.15` LKM (`cd lkm && make …`, then copy/symlink
   the result to `app/src/main/jni/ko/dfroot-android13-5.15.ko`) — sufficient
   for GZIF, or
-- fetch the CI-built `dfroot-android13-5.15.ko` from the
-  `df-lkm-android13-5.15` artifact of `.github/workflows/build.yml`; its
-  sha256 is
-  `9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68`.
-  Place it at `app/src/main/jni/ko/dfroot-android13-5.15.ko`.
+- fetch the prebuilt `dfroot-android13-5.15.ko` from CI artifacts
+  (`.github/workflows/build.yml`) and place it at
+  `app/src/main/jni/ko/dfroot-android13-5.15.ko`. The CI artifact is
+  post-processed with `llvm-objcopy --strip-unneeded` plus several `-R …`
+  section removals (including `.note.gnu.build-id`; see `build.yml`). The
+  **reported historical** fingerprints are `9dfb8b71…` (13384 B) for that CI
+  artifact and `94f8be98…` (13504 B, with build-id) for a local `make` output;
+  these are repository records, **not** independently verified output of the
+  current checkout or a recorded source/build-input identity. The fail-closed
+  SHA-256 gate (`app/src/main/jni/verify_ko_sha256.cmake`) comes from PR #3 and
+  **is** enforced in merged master; only in the historical pre-#3 snapshots was
+  it an unmerged candidate that this checkout did not enforce. Both values are
+  known obsolete pins accepted by the gate — neither is a validated release
+  input: release is withheld by **policy** (a reviewed re-pin, the OPEN P1-08
+  staging gate and device validation), not by the hash gate alone.
 
-The CI/release artifact is 13,384 B and is **not byte-identical** to the locally
-`make`-built KO (13,504 B, sha256 `94f8be98…`): CI strips `.note.gnu.build-id`
-(and other notes/sections) with `llvm-objcopy --strip-unneeded`, so the size,
-bytes and hash differ even though both are built from the same source. The full
-hash above identifies the CI/release artifact.
+A CI-stripped output differs from a local `make` output because CI removes
+`.note.gnu.build-id` (and other notes/sections) with `llvm-objcopy
+--strip-unneeded`. The fingerprints above are **reported historical** repository
+records — the single consolidated reference is PORTING-GZIF.md §7 — not verified
+output of this checkout or an independently established same-source build
+identity.
 
 Then: `./gradlew :app:assembleRelease` →
 `app/build/outputs/apk/release/DFRoot_4.8-gzif.apk` →
@@ -815,6 +963,36 @@ gate alone; passing it is not device validation (see `CHANGELOG.md`).
 > existing DFRoot GZIF installation before installing a signed release build.
 > No APK is distributed from non-tag CI; the signing-smoke APK uses an isolated
 > identity and is never a distributable artifact.
+
+> [!NOTE]
+> An unsigned release variant is **not directly installable** — Android
+> requires every APK to be signed for both initial installation and updates.
+> Omit `signing.properties` only for an unsigned artifact kept for inspection or
+> later signing; the Gradle **signed-release** path requires a complete
+> `signing.properties`, and updates additionally require a compatible signing
+> identity.
+
+> [!NOTE]
+> **KO verification history (pre-#3 snapshots, including the 2026-11-24
+> maintenance batch and the `9f60e16` base):** at those historical snapshots
+> CMake only declared the KO as an input and `DFROOT_SKIP_KO_HASH_CHECK=ON`
+> bypassed an input-only hash gate; a green APK CI from such a checkout proved
+> nothing about final-byte or packaged-artifact verification. In merged master,
+> PR #3 is present: `verify_ko_sha256.cmake` and the mandatory final linked-byte
+> / packaged-artifact checks are fail-closed, and the source-only skip option is
+> deprecated/unsupported — the packaged verification cannot be skipped (see
+> [Building](#building) above). Passing CI still checks host-level behavior only
+> and does not exercise the real publishing gates or validate a device. A
+> pinned hash proves equality to an approved blob, not provenance from the
+> current checkout; record the DDK digest and source revision that produced each
+> variant (the historical pins are pre-CFI-fix) and mark any unknown identity
+> explicitly. Re-verify for **every** relevant source or build-input change;
+> re-pin **only the bytes that actually changed**, in a reviewed commit. At #5's
+> verified head, whether the UMH typedef/CFI change alters `.ko` bytes is
+> unverified (affected calls are `__nocfi`), so do not assume new hashes are
+> required or that the old approved blob represents the new source. **P1-08
+> remains an OPEN release blocker** pending re-review and fresh on-device
+> full-chain validation.
 
 ## PR #2 / R8 supporting evidence (integration addendum — no gates closed)
 
