@@ -40,19 +40,23 @@ set(KO_FILE "${JNI_DIR}/ko/dfroot-android13-5.15.ko")
 set(KO_FILES
     "${KO_FILE}"
 )
-# Accepted SHA-256 pins for the embedded dfroot.ko. Both are from the same,
-# already-reviewed DDK build and differ only because CI runs an extra
-# `llvm-objcopy -R .note.gnu.build-id` after the DDK build, which yields a
-# byte-for-byte different (but equally legitimate) blob:
+# Accepted SHA-256 pins for the embedded dfroot.ko. The first two are from the
+# same already-reviewed DDK build and differ only because CI runs an extra
+# `llvm-objcopy -R .note.gnu.build-id` after the DDK build:
 #   94f8be... = local `make` output from lkm/ (WITH .note.gnu.build-id), 13504 B
-#   9dfb8b... = CI artifact (build-id stripped), 13384 B; byte-for-byte the KO
-#               shipped in the v4.8-gzif release APK.
-# Accepting both keeps the gate fail-closed for any *unknown* blob while not
-# breaking either the local or the CI build. Adding a third hash must go
-# through review and be added deliberately here -- never auto-generated.
+#   9dfb8b... = old CI artifact (build-id stripped), 13384 B; byte-for-byte the
+#               KO shipped in the v4.8-gzif release APK (obsolete for this head).
+#   e10425... = RE-PIN for this head: the CI artifact rebuilt after the UMH
+#               typedef/CFI correction in lkm/dfroot.c was shown to have
+#               different bytes (13456 B, build-id stripped) by the CI KO
+#               policy gate. Added deliberately in a reviewed commit; not
+#               auto-generated. The old pins are retained as historical
+#               repository records and are not evidence for this head.
+# Adding a hash still goes through review; unknown blobs remain fail-closed.
 set(KO_EXPECTED_SHA256S
     "94f8be987a2f8bdc13539e42a5c3cb4c0f606024b8b31601496c5d5e5c0025a7"
     "9dfb8b71b306f5a38fd8b35b283d4dab8b4eb25a08ad97ca0f4ef705b6151c68"
+    "e10425d055ff6803856cc24f6f4fe2e2e09746df195c50503811356eb87df605"
 )
 set(KO_VERIFY_SCRIPT "${JNI_DIR}/verify_ko_sha256.cmake")
 set(KO_VERIFY_STAMP "${CMAKE_CURRENT_BINARY_DIR}/dfroot-ko.sha256.verified")
@@ -79,13 +83,15 @@ set(PACKAGED_KO_STAGING_DIR "${CMAKE_CURRENT_BINARY_DIR}/unverified")
 set(PACKAGED_KO_RAW_SO "${PACKAGED_KO_STAGING_DIR}/libdfroot.so")
 set(PACKAGED_KO_VERIFIED_SO "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libdfroot.so")
 set(PACKAGED_KO_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/dfroot-packaged-ko.manifest")
-# Accepted byte counts of the two reviewed artifacts: the local make output
-# (13504 B, WITH .note.gnu.build-id) and the CI artifact (13384 B, build-id
-# stripped). These are sizes only; a size can never make an unknown hash pass
-# and no hash pin is added or relaxed here.
+# Accepted byte counts of the reviewed artifacts: the old local make output
+# (13504 B, WITH .note.gnu.build-id), the old CI artifact (13384 B, build-id
+# stripped), and the re-pinned CI artifact for this head (13456 B, stripped).
+# These are sizes only; a size can never make an unknown hash pass and no hash
+# pin is added or relaxed here.
 set(KO_EXPECTED_SIZES
     13504
     13384
+    13456
 )
 
 # DEPRECATED / UNSUPPORTED: a source-only local experiment that disables just
