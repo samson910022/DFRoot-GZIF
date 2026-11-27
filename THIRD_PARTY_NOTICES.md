@@ -2,6 +2,43 @@
 
 Components bundled with, linked against, or built by this project, and their licences.
 
+Modified 2026-11-25 (DFRoot GZIF): corrected the dependency inventory — the app
+module declares **only** JUnit 4 and Robolectric as (test-only) dependencies; the
+AndroidX aliases in `gradle/libs.versions.toml` are not applied by the app module
+and are not shipped. Loader provenance and SHA-256 pins were re-verified against
+`app/build.gradle.kts` and the bundled `jniLibs` binaries (see `NOTICE`). No
+bundled loader or other third-party component was modified by the 2026-11-25
+PR #2 work; only this repository's GPL-2.0-only application/native sources were
+changed, each with a dated per-file notice.
+
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `6686973`..`a8003c2`):
+the dependency inventory is **unchanged** — no dependency was added or removed;
+JUnit 4 and Robolectric remain test-only, and the new `buildSrc` loader-pin
+verification tasks are Gradle build logic, not shipped/runtime components.
+Loader provenance and SHA-256 pins were re-checked against `app/build.gradle.kts`
+and `app/src/main/jniLibs/arm64-v8a/*.so` and still match
+(`aab76943…fc940` / `679504dd…dca1d`). **No bundled loader binary or other
+third-party component was modified by this round**; only this repository's own
+GPL-2.0-only sources changed, with dated per-file notices added where missing.
+Host verification only (484 JVM tests / 44 suites, 135 host CTest cases, lint 0
+errors / 21 warnings); no hardware/device/privileged/APK validation, and a fresh
+GitHub CI green run including the negative pin fixture remains a POST-PUSH gate.
+
+Modified 2026-11-25 (DFRoot GZIF, third repair round / R3, final local HEAD
+`1252b3d`): the dependency inventory is **unchanged** — no dependency was added
+or removed by the PR #1 rebase (`origin/master` `9f60e16`), the CI integration
+commits (`f6faf75`, `770d07c`) restored only the existing JUnit/Robolectric
+test-only declarations, and the R3 repairs touched only this repository's own
+application/native/test sources and documentation. Loader provenance and
+SHA-256 pins were re-checked against `app/build.gradle.kts` and
+`app/src/main/jniLibs/arm64-v8a/*.so` and still match (`aab76943…fc940` /
+`679504dd…dca1d`). **No bundled loader binary or other third-party component
+was modified by this round**, and no new component is introduced. Host
+verification: 554 JVM tests / 45 suites (0 failures/errors/skips), 137 host
+CTest cases, lint 0 errors / 15 warnings, workflow policy 67/67, signing 40/40,
+make 36/36. No hardware/device/ADB/payload/privileged/APK validation; a fresh
+GitHub CI green run after push remains a POST-PUSH gate.
+
 | Component | Role | Licence | Source |
 |---|---|---|---|
 | diabl0w/DFRoot @ `7a6513a` | upstream baseline | GPL-2.0-only | https://github.com/diabl0w/DFRoot |
@@ -11,6 +48,9 @@ Components bundled with, linked against, or built by this project, and their lic
 | `dfroot.ko` (not committed; built from `lkm/dfroot.c`) | LKM | GPL-2.0-only (`MODULE_LICENSE("GPL")`) | this repository, `lkm/` |
 | splicehelper / `jni/*.c`, `*.S` | payload sources | GPL-2.0-only | this repository (upstream DFRoot + GZIF modifications) |
 | libcxx/shellcode headers (app/src/main/jni/include.inc) | payload sources | BSD-3-Clause (Odzhan, Copyright (c) 2018 Odzhan) for include.inc; GPL-2.0-only for the rest | this repository + Odzhan |
+| AndroidX (appcompat, material, constraintlayout, preference) | **not used by the app** — catalog aliases only in `gradle/libs.versions.toml`; no runtime dependency is declared in `app/build.gradle.kts` | Apache-2.0 | Google Maven (versions in `gradle/libs.versions.toml`) |
+| JUnit 4.13.2 | **test only** (`testImplementation`) | EPL-1.0 | https://junit.org/junit4/ |
+| Robolectric 4.18.1 | **test only** (`testImplementation`) | Apache-2.0 | https://robolectric.org/ |
 | Gradle / Android Gradle Plugin / Gradle wrapper | build | Apache-2.0 | gradle.org / Google Maven |
 | `GPL-3.0.txt` | licence text conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv3 (official text) | https://www.gnu.org/licenses/gpl-3.0.txt |
 | `LICENSE` | repository's own GPL-2.0-only licence, conveyed with signed release assets and unsigned CI artifacts | verbatim GNU GPLv2 | this repository |

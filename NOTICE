@@ -19,6 +19,66 @@ The application was renamed: label is now "DFRoot GZIF" (was "DFRoot FZG1");
 `applicationId` remains `df.root` by design (the bootstrap staging protocol
 depends on it).
 
+Modified 2026-11-25 (DFRoot GZIF, PR #2 Phases 0–5): the DFRoot **application
+source and native payload sources only** were repaired — optional release
+signing and the JVM/host test foundation; side-effect-free canonical manager
+preflight with SHA-256-pinned bundled loaders; immutable `RunConfig` and durable
+off-main-thread configuration writes; a process-scoped `RunCoordinator` and
+Direct Boot-aware `specialUse` foreground service; an atomic, versioned
+`run_config` artifact; run-scoped terminal markers with all legacy
+`/dev/dfm*` markers reduced to progress diagnostics; hardened `.ksud-stage`
+staging; and a durable `BOOT_COUNT` claim for boot runs. Each modified
+GPL-2.0-only source file carries its own dated `Modified 2026-11-24 … See NOTICE.`
+or `Modified 2026-11-25 … See NOTICE.` notice, according to the PR #2 commit that
+touched it; files touched by 2026-11-25 commits and by the Phase 6 notice
+additions carry 2026-11-25 notices. `CHANGELOG.md` §"2026-11-25" lists the areas
+changed. **No bundled loader binary, upstream component, or third-party artifact
+was modified by this work**, and no device/privileged/APK validation was
+performed for it.
+
+Modified 2026-11-25 (DFRoot GZIF, re-review 1 repair, commits `6686973`..`a8003c2`):
+a second repair round changed **only this repository's own GPL-2.0-only
+application, native, build-logic, and test sources** — restored packaged-loader
+pin verification with a harmless negative fixture (`buildSrc` tasks + CI),
+descriptor-pinned conservative staged-entry cleanup, atomic run-scoped terminal
+marker publication with rc=7 as an indeterminate channel, bounded non-killing
+waits and a durable unconfirmed-attempt barrier with explicit owner recovery,
+an independently disableable Start-at-Boot toggle, an honest already-hooked
+result message, and a read-only availability diagnostic. Newly touched
+GPL-covered files carry dated 2026-11-25 per-file notices; existing notices were
+**not removed**. **No bundled loader binary, upstream component, or third-party
+artifact was modified by this round**; no device, payload, ADB,
+privileged-container, or APK-assembly validation was performed. Host verification
+for this round: 484 JVM tests (44 suites), 135 host CTest cases, lint 0 errors /
+21 warnings, `git diff --check` clean. A fresh GitHub CI green run (including the
+negative fixture) is a POST-PUSH gate, not a local result.
+
+Modified 2026-11-25 (DFRoot GZIF, third repair round / R3, final local HEAD
+`1252b3d`): this round re-based the branch onto merged PR #1 (`origin/master`
+`9f60e16`) and kept/extended its CI policy (`f6faf75`, `770d07c`), then repaired
+**R2-12** (`6ebf9e3`), **R2-13** (`2a74dd0`), **R2-14** (`6012c21`),
+**R2-16/17** (`b87318f`), **R2-18** (`d32006e`) and **R2-19 plus the R2-04
+caveat** (`1252b3d`). It changed **only this repository's own GPL-2.0-only
+application, native and test sources plus documentation**; per-file dated
+2026-11-25 notices were added where missing and **no existing notice was
+removed**. **No bundled loader binary, upstream component, third-party
+artifact or dependency was modified or added by this round.** The loader pins
+below were re-checked against `app/build.gradle.kts` and the on-disk `jniLibs`
+and still match byte-for-byte. Host verification: 554 JVM tests / 45 suites (0
+failures/errors/skips), 137 host CTest cases, lint 0 errors / 15 warnings,
+workflow policy 67/67, signing 40/40, make 36/36, `git diff --check` clean. No
+device, payload, ADB, privileged-container or APK-assembly validation was done;
+a fresh remote GitHub CI green run after push is a POST-PUSH gate, not a local
+result.
+
+Loader-pin verification (2026-11-25; re-verified again for the re-review round and the third repair round):
+the SHA-256 pins in `app/build.gradle.kts` were checked against the on-disk
+bundled binaries and both still match byte-for-byte (the bundled binaries were
+not rewritten by any of the 2026-11-25 rounds):
+
+- `libksud.so` → `aab769430467e5a9f723c1bc8a3180e6fb0b0b82c52fba7b99887199407fc940`
+- `libksudnext.so` → `679504dd4e104dc1a296ed4ec795b5a5f3e808c2bd345a7ecfa201b40f1dca1d`
+
 Aggregated third-party components
 ----------------------------------
 
@@ -467,7 +527,7 @@ historical implementations or pre-rebase heads, not this head.
   (`app-result8b.txt`, `root-probes8b.txt`, `logcat8.txt`, `post-reboot8.txt`,
   `channel-probe7.txt`, `channel-probe7b.txt`, `channel-probe7c.txt`).
   `post-reboot8.txt` records the device not reconnecting (`adb: device
-  'R5CW21C8PLR' not found`), so no post-reboot state claim is made.
+  <device serial redacted> not found`), so no post-reboot state claim is made.
   **Second author-local full run at committed head `e823fb4` (after the R11
   snapshot):** APK sha256
   `f866b4388f9f4c9e365dbf2936a9b076eab14b6ad2f2b4e9ea3e642080758807`

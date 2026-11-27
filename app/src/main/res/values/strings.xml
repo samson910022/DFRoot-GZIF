@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Modified 2026-11-24 (DFRoot GZIF): add low-importance foreground-operation notification text. See NOTICE. -->
+<resources>
+    <string name="exploit_service_channel_name">Operation supervision</string>
+    <string name="exploit_service_channel_description">Shows foreground lifetime for an owner-initiated or boot-triggered DFRoot operation.</string>
+    <string name="exploit_service_notification_title">DFRoot GZIF</string>
+</resources>

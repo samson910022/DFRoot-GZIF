@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified 2026-11-25 (DFRoot GZIF): include buildSrc in the hermetic signing Gradle fixture so packaged-loader task definitions resolve after the PR #1 rebase. See NOTICE.
 """Regression tests for signing-material serialization, publication, and configuration."""
 
 from __future__ import annotations
@@ -1178,6 +1179,13 @@ allprojects { p ->
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / relative, destination)
             shutil.copytree(ROOT / "gradle", project / "gradle")
+            # PR #2 owns the packaged-loader verification task classes in
+            # buildSrc; a hermetic Gradle fixture must include them too.
+            shutil.copytree(
+                ROOT / "buildSrc",
+                project / "buildSrc",
+                ignore=shutil.ignore_patterns("build", ".gradle"),
+            )
             (project / "gradlew").chmod(0o755)
             (project / "local.properties").write_text(f"sdk.dir={self.android_sdk}\n", encoding="utf-8")
             if properties is not None:

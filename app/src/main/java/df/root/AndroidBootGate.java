@@ -15,7 +15,9 @@ import java.util.concurrent.Executors;
  * Referenced ONLY from {@code PreferenceIntegrity.init(Context)}, so the pure
  * {@code init(File)} path and host-only JVM tests never require Android's
  * PackageManager. This gate only ever DISABLES the receiver: nothing here can
- * auto-enable automatic startup, and the user can still turn it off in Settings.
+ * auto-enable automatic startup. Start at Boot is unavailable in production, so
+ * there is deliberately no enable method on this gate and no Settings path may
+ * enable the receiver either. The explicit OFF action remains available.
  */
 final class AndroidBootGate implements PreferenceIntegrity.BootGate {
 

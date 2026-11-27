@@ -1,4 +1,7 @@
 # Modified 2026-11-17 (DFRoot GZIF): KO_FILES reduced to android13-5.15 only. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): share the strict run-config codec with both native binaries. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): compile the run-scoped terminal marker protocol into both native binaries. See NOTICE.
+# Modified 2026-11-25 (DFRoot GZIF): share the strict run-config codec with both native binaries (PR #2; not a status protocol). See NOTICE.
 cmake_minimum_required(VERSION 3.22)
 project(dfroot)
 enable_language(ASM)
@@ -293,7 +296,7 @@ add_custom_target(dfroot_build_provenance DEPENDS "${PROVENANCE_OUTPUT}")
 # AGP only packages lib*.so, so the executable is named libdfroot.so and lands
 # in the APK's native lib dir. The app execs it from nativeLibraryDir, which is
 # executable (app data dir is not).
-add_executable(dfroot exp.c libcxx.S elf_parser.c device_version.c status_protocol.c final_status_publish.c)
+add_executable(dfroot exp.c libcxx.S elf_parser.c device_version.c status_protocol.c final_status_publish.c run_config_codec.c)
 add_dependencies(dfroot splicehelper_bin ko_sha256_check dfroot_build_provenance)
 # exp.c .incbin's the build-dir splicehelper rather than a source-tree copy.
 target_compile_definitions(dfroot PRIVATE DFROOT_SPLICEHELPER_PATH=\"${SPLICEHELPER}\")
@@ -357,7 +360,11 @@ add_custom_command(
 )
 add_custom_target(dfroot_packaged ALL DEPENDS "${PACKAGED_KO_VERIFIED_SO}")
 
-add_executable(bootstrap bootstrap.c bootstrap_stage.c status_protocol.c final_status_publish.c proc_scan_policy.c)
+# Master is the SINGLE status protocol. PR #2's run_status.c and
+# loader_stage.c are intentionally NOT linked into either binary: duplicate
+# symbols and contradictory outcomes. run_config_codec.c is the shared strict
+# Java/native run-config codec (not a status protocol) retained from PR #2.
+add_executable(bootstrap bootstrap.c bootstrap_stage.c status_protocol.c final_status_publish.c proc_scan_policy.c run_config_codec.c)
 set_target_properties(bootstrap PROPERTIES
     PREFIX "lib"
     SUFFIX ".so"

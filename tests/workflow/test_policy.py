@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Modified 2026-11-25 (DFRoot GZIF): extend the closed PR #1 CI allowlists for app-checks, loader-pin fixtures and packaged-pin verification after rebase. See NOTICE.
 """Fast, dependency-free contract tests for .github/workflows/build.yml.
 
 The parser in this module is a deliberately strict *allowlist* for the small
@@ -39,6 +40,7 @@ ACTION_PINS = {
     "actions/download-artifact": ("37930b1c2abaa49bbe596cd826c3c89aef350131", "v7"),
     "actions/setup-java": ("d1374f8ac74474200d16ef8ecee22c7ae7a51880", "v6"),
     "gradle/actions/setup-gradle": ("8da46b539cd8fe6ab27ca75128919a18d757604c", "v6"),
+    "android-actions/setup-android": ("be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd", "v4"),
     "softprops/action-gh-release": ("8a0cd651e5b2365bd640854a3fa5dfc70e4875f3", "v3"),
 }
 ALLOWED_SECRETS = {"${{ secrets." + name + " }}" for name in SIGNING_SECRETS}
@@ -82,10 +84,25 @@ APK_FIXTURE_TEST_STEP = "APK packaging gate fixture tests (CMake, host-only)"
 EXTRACT_PINS_STEP = "Extract reviewed KO pins and sizes"
 KO_CI_POLICY_STEP = "KO hash policy (CI enforced, skip rejected)"
 JVM_TEST_STEP = "Java preference-persistence unit tests"
-JUNIT_STEP = "Assert JUnit XML (39 tests, 0 failures)"
+JUNIT_STEP = "Assert JUnit XML (819 tests, 0 failures)"
 ALL_MARKERS_STEP = "Assert all test suites reached"
 DEBUG_BUILD_STEP = "Build debug APK (compile/content gate only)"
 CI_CACHE_ASSERT_STEP = "Assert KO hash check enabled in every CMakeCache"
+# PR #2 loader-pin gates, retained on the paths where each APK variant is built.
+VERIFY_DEBUG_PINS_STEP = "Verify packaged debug APK loader pins"
+VERIFY_RELEASE_PINS_STEP = "Verify packaged release APK loader pins"
+VERIFY_DEBUG_PINS_SCRIPT = (
+    "set -euo pipefail\n"
+    "./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain"
+)
+VERIFY_RELEASE_PINS_SCRIPT = (
+    "set -euo pipefail\n"
+    "./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain"
+)
+VERIFY_PINS_RUN_SCRIPTS: dict[str, str] = {
+    VERIFY_DEBUG_PINS_STEP: VERIFY_DEBUG_PINS_SCRIPT,
+    VERIFY_RELEASE_PINS_STEP: VERIFY_RELEASE_PINS_SCRIPT,
+}
 CI_SCOPE_STEP = "Report CI evidence-only artifact scope"
 CI_UPLOAD_STEP = "Upload DFRoot-CI evidence"
 PACKAGED_KO_GATE_STEP = "Verify packaged KO bytes in every distributable APK"
@@ -119,10 +136,16 @@ APK_LOADER_GATE_INDEX = "apk-loader-index.tsv"
 LOADER_PINS_FILE = "loader-pins.tsv"
 # P2-15: AGP strips release JNI libs unless exempted; the two reviewed loader
 # blobs must stay byte-identical for the P2-14 final-APK loader gate to pass.
-LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS = (
-    'keepDebugSymbols += "**/libksud.so"',
-    'keepDebugSymbols += "**/libksudnext.so"',
+# The merged build.gradle.kts exempts both loaders in ONE `listOf(...)` entry;
+# the full entry is equality-locked, so dropping, commenting out or typo-ing
+# either loader glob changes the pinned text and fails the source contract.
+LOADER_KEEP_DEBUG_SYMBOLS_LINE = (
+    'keepDebugSymbols += listOf("**/libksud.so", "**/libksudnext.so")'
 )
+LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS = (LOADER_KEEP_DEBUG_SYMBOLS_LINE,)
+# Per-loader glob tokens inside that exact line, used by mutation tests to
+# prove each loader is independently pinned exactly once.
+LOADER_KEEP_DEBUG_SYMBOLS_GLOBS = ("**/libksud.so", "**/libksudnext.so")
 CI_EVIDENCE_ARTIFACT_NAME = "DFRoot-CI-evidence"
 RELEASE_ARTIFACT_NAME = "DFRoot-release"
 PROVENANCE_ARTIFACT_NAME = "DFRoot-provenance"
@@ -247,6 +270,7 @@ RELEASE_RUN_SCRIPTS: dict[str, str] = {
     'Write signing material': (
         'java scripts/WriteSigningProperties.java ci .'
     ),
+    VERIFY_RELEASE_PINS_STEP: VERIFY_RELEASE_PINS_SCRIPT,
     'Build signed release APK': (
         'set -euo pipefail\n'
         'for attempt in 1 2 3; do\n'
@@ -1059,7 +1083,7 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
         './gradlew :app:testDebugUnitTest\n'
         'echo "jvm-ok" > "$RUNNER_TEMP/marker-jvm"'
     ),
-    'Assert JUnit XML (39 tests, 0 failures)': (
+    'Assert JUnit XML (819 tests, 0 failures)': (
         'set -euo pipefail\n'
         "python3 - <<'PY'\n"
         'import glob\n'
@@ -1080,8 +1104,8 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
         '           root.get("errors"), root.get("skipped")))\n'
         'print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %\n'
         '      (tests, failures, errors, skipped))\n'
-        'if tests != 39 or failures != 0 or errors != 0 or skipped != 0:\n'
-        '    raise SystemExit("::error::JUnit XML assertion failed: expected 39 tests, 0 failures/errors/skips")\n'
+        'if tests != 819 or failures != 0 or errors != 0 or skipped != 0:\n'
+        '    raise SystemExit("::error::JUnit XML assertion failed: expected 819 tests, 0 failures/errors/skips")\n'
         'PY\n'
         'echo "junit-ok" > "$RUNNER_TEMP/marker-junit"'
     ),
@@ -1102,8 +1126,9 @@ HOST_GATES_RUN_SCRIPTS: dict[str, str] = {
 }
 
 # Exact, ordered run-script contract for build-dfroot: a Debug compile/content
-# gate, the CMakeCache assertion, the APK counter and the evidence-only scope
-# report. No host suite, no release build and no APK may appear here.
+# gate, the packaged Debug loader-pin gate, the CMakeCache assertion, the APK
+# counter and the evidence-only scope report. No host suite, no release build
+# and no APK upload may appear here.
 DFROOT_RUN_SCRIPTS: dict[str, str] = {
     DEBUG_BUILD_STEP: (
         'set -euo pipefail\n'
@@ -1119,6 +1144,7 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '  sleep 30\n'
         'done'
     ),
+    VERIFY_DEBUG_PINS_STEP: VERIFY_DEBUG_PINS_SCRIPT,
     'Assert KO hash check enabled in every CMakeCache': (
         'set -euo pipefail\n'
         '# Check ALL configured caches, not just one: a stray cached config\n'
@@ -1160,7 +1186,7 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
         '{\n'
         '  echo "## CI evidence artifact scope"\n'
         '  echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."\n'
-        '  echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
+        '  echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 819 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."\n'
         '} >> "$GITHUB_STEP_SUMMARY"'
     ),
 }
@@ -1168,6 +1194,26 @@ DFROOT_RUN_SCRIPTS: dict[str, str] = {
 # Exact ordered step-name contract for every job.  An extra (or reordered, or
 # renamed) step is a policy violation, not a harmless addition.
 JOB_STEP_NAMES: dict[str, list[str]] = {
+    "app-checks": [
+        "Check out source",
+        "Set up Java 21",
+        "Set up Android SDK",
+        "Set up Gradle",
+        "Verify all app task definitions resolve",
+        "Clean previous test and lint reports",
+        "Run host-native run-config tests",
+        "Run unit tests",
+        "Run lint",
+        "Verify unit tests executed",
+        "Upload test and lint reports",
+    ],
+    "loader-pin-fixtures": [
+        "Check out source",
+        "Set up Java 21",
+        "Set up Android SDK",
+        "Set up Gradle",
+        "Verify clean and tampered synthetic APK loader-pin fixtures",
+    ],
     "test-ci": [
         "Check out source",
         "Set up Java 21",
@@ -1204,6 +1250,7 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Download DF LKM (android13-5.15)",
         "Set up Gradle",
         DEBUG_BUILD_STEP,
+        VERIFY_DEBUG_PINS_STEP,
         CI_CACHE_ASSERT_STEP,
         APK_COUNTER_COMMAND,
         CI_SCOPE_STEP,
@@ -1216,6 +1263,7 @@ JOB_STEP_NAMES: dict[str, list[str]] = {
         "Write signing material",
         "Download DF LKM (android13-5.15)",
         "Set up Gradle",
+        VERIFY_RELEASE_PINS_STEP,
         "Build signed release APK",
         "Verify signed release APK",
         "Package signed release APK",
@@ -1276,7 +1324,19 @@ PUBLISH_FILES = (
 # The fourth upload is informational provenance, never a release asset.  It is
 # a single generated file under runner.temp, not an APK or signing material.
 PROVENANCE_UPLOAD_PATH = "${{ runner.temp }}/dfroot-apk-provenance.txt"
+# app-checks publishes its host test/lint reports as diagnostics only. This is
+# a closed allowlist too: no APK, signing material or build-output path may be
+# added to it, exactly like the evidence and release uploads.
+APP_CHECK_REPORTS_ARTIFACT_NAME = "app-check-reports"
+APP_CHECK_REPORTS_UPLOAD_PATH = (
+    "app/build/test-results/testDebugUnitTest/\n"
+    "app/build/reports/tests/testDebugUnitTest/\n"
+    "app/build/reports/lint-results-debug.html\n"
+    "app/build/reports/lint-results-debug.txt\n"
+    "app/build/reports/lint-results-debug.xml"
+)
 UPLOAD_ARTIFACT_NAMES = {
+    "app-checks": (APP_CHECK_REPORTS_ARTIFACT_NAME,),
     "build-lkms": ("df-lkm-${{ matrix.kmi }}",),
     "build-dfroot": (CI_EVIDENCE_ARTIFACT_NAME,),
     "build-release": (RELEASE_ARTIFACT_NAME, PROVENANCE_ARTIFACT_NAME),
@@ -1735,6 +1795,7 @@ def assert_required_steps_unskippable(text: str) -> None:
         ],
         "build-dfroot": [
             DEBUG_BUILD_STEP,
+            VERIFY_DEBUG_PINS_STEP,
             CI_CACHE_ASSERT_STEP,
             APK_COUNTER_COMMAND,
             CI_SCOPE_STEP,
@@ -1742,6 +1803,7 @@ def assert_required_steps_unskippable(text: str) -> None:
         "build-release": [
             ANCESTRY_STEP,
             "Write signing material",
+            VERIFY_RELEASE_PINS_STEP,
             "Build signed release APK",
             "Verify signed release APK",
             "Package signed release APK",
@@ -1883,7 +1945,7 @@ def assert_job_graph(text: str) -> None:
     active = strip_yaml_comments(text)
     jobs = job_blocks(active)
     expected_order = [
-        "test-ci", "build-lkms", HOST_GATES_JOB,
+        "test-ci", "app-checks", "loader-pin-fixtures", "build-lkms", HOST_GATES_JOB,
         "build-dfroot", "build-release", "publish",
     ]
     if list(jobs) != expected_order:
@@ -1985,12 +2047,13 @@ def assert_smoke_identity(gradle: str, smoke: str) -> None:
 def assert_loader_keep_debug_symbols(gradle: str) -> None:
     """Check the Gradle source contract for the two reviewed loader blobs.
 
-    Both keepDebugSymbols exemptions must be ACTIVE (not commented out)
-    exactly once in the whole file and exactly once inside
-    ``packaging { jniLibs { ... } }``, where the exemption is
-    variant-independent.  This is a source-contract check only; it is not a
-    substitute for the tag-time final-APK byte gate that hashes the extracted
-    loader libraries.
+    Both loader exemptions must be ACTIVE (not commented out) in one exact
+    keepDebugSymbols entry, appearing exactly once in the whole file and
+    exactly once inside ``packaging { jniLibs { ... } }``, where the exemption
+    is variant-independent.  Each loader glob is also counted separately so a
+    dropped, commented or renamed loader cannot hide behind the other one.
+    This is a source-contract check only; it is not a substitute for the
+    tag-time final-APK byte gate that hashes the extracted loader libraries.
     """
     # A commented-out exemption is not an exemption: ignore whole-line Kotlin
     # comments before locating/counting so a "// keepDebugSymbols ..." cannot
@@ -2012,6 +2075,17 @@ def assert_loader_keep_debug_symbols(gradle: str) -> None:
         if block_count != 1:
             raise AssertionError(
                 f"{fragment!r} must appear exactly one time inside packaging.jniLibs, got {block_count}"
+            )
+    for glob in LOADER_KEEP_DEBUG_SYMBOLS_GLOBS:
+        whole_count = active.count(glob)
+        if whole_count != 1:
+            raise AssertionError(
+                f"{glob!r} must appear exactly one time in gradle, got {whole_count}"
+            )
+        block_count = body.count(glob)
+        if block_count != 1:
+            raise AssertionError(
+                f"{glob!r} must appear exactly one time inside packaging.jniLibs, got {block_count}"
             )
 
 
@@ -2078,14 +2152,14 @@ def assert_pr3_gates(text: str) -> None:
     if "7/7 markers" not in all_markers:
         raise AssertionError("all-suites gate must state the 7/7 marker result")
 
-    # 2. The JUnit assertion is strict: 39 tests, 0 failures/errors/skips.
+    # 2. The JUnit assertion is strict: 819 tests, 0 failures/errors/skips.
     junit = run_script(named_step(host, JUNIT_STEP))
     if junit != HOST_GATES_RUN_SCRIPTS[JUNIT_STEP]:
         raise AssertionError("JUnit XML assertion script is not the pinned script")
     for fragment in (
         "TEST-*.xml",
         "if not files:",
-        "tests != 39",
+        "tests != 819",
         "failures != 0",
         "errors != 0",
         "skipped != 0",
@@ -2289,6 +2363,9 @@ def assert_exact_artifact_inputs(text: str) -> None:
     """Upload paths and the release publish files are exact, closed allowlists."""
     jobs = job_blocks(strip_yaml_comments(text))
     expected_uploads = {
+        "app-checks": {
+            APP_CHECK_REPORTS_ARTIFACT_NAME: APP_CHECK_REPORTS_UPLOAD_PATH,
+        },
         "build-lkms": {UPLOAD_ARTIFACT_NAMES["build-lkms"][0]: LKM_UPLOAD_PATH},
         "build-dfroot": {CI_EVIDENCE_ARTIFACT_NAME: CI_EVIDENCE_UPLOAD_PATH},
         "build-release": {
@@ -2322,6 +2399,31 @@ def assert_exact_artifact_inputs(text: str) -> None:
         raise AssertionError(f"publish files must be exactly {PUBLISH_FILES!r}, got {files!r}")
 
 
+
+def assert_exact_loader_pin_run_scripts(text: str) -> None:
+    """PR #2: equality-lock each loader-pin gate; no `if:`/tolerated failure.
+
+    Master's release policy permits a signed APK only on protected tags, so
+    the debug and release pins are asserted on their respective job paths.
+    Both tasks must be active commands, never comments or text.
+    """
+    jobs = job_blocks(strip_yaml_comments(text))
+    for job_name, step_name in (("build-dfroot", VERIFY_DEBUG_PINS_STEP),
+                                ("build-release", VERIFY_RELEASE_PINS_STEP)):
+        step = named_step(jobs[job_name], step_name)
+        if run_script(step) != VERIFY_PINS_RUN_SCRIPTS[step_name]:
+            raise AssertionError(
+                f"{job_name}/{step_name} run script must be exactly "
+                f"{VERIFY_PINS_RUN_SCRIPTS[step_name]!r}, got {run_script(step)!r}"
+            )
+        if step_property(step, "if") is not None or step_property(step, "continue-on-error") is not None:
+            raise AssertionError(f"{job_name}/{step_name} must not be skippable or tolerated")
+        task = ":app:verifyDebugPackagedLoaderPins" if job_name == "build-dfroot" \
+                else ":app:verifyReleasePackagedLoaderPins"
+        active = active_script_lines(run_script(step))
+        if not any(line.startswith("./gradlew ") and task in line for line in active):
+            raise AssertionError(f"missing active Gradle task line for {task}")
+
 def validate_workflow(text: str) -> None:
     assert_strict_yaml(text)
     assert_no_continue_on_error(text)
@@ -2331,6 +2433,7 @@ def validate_workflow(text: str) -> None:
     assert_job_graph(text)
     assert_exact_release_run_scripts(text)
     assert_exact_dfroot_run_scripts(text)
+    assert_exact_loader_pin_run_scripts(text)
     assert_exact_host_gates_run_scripts(text)
     assert_six_cmake_suites(text)
     assert_pr3_gates(text)
@@ -2754,8 +2857,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(len(download), 1)
         self.assertEqual(mapping(download[0], "with", 8).get("name"), "df-lkm-android13-5.15")
         builds = [run_script(step) for step in steps(job) if "./gradlew" in run_script(step)]
-        self.assertEqual(len(builds), 1)  # Debug compile/content gate only
-        self.assertIn("./gradlew :app:assembleDebug", builds[0])
+        # PR #2 adds a pin-verification step; still no release build or test task.
+        self.assertEqual(len(builds), 2)
+        self.assertTrue(any("./gradlew :app:assembleDebug" in b for b in builds))
+        self.assertTrue(any(":app:verifyDebugPackagedLoaderPins" in b for b in builds))
         self.assertNotIn(":app:testDebugUnitTest", "\n".join(builds))
         self.assertNotIn(":app:assembleRelease", "\n".join(builds))
         self.assertNotIn("WriteSigningProperties", job)
@@ -2775,6 +2880,58 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(inputs.get("overwrite"), "true")
         assert_ci_evidence_upload_has_no_apk(self.raw)
         self.assertNotIn(".apk", CI_EVIDENCE_UPLOAD_PATH.lower())
+
+    def test_ci_packaged_pin_gate_is_exact_unskippable_and_precedes_upload(self) -> None:
+        """R2-23: every uploaded variant is verified on every trigger path."""
+        job = self.jobs["build-dfroot"]
+        verify = named_step(job, VERIFY_DEBUG_PINS_STEP)
+        assert_exact_loader_pin_run_scripts(self.raw)
+        assert_required_steps_unskippable(self.raw)
+        for job_name, step_name in (("build-dfroot", VERIFY_DEBUG_PINS_STEP),
+                                    ("build-release", VERIFY_RELEASE_PINS_STEP)):
+            with self.subTest(job=job_name):
+                step = named_step(self.jobs[job_name], step_name)
+                self.assertEqual(run_script(step), VERIFY_PINS_RUN_SCRIPTS[step_name])
+                self.assertIsNone(step_property(step, "if"))
+                self.assertIsNone(step_property(step, "continue-on-error"))
+                task = (":app:verifyDebugPackagedLoaderPins" if job_name == "build-dfroot"
+                        else ":app:verifyReleasePackagedLoaderPins")
+                active = active_script_lines(run_script(step))
+                self.assertTrue(any(line.startswith("./gradlew ") and task in line for line in active))
+        # No event-name guard remains: no `if:`/`continue-on-error` attribute,
+        # and no shell conditional keyed on the trigger inside the script.
+        self.assertNotIn("github.event_name", run_script(verify))
+        job_steps = steps(job)
+        counter = named_step(job, APK_COUNTER_COMMAND)
+        upload = action_steps(job, "actions/upload-artifact")
+        self.assertEqual(len(upload), 1)
+        self.assertLess(job_steps.index(verify), job_steps.index(counter))
+        self.assertLess(job_steps.index(counter), job_steps.index(upload[0]))
+        # The job-level tag gate is unchanged: it excludes only signed tag
+        # pushes, which are handled by the separate signed-release job.
+        self.assertEqual(
+            property_value(job, "if", 4),
+            "${{ !(" + TAG_PUSH + ") }}",
+        )
+
+    def test_ci_upload_path_allowlist_is_unchanged(self) -> None:
+        """CI upload stays an evidence-only GPLv3 licence/notices bundle: no APK."""
+        expected = (
+            "GPL-3.0.txt\n"
+            "LICENSE\n"
+            "NOTICE\n"
+            "THIRD_PARTY_NOTICES.md"
+        )
+        self.assertEqual(CI_EVIDENCE_UPLOAD_PATH, expected)
+        self.assertEqual(tuple(CI_EVIDENCE_UPLOAD_PATH.splitlines()), LICENSE_ASSETS)
+        self.assertEqual(len(CI_EVIDENCE_UPLOAD_PATH.splitlines()), len(LICENSE_ASSETS))
+        for entry in CI_EVIDENCE_UPLOAD_PATH.splitlines():
+            self.assertNotIn(".apk", entry.lower())
+            self.assertNotIn("app/build/outputs", entry)
+        upload = action_steps(self.jobs["build-dfroot"], "actions/upload-artifact")
+        self.assertEqual(len(upload), 1)
+        self.assertEqual(mapping(upload[0], "with", 8).get("path"), expected)
+        assert_exact_artifact_inputs(self.raw)
 
     def test_release_checks_ancestry_before_referencing_any_signing_secret(self) -> None:
         self.assertIn("# Fail before any signing secret is referenced.", self.raw)
@@ -2808,8 +2965,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(len(action_steps(job, "actions/setup-java")), 1)
         self.assertEqual(len(action_steps(job, "gradle/actions/setup-gradle")), 1)
         builds = [run_script(step) for step in steps(job) if "./gradlew" in run_script(step)]
-        self.assertEqual(len(builds), 1)
-        self.assertIn(":app:assembleRelease", builds[0])
+        # PR #2's release pin gate runs before the signed build on this path.
+        self.assertEqual(len(builds), 2)
+        self.assertTrue(any(":app:assembleRelease" in b for b in builds))
+        self.assertTrue(any(":app:verifyReleasePackagedLoaderPins" in b for b in builds))
         assert_exact_command_lines(self.raw)
         verify = run_script(named_step(job, "Verify signed release APK"))
         self.assertIn("apks=(app/build/outputs/apk/release/DFRoot_*.apk)", verify)
@@ -2881,7 +3040,7 @@ class WorkflowPolicyTests(unittest.TestCase):
 
     def test_every_upload_fails_closed_and_names_are_exact(self) -> None:
         uploads = [step for job in self.jobs.values() for step in action_steps(job, "actions/upload-artifact")]
-        self.assertEqual(len(uploads), 4)
+        self.assertEqual(len(uploads), 5)
         self.assertEqual(
             sorted(mapping(upload, "with", 8).get("name") for upload in uploads),
             sorted(name for names in UPLOAD_ARTIFACT_NAMES.values() for name in names),
@@ -3060,6 +3219,68 @@ class MutationDetectionTests(unittest.TestCase):
             assert_required_steps_unskippable(mutated)
         with self.assertRaises(AssertionError):
             validate_workflow(mutated)
+
+    def test_ci_pin_gate_weakening_mutations_are_rejected(self) -> None:
+        for step_name, script in VERIFY_PINS_RUN_SCRIPTS.items():
+            original = "".join("          " + line + "\n" for line in script.splitlines())
+            cases = {
+                "event-name guard reinstated": (
+                    original,
+                    "          if [ \"${{ github.event_name }}\" = \"pull_request\" ]; then\n"
+                    + original
+                    + "          fi\n",
+                ),
+                "pin task replaced by build": (
+                    original,
+                    original.replace("verifyDebugPackagedLoaderPins", "assembleDebug")
+                              .replace("verifyReleasePackagedLoaderPins", "assembleRelease"),
+                ),
+                "tolerated failure": (original, original.rstrip("\n") + " || true\n"),
+                "no-op replacement": (original, "          true\n"),
+            }
+            for label, (old, new) in cases.items():
+                with self.subTest(step=step_name, mutation=label):
+                    mutated = self.mutate(old, new)
+                    with self.assertRaisesRegex(AssertionError, "run script must be exactly"):
+                        assert_exact_loader_pin_run_scripts(mutated)
+                    with self.assertRaises(AssertionError):
+                        validate_workflow(mutated)
+
+    def test_ci_pin_gate_cannot_be_skipped_or_tolerated(self) -> None:
+        for step_name in (VERIFY_DEBUG_PINS_STEP, VERIFY_RELEASE_PINS_STEP):
+            anchor = "      - name: " + step_name + "\n"
+            cases = {
+                "if: false": "        if: false\n",
+                "if: PR only": "        if: ${{ github.event_name == 'pull_request' }}\n",
+                "continue-on-error": "        continue-on-error: true\n",
+            }
+            for label, injected in cases.items():
+                with self.subTest(step=step_name, mutation=label):
+                    mutated = self.mutate(anchor, anchor + injected)
+                    with self.assertRaisesRegex(AssertionError, "must not be skippable or tolerated"):
+                        assert_exact_loader_pin_run_scripts(mutated)
+                    with self.assertRaises(AssertionError):
+                        assert_required_steps_unskippable(mutated)
+                    with self.assertRaises(AssertionError):
+                        validate_workflow(mutated)
+
+    def test_ci_upload_path_allowlist_expansion_and_removal_are_rejected(self) -> None:
+        # The CI evidence upload is APK-free; the anchor is its first licence
+        # asset, not a stale build-output APK path.
+        evidence_entry = "            " + CI_EVIDENCE_UPLOAD_PATH.splitlines()[0] + "\n"
+        extra = self.mutate(
+            evidence_entry,
+            evidence_entry + "            app/build/outputs/apk/debug/Extra_*.apk\n",
+        )
+        with self.assertRaisesRegex(AssertionError, "upload path must be exactly"):
+            assert_exact_artifact_inputs(extra)
+        with self.assertRaises(AssertionError):
+            validate_workflow(extra)
+        removed = self.mutate(evidence_entry, "")
+        with self.assertRaisesRegex(AssertionError, "upload path must be exactly"):
+            assert_exact_artifact_inputs(removed)
+        with self.assertRaises(AssertionError):
+            validate_workflow(removed)
 
     def test_apksigner_noop_mutation_is_detected(self) -> None:
         mutated = self.mutate(
@@ -3402,7 +3623,7 @@ class MutationDetectionTests(unittest.TestCase):
 
     def test_junit_count_weakening_is_rejected(self) -> None:
         for old, new in (
-            ("if tests != 39 or", "if tests != 35 or"),
+            ("if tests != 819 or", "if tests != 815 or"),
             ("failures != 0 or errors != 0 or skipped != 0:", "failures != 0:"),
             ("if not files:", "if False:"),
         ):
@@ -3600,25 +3821,33 @@ class MutationDetectionTests(unittest.TestCase):
 
     def test_loader_keep_debug_symbols_reverts_are_rejected(self) -> None:
         gradle = (ROOT / "app" / "build.gradle.kts").read_text(encoding="utf-8")
-        for fragment in LOADER_KEEP_DEBUG_SYMBOLS_FRAGMENTS:
-            with self.subTest(mutation=f"drop {fragment}"):
-                mutated = gradle.replace(fragment, "", 1)
+        line = LOADER_KEEP_DEBUG_SYMBOLS_LINE
+        self.assertIn(line, gradle)
+        # The whole keepDebugSymbols entry may not be dropped or commented out.
+        for label, mutated in (
+            ("drop exemption entry", gradle.replace(line, "", 1)),
+            ("comment out exemption entry", gradle.replace(line, f"// {line}", 1)),
+        ):
+            with self.subTest(mutation=label):
                 self.assertNotEqual(mutated, gradle)
                 with self.assertRaisesRegex(AssertionError, "exactly one"):
                     assert_loader_keep_debug_symbols(mutated)
-            with self.subTest(mutation=f"comment out {fragment}"):
-                commented = gradle.replace(fragment, f"// {fragment}", 1)
-                self.assertNotEqual(commented, gradle)
-                with self.assertRaisesRegex(AssertionError, "exactly one"):
-                    assert_loader_keep_debug_symbols(commented)
-        typo = gradle.replace(
-            'keepDebugSymbols += "**/libksudnext.so"',
-            'keepDebugSymbols += "**/libksudnextt.so"',
-            1,
-        )
-        self.assertNotEqual(typo, gradle)
-        with self.assertRaisesRegex(AssertionError, "exactly one"):
-            assert_loader_keep_debug_symbols(typo)
+        # Each loader glob must independently survive inside the single entry.
+        for glob in LOADER_KEEP_DEBUG_SYMBOLS_GLOBS:
+            token = f'"{glob}"'
+            self.assertEqual(gradle.count(token), 1)
+            loader = glob.rsplit("/", 1)[-1]
+            typo_glob = glob.replace(loader, loader.replace(".so", "t.so"))
+            for label, old, new in (
+                ("drop", token, ""),
+                ("comment out", token, f'"// {glob}"'),
+                ("typo", token, f'"{typo_glob}"'),
+            ):
+                with self.subTest(mutation=f"{label} {loader}"):
+                    mutated = gradle.replace(old, new, 1)
+                    self.assertNotEqual(mutated, gradle)
+                    with self.assertRaisesRegex(AssertionError, "exactly one"):
+                        assert_loader_keep_debug_symbols(mutated)
 
     def test_comment_stripping_is_block_scalar_aware(self) -> None:
         sample = (
@@ -3658,6 +3887,8 @@ class BehavioralScriptTests(unittest.TestCase):
         cls.publisher_script = run_script(named_step(jobs["publish"], "Verify release checksum"))
         cls.verify_script = run_script(named_step(jobs["build-release"], "Verify signed release APK"))
         cls.counter_script = run_script(named_step(jobs["build-dfroot"], APK_COUNTER_COMMAND))
+        cls.debug_gate_script = run_script(named_step(jobs["build-dfroot"], VERIFY_DEBUG_PINS_STEP))
+        cls.release_gate_script = run_script(named_step(jobs["build-release"], VERIFY_RELEASE_PINS_STEP))
         cls.all_markers_script = run_script(named_step(jobs[HOST_GATES_JOB], ALL_MARKERS_STEP))
         cls.junit_script = run_script(named_step(jobs[HOST_GATES_JOB], JUNIT_STEP))
         cls.cache_assert_script = run_script(named_step(jobs["build-release"], CI_CACHE_ASSERT_STEP))
@@ -3866,6 +4097,22 @@ class BehavioralScriptTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("apksigner was not found", result.stderr)
 
+    def test_ci_pin_gates_fail_closed_before_a_follow_on_upload(self) -> None:
+        """PR #2: a failing pin check must stop before any follow-on command.
+
+        Harmless stub `./gradlew` only; no Gradle, APK, device or NDK involved.
+        """
+        for label, script in (("debug", self.debug_gate_script),
+                              ("release", self.release_gate_script)):
+            with self.subTest(variant=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stub = root / "gradlew"
+                stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+                stub.chmod(0o755)
+                result = run_in_dir(script + "\necho UPLOAD_WOULD_RUN\n", root)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("UPLOAD_WOULD_RUN", result.stdout)
+
     def test_preupload_apk_counter_requires_exactly_one_debug_apk(self) -> None:
         with self.subTest(fixture="one debug"), tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3922,7 +4169,7 @@ class BehavioralScriptTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f"Test suite marker missing: {HOST_SUITE_MARKERS[0]}", result.stdout + result.stderr)
 
-    def test_junit_xml_gate_accepts_only_39_clean_tests(self) -> None:
+    def test_junit_xml_gate_accepts_only_819_clean_tests(self) -> None:
         def write_report(root: Path, tests: int, failures: int = 0, errors: int = 0, skipped: int = 0) -> None:
             report = root / "app/build/test-results/testDebugUnitTest/TEST-Preferences.xml"
             report.parent.mkdir(parents=True, exist_ok=True)
@@ -3933,11 +4180,11 @@ class BehavioralScriptTests(unittest.TestCase):
             )
 
         cases = (
-            ("39 clean", (39, 0, 0, 0), True, ""),
-            ("35 tests", (35, 0, 0, 0), False, "JUnit XML assertion failed"),
-            ("one failure", (39, 1, 0, 0), False, "JUnit XML assertion failed"),
-            ("one error", (39, 0, 1, 0), False, "JUnit XML assertion failed"),
-            ("one skip", (39, 0, 0, 1), False, "JUnit XML assertion failed"),
+            ("819 clean", (819, 0, 0, 0), True, ""),
+            ("815 tests", (815, 0, 0, 0), False, "JUnit XML assertion failed"),
+            ("one failure", (819, 1, 0, 0), False, "JUnit XML assertion failed"),
+            ("one error", (819, 0, 1, 0), False, "JUnit XML assertion failed"),
+            ("one skip", (819, 0, 0, 1), False, "JUnit XML assertion failed"),
         )
         for label, counts, passes, message in cases:
             with self.subTest(fixture=label), tempfile.TemporaryDirectory() as tmp:
@@ -3948,7 +4195,7 @@ class BehavioralScriptTests(unittest.TestCase):
                 result = run_in_dir(self.junit_script, root, {"RUNNER_TEMP": str(runner_temp)})
                 if passes:
                     self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                    self.assertIn("TOTAL tests=39 failures=0 errors=0 skipped=0", result.stdout)
+                    self.assertIn("TOTAL tests=819 failures=0 errors=0 skipped=0", result.stdout)
                     self.assertTrue((runner_temp / "marker-junit").is_file())
                 else:
                     self.assertNotEqual(result.returncode, 0)

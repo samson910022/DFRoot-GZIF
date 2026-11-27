@@ -1,5 +1,85 @@
 # Changelog — DFRoot GZIF
 
+## R9 (2026-11-27) — R2-14 honest fail-closed policy for ambiguous outcomes — SCOPED / OPEN
+
+The two residual items handled in R9 (unattended Start at Boot and experimental
+soft reboot, both made unavailable in production) are recorded in
+[issue #6](https://github.com/samson910022/DFRoot-GZIF/issues/6) with explicit
+owner acceptance. That issue does not close, weaken or reclassify R2-14, R2-16
+or R2-18.
+
+**Finite policy.** An unconfirmed completion is never a confirmed outcome. Native
+rc=7, unrecognized exits, engine exceptions, supervision timeout/interruption and
+absent/evicted ledger observations resolve only to INDETERMINATE / UNCONFIRMED.
+From that state there is no success claim (no success toast, no terminal-success
+line, no fabricated rejection), no replay, retry or next potentially unsafe
+action; run/manager controls stay disabled and the owner token, resource lease,
+configuration freeze and durable attempt barrier are retained. Only an explicit,
+checked recovery by a trusted caller outside the UI may release them; no UI,
+service or timer does so automatically.
+
+**Evidence scope.** Harmless host-only mocked outcome/failure stand-ins now pin
+this at the coordinator→result→UI boundary in addition to the existing mapper,
+coordinator and ledger tests. No device/ADB/payload/privileged-container/APK
+work; the privileged mechanism is neither improved nor exercised. **R2-14 remains
+SCOPED / OPEN — not closed, not proved safe on device, no merge or release
+approval, and no reviewer approval claimed.** The master PR #3 ledger below is
+preserved verbatim.
+
+**Native wiring-check correction (test-only).** Under the owner's protocol
+decision, master's `status_protocol.c`/`bootstrap_stage.c` is the SINGLE
+protocol and PR #2's `run_status.c`/`loader_stage.c` are intentionally not
+linked into either production binary (`app/src/main/jni/CMakeLists.txt`). Ten
+CTest cases (eight `run_status.*`, two `loader_stage.*`) asserted PR #2
+function names in production sources and failed as obsolete "native source
+wiring missing" checks (CI App checks run 45900509964). All ten case names and
+registrations are kept: every source-wiring assertion was re-pointed to the
+equivalent master-protocol wiring in `status_protocol.c`, `bootstrap.c`,
+`bootstrap_stage.c` and `exp.c` — `producer_decide_and_publish`,
+`status_flow_run`, `publish_or_none`, `REBOOT_ATTEMPT_UNKNOWN` /
+`DF_RC_ATTEMPT_UNKNOWN`, tri-state `io_late_load_state`, checked/clamped
+deadlines, reserved-nonce bootfail with unbound cleanup, and fd-anchored
+`df_stage_file` install / `status_cleanup_cb` restore. No case was removed, no
+CTest registration or timeout changed, no `if:`/skip added, and no assertion
+weakened to a trivially true check; the pure host-protocol/helper checks in
+these cases are untouched. The host-native CTest subset is 142/142 green.
+Production protocol behavior is unchanged; this is not device-safety or
+reviewer-approval evidence.
+
+### R2-18 bounded ordinary app lifecycle (R9.4) — SCOPED / OPEN
+
+**Finite requirement.** On the main-thread start path, when a foreground flush
+holds the guard, the whole start handling is posted as ONE task to the owned
+express worker and `onStartCommand` returns `START_NOT_STICKY` without entering
+`startsLock` or waiting on a platform call. Attach/flush platform calls run on
+owned workers; a main-thread flush contender never waits and queues one bounded
+host re-decision, while an off-main loser waits only to a finite 200 ms monotonic
+deadline and then defers. Under a simulated slow call the offloaded caller
+returns within a finite 1 s bounded wait and the owned worker drains within the
+5 s `TEST_TIMEOUT_MS`; under a simulated throwing attach the only effects are one
+correlated REJECTED and one lifetime retirement. In every case: one admission decision, at most one WakeLock lease, no
+second start/engine run, no new barrier, no manager-config freeze, no duplicate
+stopForeground, no unbounded caller-side wait. This is a bounded host-scope
+contract, **not** an absolute no-ANR-on-every-device claim, not a foreground-
+service-grace proof and not device safety.
+
+**Evidence scope.** Host-only fixtures reuse the existing attach/flush gates
+and executor seams to pin bounded offload under a slow attach (with the
+single-flight gate rejecting the duplicate), fail-closed handling of a throwing
+`startForeground`, and retirement of every immutable-snapshot start ID when
+`stopForeground` throws. The offloaded caller is asserted with a 1 s bounded
+`Future.get`; owned-worker drain uses the 5 s `TEST_TIMEOUT_MS`. R9.4 makes ONE
+narrow production change: the guarded `stopForeground` call is wrapped in a
+`RuntimeException` catch with one honest `Log.w` so the immutable `stopSelf`
+loop always runs and no start ID is stranded; a host-only, null-in-production
+`stopForegroundFailureForTesting` seam injects the failure and is reset in the
+service lifetime paths. All three fixtures assert no second effect and graceful
+owned-worker shutdown. R6.4 deadlines/constants and the R7.3 `startsLock`
+contention residual are unchanged. No device/ADB/payload/privileged work.
+**R2-18 stays SCOPED / OPEN — not closed, not device-proved, no merge/release or
+reviewer approval claimed.** Device-specific behavior remains an explicit release
+gate if the feature is distributed.
+
 ## Round 13 / P2-17 (2026-11-27) — final-status observability moved to Android property `dfroot.final` (device retest passed for the final-status-observability scope only)
 
 **Head model.** This section is authoritative for the **committed literal head `e823fb4`** on `fix/native-exploit-robustness` — commit `fix(native): publish final status via app-readable property`, which landed the D2 native property channel **and the round-13 documentation in ONE commit**. Its immediate parent is `d39a278` (historical); the earlier device retest recorded below was run on the **pre-commit working tree on `d39a278`**. PR #3 base is `9f60e16251f5856ee1ae720eaea84b41d7992920` and the CI merge SHA for the exact-head run is `69054f5be1a278d88c19164444a7590e3c5bc2c0`. The round-12 documentation head is `39a376f`; earlier code heads are `376f5e2` (P2-16), `7e18b13` (P2-15), `0ea022f` (Phase B / P2-14) and `36a11bc` (round-8 reviewed). `0f9bf69` is a reverted historical attempt (below); `d39a278` is its revert. All earlier sections are historical; round-10 totals (0 new / 0 P2 / 3 P1) and the round-11/round-12 totals are **not retroactively changed**. **Independent-review accounting (R11, comment 7126155178): 29 IDs, 23 closed, 4 open (3 P1 + 1 P2) and 2 author-reported addressed / pending independent validation.** The author changelog rounds 11–13 are **not** independent review rounds R1–R11; P2-15, P2-16 and P2-17 are **author-reported, not discovered by R10**, and remain pending independent validation.
@@ -30,7 +110,7 @@ Decisive lines:
 - `root-probes8b.txt`: `prop=[dfroot-v2:3fec15b2d9ad766ff5173d857f75bc38:root_only]`, `3.4.2:KernelSU`, `uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0`, `selinux=Enforcing`.
 - `app-result8b.txt`: all four restores `restore OK (verified)` — both `libbase.so` writes, `/vendor/lib64/AIAwbModel_v2.2.tflite` and `/apex/com.android.runtime/bin/crash_dump64` — with the helper patch re-established (verified) at cleanup, and **no recovery-failed bit (64)**. The P2-16 restore scope is therefore still green on this retest.
 
-`post-reboot8.txt` records `adb: device 'R5CW21C8PLR' not found` after reboot: the S23 did **not** reconnect for a post-reboot state probe, so no post-reboot absence or cleanliness claim is made for this run.
+`post-reboot8.txt` records `adb: device <device serial redacted> not found` after reboot: the S23 did **not** reconnect for a post-reboot state probe, so no post-reboot absence or cleanliness claim is made for this run.
 
 ### Counts, scopes and disposition
 
@@ -594,6 +674,101 @@ build is not a safety certificate.
 > documentation commit and the current validation boundary (round 8 for the
 > Phase B code head `0ea022f`).
 
+
+---
+
+### Integration note
+
+The PR #3 ledger above is authoritative for native status protocol, staging,
+signing and release policy. The section below preserves PR #2 / R8 supporting
+device evidence only; it does **not** close any gate, approve any head, or
+claim device safety. All R2-14/R2-16/R2-18 and experimental-reboot limitations
+remain OPEN with an owner and release hold.
+
+## PR #2 / R8 supporting evidence (integration addendum — NOT a new gate closure)
+
+Authoritative record of the **eighth documentation round** (R8) on PR #2 /
+branch `fix/app-correctness-safety`, started from reviewed head `be9201c` — the
+identical head confirmed in Re-review 8. R8 changes **no production code** and
+**closes no gate**. The R8.2 README phase is already committed as `fde6b73`.
+The PR-description correction (the stale "base CI fails without
+signing.properties" statement) was applied GitHub-side only: no code, no head
+change, no git commit. The R8.3 CHANGELOG phase is committed as `4002b39` and
+the R8.4 tasks plan/todo phase as `55f2c62`; the final consolidation commit
+(`chore: close the eighth documentation round`) closes the round. The R8.1
+GitHub-side edit was verified with `isDraft=true`, `state=OPEN` and
+`headRefOid=be9201c55d42c38e8e6d98a3eb640dd6cd153598`.
+
+Disposition table — unchanged from Re-review 8 (no new evidence changed any
+disposition, no new finding IDs assigned):
+
+| Item | Disposition |
+|---|---|
+| 19 of 24 findings | Addressed in reviewed scope; unchanged. |
+| R2-14 | **SCOPED / OPEN** publication/acknowledgement gate — not closed, not proved safe. |
+| R2-16 | **SCOPED / OPEN** authorization (non-atomic OFF) gate — not closed, not proved safe. |
+| R2-18 | **SCOPED / OPEN** (P2) main-thread/foreground-service timing gate — not closed, not proved safe. |
+| R2-02, R2-07 | **Linked only** to the owning R2-16 authorization and R2-14 publication gates; not independent closed issues. |
+| R2-17, R2-24 | Closed **only in the previously reviewed scope**; no new claim here. |
+| Verdict | Unchanged **REQUEST CHANGES / keep draft**. |
+
+Device / build identity and authorization scope: S23 Ultra [device model/codename redacted],
+build [device-specific build identifier redacted], Android 17 (SPL 2026-10-05), bootloader
+locked with `ro.boot.verifiedbootstate=green`, installed `df.root` 4.8-gzif /
+versionCode 408 matching repo head `be9201c`. The owner explicitly authorized
+**FULL device testing including soft-reboot / crash in R8 only**, overriding the
+earlier no-device constraint. All operations targeted the single S23 device (serial redacted). No payload
+rebuild, no APK assembly, no privileged container, no PCK/guard change; the
+installed APK was unchanged throughout.
+
+Five-stage device evidence — **SUPPORTING ONLY**; each item states its
+non-claim explicitly:
+
+- **(a) Baseline (happy path) — SUPPORTING ONLY:** full exploit chain observed,
+  root verified (`su -c id` → uid=0, `su -v` → 3.4.2:KernelSU), `final: ROOT_ONLY
+  - no reboot requested; root not verified`, `status: final status observed
+  (rc=0)`. **Non-claim:** this is not device safety and does not validate any
+  gate.
+- **(b) R2-14 abnormal force-stop — SUPPORTING ONLY:** `am force-stop df.root`
+  mid-patching produced `WINDOW DIED`, kernel-side root survived, and the
+  relaunched app showed an empty output view with `enabled=false` — no
+  fabricated success or completion claim. **Non-claim:** the precise
+  rc7-publish↔ack publication race was not instrumented or proved; R2-14 stays
+  OPEN.
+- **(c) R2-16 OFF authorization — SUPPORTING ONLY:** disabling
+  `com.rifsxd.ksunext` immediately disabled `LAUNCH ROOT`, and `Start at Boot`
+  / `Start at Boot status` read `Status unavailable - not confirmed disabled`
+  (fail-closed on an unreadable authorization read). **Non-claim:** the precise
+  non-atomic OFF transition during the final authorization read was **not hit**;
+  R2-16 stays OPEN.
+- **(d) R2-18 duplicate / contention — SUPPORTING ONLY:** three rapid taps
+  produced `hook armed` count **1** (one admitted run; duplicates rejected),
+  device responsive, `sys.boot_completed=1`, no FATAL/ANR.
+  **Non-claim:** no ANR-proof and no foreground-service-grace proof; main-thread
+  wait time and FGS deadline were not measured. R2-18 stays OPEN.
+- **(e) Soft-reboot (highest risk, last) — SUPPORTING ONLY:** with
+  `Auto Soft Reboot` enabled, native log showed `REBOOT_PENDING` then
+  `REBOOT_SKIPPED - soft reboot not attempted (late-load not confirmed absent)`,
+  `status: final status observed (rc=5)`; a 70 s uptime monitor increased
+  168→234 s without reset — no soft or hard reboot occurred. **Non-claim:** this
+  single observed run is not exhaustive proof over every interleaving and does
+  **not** remove the experimental soft-reboot risk.
+- **Volatile-root reboot observation — SUPPORTING ONLY:** after the Stage 2
+  force-stop, `adb reboot` returned the device healthy with `su` and `/dev/df`
+  absent, confirming the volatile-root contract and that a reboot clears any
+  page-cache residue from the interrupted run. **Non-claim:** not a closure of
+  R2-14 and not a claim about the un-instrumented publication window.
+
+Evidence framing: Re-review 8 is a **status recheck of the identical
+`be9201c`**, not a fresh line-by-line review, not new verification, and not a
+newly executed test suite. CI run `45787525701` is the previously reviewed,
+host-only run and is **not device evidence**. Nothing here establishes device
+safety, merge approval or release approval; the reviewer's instruction is not
+to expand the implementation merely to generate more review iterations.
+
+Keep PR #2 draft/open; R8 changes no production code and closes no gate.
+
+
 Hardening pass over the build, signing and release pipeline; no change to the
 exploit chain or to the GZIF validation claims. Documentation was brought in
 line with the shipped configuration (Gradle wrapper **9.9.2** with a pinned
@@ -1093,6 +1268,270 @@ Residual risks / **release gates** (not closed by this PR):
   (`/proc/<pid>/cmdline` exposure). Both in-process copies are wiped on all
   paths, but fully removing this residual needs a Java→native fd/pipe contract
   change; the CLI format is preserved to avoid a cross-branch conflict.
+
+## 2026-11-25 — Re-review 3.6 fix (R2-19 recovery truth; R2-04 wording; later committed as `1252b3d`)
+
+Historical phase note on `fix/app-correctness-safety` (HEAD `d32006e`), later
+committed as `1252b3d`. Scope: **R2-19** (recovery truth) and the remaining
+**R2-04** caveat (ambiguous `SUCCESS` final-result wording). No payload,
+device/adb, privileged container, APK assembly, dependency, native code, boot
+gate, attempt-store format, UI threading or CI change.
+
+- **R2-19 — recovery is narrow, evidence-based and trusted-caller-only.** There
+  is still no blind retry, no UI/intent/broadcast path and no barrier clear based
+  on ID/state/acknowledgement alone. `recoverIndeterminate(operationId)` now
+  refuses while supervised work may still be running: `engineStarted` is set
+  immediately before `engine.run()`, and `engineFinished` is set only in a
+  `finally` after that call returns (or throws). A supervisor
+  timeout/interruption publishes INDETERMINATE without setting that flag, so a
+  correct-ID caller is refused until the engine call actually returns; a proven
+  pre-effect rejection (engine never started) remains recoverable. Exact ID,
+  single-claim, and checked compare-and-clear still apply, cleanup remains
+  exactly once, and the checked clear precedes every release. Deterministic
+  tests cover blocked-engine refusal, post-return success, failed persistence,
+  and two concurrent correct-ID callers (exactly one wins).
+- **R2-19 — persisted recovery is post-process-death only.** The acknowledged
+  `recoverPersistedAttempt` API clears only an unconfirmed record loaded at
+  initialization, never one published by the current process. It cannot prove
+  external effects stopped and is a trusted-caller escape hatch, **not** an
+  owner feature. There is **NO in-app recovery UI**: an ordinary user with an
+  unconfirmed persisted attempt is intentionally locked out until a trusted
+  caller clears the barrier. Resetting app data only discards the barrier and is
+  NOT evidence that privileged effects stopped — not safe recovery. A new boot
+  count is diagnostic only, not proof of safety. Mock tests cover with/without acknowledgement and
+  failed persistence, plus same-process refusal.
+- **R2-04 caveat — honest final-result wording.** Generic success is now
+  `DFRoot: run completed — verify root status yourself`; already-hooked is
+  `DFRoot: already attempted/hooked; root status unverified`. The bare `SUCCESS`
+  claim is gone from final-result user messages. Typed result codes/types, the
+  already-hooked SUCCESS code, the no-reentry guard, `/dev/df` and `/dev/dfm6`
+  progress strings, and the no-root-probe policy are strictly unchanged.
+
+Fresh local verification at that time (historical prior-round baseline):
+**554 JVM unit tests across 45 suites** (`:app:testDebugUnitTest`,
+0 failures/errors/skips), `:app:lintDebug` **0 errors / 15 warnings**, host CTest
+recorded then at **135/135** (superseded by the consolidated R3 section above:
+**137/137**, then R4.3: **140/140**), and `git diff --check` clean. No
+hardware/device/ADB/payload/privileged-container/APK-assembly validation was
+performed; CI remains a POST-PUSH gate. This phase was later committed as
+`1252b3d`.
+
+## 2026-11-25 — Re-review 2 fix (R2-14 post-link observation window; historical, superseded by R4.3 `916a18e`)
+
+**Historical within this branch:** this round only documented the post-link
+window; the R4.3 section at the top of this changelog supersedes it with a code
+fix (matching confirmation required before any definitive result).
+
+Historical phase on `fix/app-correctness-safety` (then HEAD `2a74dd0`), later
+superseded in code by R4.3 (`916a18e`). Scope: **R2-14 only** — the post-link observation
+window. No payload, device/adb, privileged-container, APK assembly, dependency,
+attempt-store, Java, boot or UI changes; JVM tests are untouched. The temp
+write / fsync / close / `link()` publication protocol and atomic conflict
+detection are unchanged, and the safety policy (rc=7 precedence, indeterminate
+ownership) is not weakened.
+
+- **Aligned guarantee (was stronger than provable).** A **pre-link** failure
+  leaves no final marker and no debris; once the rc=7 channel is published it
+  **outranks** success and conflicts in the classifier. But `link()` makes the
+  complete final pathname visible before temp unlink and directory fsync can
+  succeed, so an external reader polling in the brief post-link/pre-rc7 window
+  can observe the intended marker as a confirmed terminal verdict, and that
+  observation cannot be retroactively revoked by the later rc=7 publication and
+  retraction. The app therefore does **not** claim that a failed publication is
+  never observable as confirmed; it claims only that any result it acts on
+  **after publication completes** is indeterminate (writer rc=7, reader rc=7).
+  Stated in `run_status.h`, `README.md`, `PORTING-GZIF.md` and this changelog.
+- **Host-only hook.** `run_status_set_post_link_pause(wait_fd, notify_fd)` under
+  `RUN_STATUS_TEST_HOOKS` gates the writer immediately after `link()` succeeds
+  and before temp unlink, directory fsync and failure detection — the earliest
+  instant the final path is observable. All seam state is compiled out of the
+  production `dfroot`/`bootstrap`/`exp` binaries.
+- **Deterministic reader test.** New `run_status.post_link_early_observation`
+  case proves (over explicit pipe handshakes, with no sleeps or allocation luck)
+  that a concurrent reader classifies the visible intended rc0 marker as a
+  confirmed verdict in the early window; then a one-shot temp-unlink failure is
+  injected, rc7 publication is observed before retraction while rc7 outranks
+  rc0, the reader sees rc7 only afterwards, the writer exits rc7, no temp debris
+  remains, and the first unlink diagnostic survives. The existing
+  `post_link_gated_reader` coexistence test and every prior assertion/test are
+  retained unchanged. Fresh CTest count: **137/137** (136 + 1).
+
+## 2026-11-25 — Re-review 1 repair (R2-10..R2-16; locally committed, not pushed)
+
+Second 2026-11-25 repair round on `fix/app-correctness-safety`, commits
+`6686973` → `a8003c2` (HEAD `a8003c2`), on top of the first repair round
+recorded below. `versionCode`/`versionName` remain 408 / `4.8-gzif`. No runtime
+payload, firmware target, bundled binary, dependency, or SUCCESS/root-probe
+policy was widened. The tracking-comment IDs below are mapped by subject area to
+the repair commits (the authoritative finding text lives on the GitHub PR).
+
+| Finding | Subject closed by this round | Commit |
+|---|---|---|
+| R2-10 | packaged loader pin gate broken / no negative fixture | `6686973` |
+| R2-11 | staged-entry cleanup identity and exec pin | `639a9d8` |
+| R2-14 | atomic terminal publication and indeterminate channel | `12a633b` |
+| R2-12 | indeterminate completion must keep ownership (partial R2-03) | `ce781f8` |
+| R2-13 | unconfirmed attempt not durable across process death (partial R2-02) | `7b5397c` |
+| R2-15 | pre-admission uncertainty + independently disableable Start at Boot (partial R2-07/09) | `7c1f39a`, `54cb000` |
+| R2-16 | already-hooked wording and availability honesty (partial R2-04) | `a8003c2` |
+
+Phase-by-phase (each phase is one commit, with the **exact locally recorded
+counts** at that point — these are intermediate, not final totals):
+
+- **Re-review Phase 1 — Gradle pin gate (`6686973`, R2-10).** Moved pin
+  verification out of the build script into Gradle-supported `buildSrc` tasks
+  (`LoaderPinVerifier`, `VerifyPackagedLoaderPinsTask`,
+  `VerifyLoaderPinFixturesTask`), fixing the non-static-inner-class failure that
+  broke `:app:tasks --all`. Strict two-pin, one-APK, packaged-entry SHA-256
+  checks retained; deterministic clean/tampered synthetic ZIP fixtures guarded
+  the verifier itself; CI gained the `loader-pin-fixtures` job and a
+  `:app:tasks --all` regression step. Locally: `:app:tasks --all` resolves,
+  debug/release pin tasks configure, clean fixture passes and tampered fixture
+  is rejected. No full-suite count was recorded in this commit; a fresh GitHub
+  CI green run is a **POST-PUSH gate** that cannot be executed locally and is
+  **not** claimed here.
+- **Re-review Phase 2 — staging cleanup identity (`639a9d8`, R2-11).** Pinned
+  the created staged inode with a descriptor; `fstat`/`lstat` identity recheck
+  before unlink, conservative no-unlink of replacements, directory-mode restore
+  and diagnostic retained. Converted the `O_WRONLY` pin through
+  `/proc/self/fd/<n>` to an `O_RDONLY` pin before `install()` returns so the
+  loader can be exec'd without `ETXTBSY`; unavailable conversion fails closed.
+  Added exec/replacement/churn/unrelated-entry fixtures. **117/117 local CTest
+  cases and 115/115 CI-like cases**, 0 failures.
+- **Re-review Phase 3 — atomic terminal publication (`12a633b`, R2-14).** Full
+  payload written to an unpredictable same-directory temp (`O_EXCL|O_NOFOLLOW`,
+  EINTR-safe full write, fsync, fchmod 0644, checked close) then atomically
+  linked to the run-scoped final path, temp unlinked and directory fsynced; a
+  **pre-link** failure cannot leave a final marker (the post-link observation
+  window is scoped by the Re-review 2 fix above). Added writer rc=7
+  for unconfirmed publication and Java `NativeResultMapper` → `RESULT_INDETERMINATE`
+  only. Conflict detection, operation-ID binding, progress-only `/dev/dfm*`
+  markers, and soft-reboot rc=4/6 preserved. **123/123 host CTest cases** and
+  **26 `NativeResultMapperTest` cases**.
+- **Re-review Phase 4 — ownership when unconfirmed (`ce781f8`, R2-12; partial
+  R2-03).** Bounded late-load/soft-reboot waits without killing children or
+  lengthening deadlines; timeout or unobserved exit is rc=7. Reader deadline
+  expiry is rc=7 within the single shared late-load budget.
+  `RunCoordinator` retains lease, frozen configuration, and single-flight
+  rejection on indeterminate results and exits only via a single-claim explicit
+  recovery API. **131/131 CTest cases, 428 JVM tests, lint 0 errors.**
+- **Re-review Phase 5 — durable attempt barrier (`7b5397c`, R2-13; partial
+  R2-02).** New `OperationAttempt` / `OperationAttemptStore` /
+  `SharedPreferencesOperationAttemptStore` boundary persists an unconfirmed
+  attempt in device-protected storage before privileged work or `run_config`
+  publication; a new process rejects manual and boot requests fail-closed until
+  explicit recovery regardless of boot count, and boot claims are suppressed
+  while unconfirmed. Clearing is compare-and-clear by operation ID. **459 JVM
+  tests, 131 CTest cases, lint 0 errors.**
+- **Re-review Phase 6 — pre-admission uncertainty (`7c1f39a`, R2-15; partial
+  R2-07).** Pure reader decision helper plus narrowly scoped reserved-identity
+  diagnostic scan: a valid pre-admission rc=1 marker with no admitted terminal
+  marker yields rc=7 with an explicit "completion unverified" diagnostic;
+  admitted markers (rc=0 success included) remain authoritative and no stale or
+  foreign marker can become success. **135/135 CTest cases**; Java result
+  mapping and all prior SUCCESS/soft-reboot semantics unchanged.
+- **Re-review Phase 7 — independent Start-at-Boot OFF (`54cb000`, R2-15;
+  partial R2-09).** OFF is reachable from ERROR configuration and
+  active/indeterminate operations without disturbing the current operation;
+  ON keeps the verified-config, idle-coordinator, and consent gates. The
+  receiver component is re-checked at claim time (unreadable/default fails
+  closed), and component-setting failures surface in the UI. **471 JVM tests,
+  135 CTest cases, lint 0 errors.**
+- **Re-review Phase 8 — honest hook result and availability (`a8003c2`, R2-16;
+  partial R2-04; wording refined in R3.6 above).** Already-hooked success was
+  relabelled to drop its root-verification claim, with the SUCCESS code and
+  no-reentry guard preserved; a read-only availability diagnostic is
+  built from the same authoritative preflight plan in its own view and never
+  starts, stages, or substitutes anything. **484 JVM tests across 44 suites,
+  135 fresh host CTest cases, lint 0 errors (21 warnings).**
+
+Final local verification for this round: **484 JVM tests (44 suites), 135 host
+CTest cases**, lint **0 errors / 21 warnings**, `git diff --check` clean, loader
+SHA-256 pins match `app/build.gradle.kts` and `app/src/main/jniLibs`, zero
+secret-pattern hits (benign `printf '%s'` placeholder in `Makefile` only), and
+no generated/build/KO/secret files tracked. **No hardware, device, ADB, payload,
+privileged-container, cold-boot, soft-reboot, or APK-assembly validation was
+performed.** A fresh GitHub CI green run, including the negative pin fixture,
+is a **POST-PUSH gate** that cannot be executed locally and is **not** claimed
+here. Per-file dated notices were added only where missing; no existing notice
+was removed. The documentation/notices/hygiene-only changes of this historical
+phase were later committed as `01f120c` (docs: record the re-review repair round
+and release gates) and `13162d4` (chore: finalize R2 re-review repair round)
+(see R3 consolidated note).
+
+## 2026-11-25 — PR #2 correctness/safety repair, Phases 0–5 (locally committed, not yet pushed)
+
+Architecture repairs on top of `4.8-gzif`; `versionCode`/`versionName` are
+unchanged (408 / `4.8-gzif`). No runtime payload, firmware target, or SUCCESS
+product decision was widened. Summary by phase:
+
+- **Phase 0 — build/test foundation.** Release signing made optional (an absent
+  `signing.properties` yields an unsigned release that still configures; a
+  present but incomplete file fails clearly). Pinned JUnit/Robolectric test
+  dependencies and Android unit-test resources added. Independent CI app-checks
+  job runs unit tests and lint without secrets, a device, or the gitignored KO;
+  `--no-tests=error` prevents an empty suite from passing. `app/src/main/res/xml`
+  added to the Makefile APK inputs. Loader SHA-256 pins are owned once by Gradle.
+- **Phase 1 — side-effect-free preflight and result contract.** Canonical
+  `SuManager` allowlist (`me.weishu.kernelsu` → `libksud.so`,
+  `com.rifsxd.ksunext` → `libksudnext.so`) with per-manager pinned bundled
+  loaders and **no implicit fallback** to the manager APK. SHA-256 pin, regular
+  non-symlink, owner-user, log-buffer, and exact firmware/kernel gates all run
+  before staging, IpSec allocation, or process start. Typed `RunResult` mapping
+  with collision-free unknown handling; rc=1 is broad bootstrap failure; SUCCESS
+  keeps owner semantics but carries `LATE_LOAD_COMPLETED` internal detail. No
+  root probe was added.
+- **Phase 2 — durable configuration and soft-reboot consent.** Serialized
+  off-main-thread `ConfigurationRepository` with checked `commit()` and
+  saving/verified/error states; failed or unverified writes block run admission.
+  Immutable `RunConfig`; versioned soft-reboot acknowledgement with legacy
+  enabled → safe OFF migration and a durable modal; unattended boot soft reboot
+  remains disabled.
+- **Phase 3 — operation ownership.** Process-scoped single-flight `RunCoordinator`
+  rejects duplicates and freezes configuration; Direct Boot-aware `specialUse`
+  `ExploitService` owns process lifetime, notification, and a timed partial
+  WakeLock and returns `START_NOT_STICKY`. The Activity is detach-only on destroy;
+  a supervised child drains stdout asynchronously, uses a timed wait, and keeps
+  indeterminate outcomes owned until actual exit (no forced kill, no retry).
+  Manager/settings controls are locked while work is active.
+- **Phase 4 — native snapshot, completion, staging.** Java publishes an atomic,
+  versioned `run_config` artifact; native bootstrap parses only that
+  artifact. Run-scoped terminal markers (`rc=0` success, `rc=1` error,
+  `rc=4` soft-reboot success, `rc=6` soft-reboot failure) are written only after
+  bootstrap work completes; `/dev/dfm6` stays an owner-visible **progress**
+  diagnostic. Late-load wait is bounded (60 s; timeout → rc=1), soft-reboot
+  command wait is bounded (30 s; failure/timeout → rc=6). `/data/local/tmp/.ksud-stage`
+  staging uses sticky-bit protection, `O_EXCL|O_NOFOLLOW`, verified descriptor
+  copy/fsync/fchmod, and guaranteed directory-mode restoration.
+- **Phase 5 — boot integration.** `BootReceiver` validates the broadcast and
+  durably claims `Settings.Global.BOOT_COUNT` in device-protected storage before
+  starting the foreground service; locked/unlocked broadcasts coalesce, so at
+  most **one attempt per boot** and no silent replay after process death. Boot
+  soft reboot stays disabled; boot FGS eligibility is not hardware-validated.
+
+Files/areas changed: `app/src/main/java/df/root/*` (new coordinator, service,
+configuration repository/store, run-config artifact, preflight, result mapping,
+boot-claim path, narrow Java seams), `app/src/main/jni/*` (`run_config_codec`,
+`run_status`, `loader_stage`, `bootstrap.c`, `exp.c`, CMake wiring),
+`app/src/main/jni/host-tests/*`, `app/src/test/java/df/root/*`,
+`app/src/main/AndroidManifest.xml`, `app/src/main/res/{xml,values,drawable}/*`,
+`app/build.gradle.kts`, `.github/workflows/build.yml`, `Makefile`, and
+`tasks/{plan,todo}.md`. Every modified GPL-covered source file carries a dated
+per-file notice (`NOTICE`).
+
+Validation (2026-11-25, non-privileged host only): **409 JVM tests** (0
+failures/errors/skips), **113 host CTest** cases (0 failures; 111 base cases plus
+2 cleanup fixtures registered only when the mode probes fail and the fixture
+roots are relocated — 113 is the count in this environment), `lintDebug` **0
+errors** (21 warnings present before the Phase 6 docs-only edits, one a
+`PrivateApi` warning at `AndroidRunEnvironment.java:93` in a file added by PR #2
+— not all 21 predate PR #2), `git diff --check` clean, loader pins match
+the bundled binaries, zero secret-pattern hits, and no generated/build/KO files
+tracked. **No hardware, device, ADB, payload, privileged-container, cold-boot,
+soft-reboot, or APK-assembly validation was performed for this revision.** APK
+assembly still requires the gitignored `app/src/main/jni/ko/dfroot-android13-5.15.ko`
+(built via podman + DDK or fetched from CI). The 2026-11-17 device runs below are
+historical evidence only, not validation of this architecture.
 
 ## 4.8-gzif (2026-11-17)
 

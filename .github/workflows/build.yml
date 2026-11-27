@@ -1,3 +1,4 @@
+# Modified 2026-11-25 (DFRoot GZIF): gate nonprivileged host-native run-config tests in app-checks. See NOTICE.
 name: Build
 
 on:
@@ -59,6 +60,111 @@ jobs:
       - name: Run make contract tests
         run: |
           python3 -B tests/make/test_make.py
+
+  app-checks:
+    name: App checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      # Regression guard for the non-static-inner-task class failure that broke
+      # `:app:tasks --all`; this also resolves both debug and release pin tasks.
+      - name: Verify all app task definitions resolve
+        run: ./gradlew :app:tasks --all --no-daemon --console=plain
+
+      - name: Clean previous test and lint reports
+        run: rm -rf app/build/test-results app/build/reports
+
+      # Harmless host-only fixtures: no KO, NDK toolchain, privileged container, or device.
+      - name: Run host-native run-config tests
+        run: |
+          cmake -S app/src/main/jni/host-tests -B build/host-run-config-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build/host-run-config-tests --parallel
+          ctest --test-dir build/host-run-config-tests --output-on-failure --no-tests=error
+
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --no-daemon --console=plain
+
+      - name: Run lint
+        if: always()
+        run: ./gradlew :app:lintDebug --no-daemon --console=plain
+
+      - name: Verify unit tests executed
+        if: always()
+        run: python3 scripts/check_unit_test_reports.py
+
+      - name: Upload test and lint reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: app-check-reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.html
+            app/build/reports/lint-results-debug.txt
+            app/build/reports/lint-results-debug.xml
+          if-no-files-found: error
+          overwrite: true
+
+  loader-pin-fixtures:
+    name: Loader pin fixture guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 21
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          packages: >-
+            platforms;android-36
+            build-tools;36.0.0
+            ndk;28.2.13676358
+            cmake;3.22.1
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      # Harmless host-only fixtures: no KO, device, privileged container, or
+      # real APK path. This step fails if the tampered loader is accepted.
+      - name: Verify clean and tampered synthetic APK loader-pin fixtures
+        run: ./gradlew :app:verifyLoaderPinFixtures --no-daemon --console=plain
 
   build-lkms:
     name: LKMs / ${{ matrix.kmi }}
@@ -253,7 +359,7 @@ jobs:
 
       # Explicit XML assertion: a green Gradle exit code alone cannot hide a
       # skipped test class or a failure recorded only in the report.
-      - name: Assert JUnit XML (39 tests, 0 failures)
+      - name: Assert JUnit XML (819 tests, 0 failures)
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -275,8 +381,8 @@ jobs:
                      root.get("errors"), root.get("skipped")))
           print("TOTAL tests=%d failures=%d errors=%d skipped=%d" %
                 (tests, failures, errors, skipped))
-          if tests != 39 or failures != 0 or errors != 0 or skipped != 0:
-              raise SystemExit("::error::JUnit XML assertion failed: expected 39 tests, 0 failures/errors/skips")
+          if tests != 819 or failures != 0 or errors != 0 or skipped != 0:
+              raise SystemExit("::error::JUnit XML assertion failed: expected 819 tests, 0 failures/errors/skips")
           PY
           echo "junit-ok" > "$RUNNER_TEMP/marker-junit"
 
@@ -352,6 +458,15 @@ jobs:
             sleep 30
           done
 
+      - name: Verify packaged debug APK loader pins
+        # PR #2 integrity gate on the ONLY APK built in this non-tag job.
+        # Master's release variant is disabled here (no signing material), so
+        # the release pins are verified in the tag-gated build-release job
+        # below instead. No gate is dropped: each built APK is checked.
+        run: |
+          set -euo pipefail
+          ./gradlew :app:verifyDebugPackagedLoaderPins --no-daemon --console=plain
+
       - name: Assert KO hash check enabled in every CMakeCache
         run: |
           set -euo pipefail
@@ -400,7 +515,7 @@ jobs:
           {
             echo "## CI evidence artifact scope"
             echo "The DFRoot-CI-evidence artifact contains only the GPLv3 licence/notices bundle. NO APK is distributed from pull requests, branches or manual runs: the Debug APK is a compile/content gate only and is never uploaded, signed with release material or published."
-            echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 39 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
+            echo "Host suites (61 status, 23/25/3/7/6/16 CMake cases across six suites [KO policy / packaged-KO / APK packaging / APK content / target graph / loader hash], 819 JVM tests, 7/7 markers) ran as unconditional required gates in host-gates on every event, including tags. The real packaged-KO, provenance-identity and release-evidence gates and the signed APK belong to the protected tag publishing path (build-release) and are not claimed by this artifact. A passing host gate is not device validation; this evidence bundle is explicitly UNVERIFIED and makes no release claim."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload DFRoot-CI evidence
@@ -466,6 +581,13 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
+
+      - name: Verify packaged release APK loader pins
+        # PR #2's release pin gate, kept on the ONLY path where master permits
+        # a signed release APK to be built (protected version tag).
+        run: |
+          set -euo pipefail
+          ./gradlew :app:verifyReleasePackagedLoaderPins --no-daemon --console=plain
 
       - name: Build signed release APK
         run: |

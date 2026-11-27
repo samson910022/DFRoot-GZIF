@@ -1,12 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Modified 2026-11-17 (DFRoot GZIF): application label renamed to "DFRoot GZIF". See NOTICE. -->
+<!-- Modified 2026-11-24 (DFRoot GZIF): declare the Direct Boot-aware specialUse foreground operation host. See NOTICE. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="df.root">
 
+    <!-- INTERNET is a normal permission (auto-granted at install, no user
+         consent, no Play policy concern) and is REQUIRED by the exploit: the
+         Java side opens a DatagramSocket() for the sender port and the native
+         binary (launched as the app UID via ProcessBuilder) opens an
+         AF_INET/SOCK_DGRAM socket for the IpSec/loopback UDP channel. Android
+         checks INTERNET for every AF_INET socket create, loopback included, so
+         without it both paths fail with EACCES and the exploit breaks. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Optional drawer visibility only; lack of it must not block manual or boot FGS execution. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- QUERY_ALL_PACKAGES is a restricted permission on API 30+. We only need
+         to resolve the two supported SU managers, so declare a narrow <queries>
+         whitelist instead. PackageManager.getApplicationInfo()/getLabel()/getIcon()
+         still see these explicitly declared packages under package visibility
+         restrictions. Keep in sync with ExploitRunner.KSU_MANAGER_PACKAGES. -->
+    <queries>
+        <package android:name="me.weishu.kernelsu" />
+        <package android:name="com.rifsxd.ksunext" />
+    </queries>
+
     <application
         android:label="DFRoot GZIF"
         android:icon="@mipmap/ic_launcher"
@@ -27,6 +49,18 @@
             android:name=".SettingsActivity"
             android:exported="false"
             android:parentActivityName=".MainActivity" />
+
+        <!-- Process-lifetime host only. The subtype explains why specialUse is required
+             on API 34+: https://developer.android.com/develop/background-work/services/fgs/service-types -->
+        <service
+            android:name=".ExploitService"
+            android:exported="false"
+            android:directBootAware="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Owner-initiated and boot-triggered volatile late-load supervision for one admitted operation; process-lifetime foreground host only." />
+        </service>
 
         <receiver
             android:name=".BootReceiver"
