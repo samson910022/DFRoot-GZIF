@@ -999,6 +999,14 @@ public class RunCoordinatorTest {
             assertFalse("a blocked engine is still active work",
                     coordinator.recoverIndeterminate(id));
             assertEquals(0, lease.closeCount.get());
+            // FakeEngine counts down `entered` before it runs plan.action, so
+            // wait for the admission reference before dereferencing it.
+            long admissionDeadline = System.nanoTime()
+                    + TimeUnit.MILLISECONDS.toNanos(TEST_TIMEOUT_MS);
+            while (admitted.get() == null && System.nanoTime() < admissionDeadline) {
+                new CountDownLatch(1).await(10L, TimeUnit.MILLISECONDS);
+            }
+            assertTrue("admission was not recorded", admitted.get() != null);
             assertTrue(admitted.get().isActive());
             assertTrue(repository.isFrozen());
             assertSame(held, coordinator.getSnapshot());
