@@ -489,72 +489,42 @@ device validation; see `PORTING-GZIF.md`.
 
 `/dev/dfm6` remains the owner-visible **late-load SUCCESS progress diagnostic**;
 when that legacy marker is observed the app still prints `ksud start: SUCCESS`.
-It is progress only. Native returns **only after a run-scoped terminal marker
-bound to the admitted operation ID AND its matching publication-confirmation
-marker** are observed. An intended final marker on its own is indeterminate and
-keeps the reader polling; if the reader deadline expires without a confirmed
-marker it returns **rc=7 indeterminate** — never success and never a definitive
-failure. A global marker alone can no longer end a run.
+It is progress only, never proof of root. In merged master the **single
+authoritative final outcome** is the nonce-bound v2 token published to the
+`dfroot.final` system property by `status_protocol.c` /
+`final_status_publish.c` (`DF_FINAL_PROPERTY`). `exp.c` refuses to arm when an
+existing final token or app-private state is stale, tampered or ambiguous;
+clearing auxiliary channels is hygiene, never proof that a later publication
+belongs to this run. **PR #2's `run_status.c` marker/acknowledgement protocol
+and `loader_stage.c` are intentionally NOT linked into either binary** (master
+is the single status protocol; `run_config_codec.c` is retained only as the
+shared strict Java/native run-config codec). The `dfroot_terminal_*` /
+`dfroot_confirm_*` marker flow therefore describes an earlier snapshot, not a
+current build.
 
 | Code | Meaning |
 |---|---|
-| `0` | normal terminal success: the admitted run published its success marker and a matching confirmation marker |
-| `1` | bootstrap/terminal error — run-config, module, staging, or an **observed nonzero late-load exit** (`run_status_late_load_wait_code`); an unobserved exit or timeout is rc=7, not rc=1 |
-| `2` | native `setup()` failure before any operation starts (mapped by `NativeResultMapper` to `RESULT_NATIVE_SETUP_FAILED`) |
-| `3` | native patch failure |
-| `4` | soft-reboot command returned success |
+| `0` | `ROOT_ONLY`: late-load exited 0; **root not verified** |
+| `1` | `ERROR` / `BOOTSTRAP_FAILED` (the latter on the reserved-nonce bootfail channel) |
+| `2` | unknown result — check logcat and dmesg |
+| `3` | failed to patch files |
+| `4` | soft-reboot command **issued; not confirmed** |
+| `5` | soft reboot skipped (late-load not confirmed absent) |
 | `6` | soft-reboot command failed |
-| `7` | **indeterminate** — completion could not be confirmed: bounded writer wait or reader deadline expiry, unconfirmed/failed terminal publication, contradictory/conflicting terminal markers, or pre-admission uncertainty. Never a success. |
+| `7` | attempt unknown — pending/unknown final status; never a success |
+| `8` | launch blocked — preference state uncertain |
+| `9` | already hooked (`/dev/df` present) |
+| `+64` | additive recovery bit: restore/recovery verification failed, for **every** code |
 
-A **marker conflict** is therefore rc=7 indeterminate, never a definitive error
-or success: two different terminal observations (confirmed or not) disprove each
-other and confirm no completed outcome. An unconfirmed or contradictory
-observation also never authorizes another operation — the owner, lease,
-configuration freeze, and durable attempt barrier are retained until explicit
-recovery. rc=7 itself is authoritative without a confirmation.
-
-A late-load timeout, an unobserved child exit, an unconfirmed publication, and a
-reader deadline expiry are all rc=7 indeterminate: privileged children may still
-be running, so the app keeps ownership until a trusted caller clears the barrier
-(no in-app recovery UI; see the R3.6 section below). **No root probe is added**:
-the app does not run `su` or inspect root state to decide a result. Verify root
-yourself after each run with the oracle in `PORTING-GZIF.md` §8.3.
-
-**Publication window (acknowledgement protocol).** Terminal publication is
-two-phase in the same root: an intended final marker
-`dfroot_terminal_<operation_id>_rc<code>`, then a matching confirmation
-`dfroot_confirm_<operation_id>_rc<code>` with magic `DFROOT_CONFIRM 1`. Both use
-the same checked pipeline (unpredictable same-directory temp, `O_EXCL` /
-`O_NOFOLLOW`, regular-file check, full write, `fsync`, `fchmod 0644`, checked
-close, atomic `link()`, temp unlink, directory fsync). The writer returns its
-intended code **only after both phases are fully published**; a non-7 definitive
-code is accepted by the reader **only when a confirmation matching both the
-operation ID and the code exists**. An intended marker without its confirmation
-yields **no decision** (keep polling) with a "not publication-confirmed;
-completion unverified" diagnostic — it is never acted on as success. On **any**
-detected publication failure (including a confirmation-step failure), rc7 is
-published **before** any final link is retracted, temps are cleaned, and the
-writer exits 7. A duplicate/conflicting publication also publishes rc7. **Exact
-guarantee:** ONCE rc7 has been published AND OBSERVED it outranks success and
-conflicts and needs no confirmation. This is a correction, not a revocation:
-rc7 is produced only AFTER detection, so a reader that consumed a
-definitive-looking result earlier cannot have that result taken back.
-
-**Residual window — OPEN hardware/OS gate, not proved safe.** `link()` makes the
-final pathname visible before temp unlink and directory fsync complete. If the
-writer dies abnormally after the confirmation link but before its fsync, an
-external reader can still observe a definitive-looking result that was never
-durably acknowledged. If it dies between intended-marker publication and
-confirmation, the reader sees only an unconfirmed marker and must not decide.
-The same observation window exists on an **ordinary detected failure**: after
-the acknowledgement is visible but before a failure is detected and its
-corrective rc7 published, a concurrent reader may classify a definitive-looking
-result; the later rc7 cannot revoke what was already consumed. Deterministic
-host fixtures record both observations; they are boundary fixtures, not a fix
-proof and not device safety. These instants are not closed by host tests;
-device crash/power-loss validation of `/dev` marker durability remains required.
-The safety policy is unchanged: rc7 precedence and indeterminate ownership
-still apply, no device safety is implied, and R2-14 remains OPEN.
+`DF_OUTCOME_NONE` (no final observation) is unknown, never a normal completion;
+`REBOOT_PENDING` is a non-terminal preflight opening a bounded grace window,
+while `REBOOT_ATTEMPT_UNKNOWN` is terminal but says only that the attempt result
+is unknown. A non-canonical, stale or nonce-mismatched token is never accepted
+as this run's outcome. Soft reboot and Start on Boot are unavailable in the
+shipped build (R9); rc=4 is an implementation message about an **unverified**
+pending state, not a confirmed reboot. No status message proves root or a
+reboot outcome — verify yourself after each run with the `su` oracle in
+`PORTING-GZIF.md` §8.3.
 
 ### R2-14 fail-closed policy for ambiguous outcomes (R9.3, 2026-11-27) — SCOPED / OPEN
 
@@ -565,17 +535,17 @@ owner acceptance. That issue does not close, weaken or reclassify R2-14, R2-16
 or R2-18.
 
 The finite policy is: **an unconfirmed completion is never a confirmed outcome**.
-Native rc=7 (writer/reader deadline, unconfirmed or contradictory terminal
-markers), an unrecognized exit, an engine exception, a supervision
-timeout/interruption, and an absent or evicted ledger record resolve only to
-**INDETERMINATE / UNCONFIRMED**. From that state the app makes no success claim
-(no success toast, no terminal-success log line, no fabricated rejection),
-starts no replay, retry or further potentially unsafe action, keeps the run and
-manager controls disabled, and retains the owner token, resource lease,
-configuration freeze and durable attempt barrier. A `null` ledger observation
-is uncertainty, never evidence of admission or completion. Only an explicit,
-checked recovery by a trusted caller outside the UI can release the barrier;
-nothing in the UI, service or a timer authorizes it automatically.
+An absent, ambiguous or nonce-mismatched final observation, an unrecognized
+exit, an engine exception, a supervision timeout/interruption, and an absent or
+evicted ledger record resolve only to **INDETERMINATE / UNCONFIRMED**. From that
+state the app makes no success claim (no success toast, no terminal-success log
+line, no fabricated rejection), starts no replay, retry or further potentially
+unsafe action, keeps the run and manager controls disabled, and retains the
+owner token, resource lease, configuration freeze and durable attempt barrier.
+A `null` ledger observation is uncertainty, never evidence of admission or
+completion. Only an explicit, checked recovery by a trusted caller outside the
+UI can release the barrier; nothing in the UI, service or a timer authorizes it
+automatically.
 
 This is demonstrated with harmless host-only mocked outcome/failure stand-ins
 across the mapper, the coordinator/barrier and the coordinator→result→UI
@@ -701,7 +671,7 @@ solution.
   "root active" while #3's `StatusRc` said "root not verified" and added
   further codes/recovery flags; separate green CI runs did not prove
   compatibility. In merged master those candidates are integrated: rc=4 is
-  "soft-reboot command returned success" in the
+  "soft-reboot command issued; not confirmed" in the
   [Result contract](#result-contract-what-success-means) below, and the single
   authoritative final outcome is the nonce-bound `dfroot.final` property (D2).
   No status message proves root or a reboot outcome.
@@ -737,9 +707,9 @@ A: Sorry, there is no fix. Either:
 
 **Q: Log says "SUCCESS" or "ksud exited with error", but I don't have root**
 
-A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final result now waits for a run-scoped terminal marker, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). Manual soft reboot is unavailable in the shipped build (R9) and was experimental and unvalidated on GZIF; it has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6). There is no "Auto Soft Reboot" toggle to disable in R9.
+A: `/dev/dfm6` / `ksud start: SUCCESS` is a progress diagnostic, not proof of root — the final outcome is the nonce-bound `dfroot.final` property, so an early SUCCESS no longer ends the run by itself. Check the final app result and verify with `su -c id` / `su -v` (`PORTING-GZIF.md` §8.3). Manual soft reboot is unavailable in the shipped build (R9) and was experimental and unvalidated on GZIF; it has caused a full hard reboot here (https://github.com/diabl0w/DFRoot/discussions/69; `PORTING-GZIF.md` §9.6). There is no "Auto Soft Reboot" toggle to disable in R9.
 
-**Historical (validated `v4.8-gzif` release and earlier `8dd66ea`/`5893dfa` snapshots only):** no rc=4 message existed in the validated release; at those earlier snapshots the soft-reboot path replaced the SUCCESS string with "root active — device may soft-reboot shortly" (rc=4, an unverified pending state), and the setting was marked EXPERIMENTAL with a per-Settings-visit warning. Those snapshots are not current: in merged master rc=4 is "soft-reboot command returned success" in the [Result contract](#result-contract-what-success-means), soft reboot is unavailable in production (R9), and the authoritative final outcome comes from the nonce-bound `dfroot.final` property. Do not expect the historical messages from a current build. Always verify with the `su` oracle; if you still have no root, see https://github.com/diabl0w/DFRoot/discussions/69
+**Historical (validated `v4.8-gzif` release and earlier `8dd66ea`/`5893dfa` snapshots only):** no rc=4 message existed in the validated release; at those earlier snapshots the soft-reboot path replaced the SUCCESS string with "root active — device may soft-reboot shortly" (rc=4, an unverified pending state), and the setting was marked EXPERIMENTAL with a per-Settings-visit warning. Those snapshots are not current: in merged master rc=4 is "soft-reboot command issued; not confirmed" in the [Result contract](#result-contract-what-success-means), soft reboot is unavailable in production (R9), and the authoritative final outcome comes from the nonce-bound `dfroot.final` property. Do not expect the historical messages from a current build. Always verify with the `su` oracle; if you still have no root, see https://github.com/diabl0w/DFRoot/discussions/69
 
 **Q: I installed a module and now I can't launch root without crashing**
 
@@ -801,9 +771,6 @@ does not constitute hardware validation.
 - Shizuku not needed — regain root without WiFi!
 
 > **Historical (validated `v4.8-gzif` release and earlier `b071923`/`5893dfa` snapshots only):** Start on Boot was unvalidated on this unit and soft reboot was an EXPERIMENTAL feature (off by default, with a first-enable warning Toast at those snapshots). Neither behavior is enabled in master's shipped UI.
-- RO Partition Protection
-- Disable all KernelSU modules, to recover from a broken one
-- Shizuku not needed — regain root without WiFi!
 
 ## How it works
 
@@ -887,8 +854,11 @@ The LKM binary is **not** committed (`lkm/dfroot.ko` is gitignored, and so is
   **is** enforced in merged master; only in the historical pre-#3 snapshots was
   it an unmerged candidate that this checkout did not enforce. Both values are
   known obsolete pins accepted by the gate — neither is a validated release
-  input: release is withheld by **policy** (a reviewed re-pin, the OPEN P1-08
-  staging gate and device validation), not by the hash gate alone.
+  input: release is withheld by **policy** (the OPEN P1-08 staging gate and
+  device validation), not by the hash gate alone. A later #5 CI rebuild **was
+  shown to change the bytes**: the reviewed re-pin added the new CI-stripped
+  pin `e10425d0…` (13,456 B) to `KO_EXPECTED_SHA256S`; the two values above are
+  now historical records.
 
 A CI-stripped output differs from a local `make` output because CI removes
 `.note.gnu.build-id` (and other notes/sections) with `llvm-objcopy
@@ -909,9 +879,10 @@ POST_BUILD step dumps the dedicated `.dfroot_ko` section from `libdfroot.so`
 and verifies the **packaged bytes** against the same KO pins and expected
 sizes. There is no skip option for this gate. Tag CI repeats it against the
 APK's `lib/arm64-v8a/libdfroot.so` before publishing. The gate rejects unknown
-bytes but **accepts the two known obsolete pins**: a release is withheld by
-policy (reviewed re-pin, OPEN P1-08 and device validation), not by the hash
-gate alone; passing it is not device validation (see `CHANGELOG.md`).
+bytes but **accepts the reviewed third pin `e10425d0…` (13,456 B) alongside the
+two historical pins**: a release is withheld by policy (OPEN P1-08 and device
+validation), not by the hash gate alone; passing it is not device validation
+(see `CHANGELOG.md`).
 
 ### Signing variants and CI events
 

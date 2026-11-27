@@ -92,8 +92,7 @@ health-check / hardening batch (samson910022), originally reviewed against
 master `ae627f1`; that documentation branch was subsequently rebased onto the
 then-current master `9f60e16` (which includes PR #1 and
 `3fbb7ed`/`ae627f1`). It is preserved here for historical context, not as the
-current state: **PR #1, #2 and #3 are merged into master (`cdec576`); PR #5 is
-being merged.** The batch covered CI and build reliability
+current state: **PR #1, #2, #3 and #5 are merged into master (`e0e8657`).** The batch covered CI and build reliability
 (`fix/ci-build-reliability`), LKM CFI type-ID correctness
 (`fix/lkm-kernel-compatibility`), app correctness and safety
 (`fix/app-correctness-safety`) and native exploit robustness
@@ -304,10 +303,11 @@ historical implementations or pre-rebase heads, not this head.
   reruns cannot leave stale success evidence: manifests and section dumps are
   invalidated at entry.
 - **KO pins do not by themselves block a release.** The byte gate rejects
-  unknown bytes but **accepts the two known obsolete pins** in
-  `app/src/main/jni/CMakeLists.txt`. Release is withheld by **policy** — a
-  reviewed re-pin, the OPEN P1-08 staging gate and device validation — not by
-  the hash gate alone; passing the gate is not device validation. Skip mode is
+  unknown bytes but **accepts the reviewed third pin `e10425d0…` (13,456 B)
+  alongside the two historical pins** in `app/src/main/jni/CMakeLists.txt`.
+  Release is withheld by **policy** — the OPEN P1-08 staging gate and device
+  validation — not by the hash gate alone; passing the gate is not device
+  validation. Skip mode is
   forbidden in CI/release builds. Gradle passes the Android variant
   (`release` / `debug`) as the authoritative native policy signal.
 - **Final packaged bytes (no skip).** The KO is linked into a dedicated
@@ -633,6 +633,10 @@ identity**:
         `llvm-objcopy --strip-unneeded` plus several `-R …` section removals
         (including `.note.gnu.build-id`; see `build.yml`); reported as the KO
         shipped in the v4.8-gzif release APK.
+
+A later #5 CI rebuild was shown to change the bytes: a reviewed re-pin adds
+CI-stripped pin `e10425d055ff6803856cc24f6f4fe2e2e09746df195c50503811356eb87df605`
+(13,456 B) to `KO_EXPECTED_SHA256S`; the pins above remain historical records.
 
 Any other blob is rejected by the gate (fail-closed); an unknown or tampered
 module cannot satisfy the check. At the historical input-only snapshot

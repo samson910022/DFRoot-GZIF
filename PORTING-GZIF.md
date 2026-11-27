@@ -77,10 +77,11 @@
 > identity-checked, and release/distributable evidence is asserted at a single
 > upload choke point. Provenance is informational evidence, **not** an
 > attestation or independent reproducible-build proof. **The byte gate rejects
-> UNKNOWN bytes but accepts the two known obsolete pins**; release is withheld
-> by **POLICY** (reviewed re-pin, OPEN P1-08, device validation), not by the
-> hash gate alone — passing the gate is not device validation. No tag was
-> created by us. Gradle passes the Android variant (`release` / `debug`) as the
+> UNKNOWN bytes but accepts the reviewed third pin `e10425d0…` (13,456 B)
+> alongside the two historical pins**; the #5 rebuild's bytes were shown to
+> differ and were re-pinned in a reviewed commit. Release is withheld by
+> **POLICY** (OPEN P1-08 and device validation), not by the hash gate alone —
+> passing the gate is not device validation. No tag was created by us. Gradle passes the Android variant (`release` / `debug`) as the
 > authoritative native policy signal, and the KO is linked into a dedicated
 > `.dfroot_ko` section whose final bytes in `libdfroot.so` are SHA-256-checked
 > against the same pins (no skip option); a failed re-check removes the stale
@@ -772,7 +773,7 @@ None of these change the exploit mathematics. All are required to make the chain
 Everything in this subsection landed **after** run6/run8. It is defensive/correctness work and build hygiene; **no new hardware run has validated it**, and it does not remove any of the risks in §10. **Line-number caveat:** every file:line reference in this document — including bare `:NN` ranges — that is not explicitly marked as the 2026-11-24 tree refers to the 2026-11-17 validation tree; this batch shifted those lines (e.g. §9.1 `MainActivity.java:134` / `ExploitRunner.java:46`, §9.2 `bootstrap.c:235-237`, §14 item 13 `exp.c:540-552`). See CHANGELOG.md §"4.8-gzif maintenance (2026-11-24)" and NOTICE for the file-level list.
 
 **LKM CFI type-ID correctness** (`fix/lkm-kernel-compatibility`, head `a9acd3a`):
-- `lkm/dfroot.c` — UMH function-pointer typedefs `umh_setup_t` / `umh_exec_t` were corrected against `<linux/umh.h>`; `info` typed `struct subprocess_info *`; explicit `<linux/umh.h>` include and `__nocfi` handling. A dated `MAINTENANCE NOTE (2026-11-24)` states that whether the typedef change alters compiled `.ko` bytes is **not established** (affected calls are `__nocfi`; target vendor headers unchecked). Known-limitation comments retain the selinux_state field-order assumption, kprobes dependency and `pr_warn`-only `insn_patch_text` failure. The earlier `%px` pointer-logging sites were removed at this head. No runtime/branch logic changed; do not assume the bytes changed or did not — compare/re-verify the final artifact before merge and re-pin only if bytes actually changed (release gate). No hardware validation; PR is DRAFT with artifact/hardware gates before merge.
+- `lkm/dfroot.c` — UMH function-pointer typedefs `umh_setup_t` / `umh_exec_t` were corrected against `<linux/umh.h>`; `info` typed `struct subprocess_info *`; explicit `<linux/umh.h>` include and `__nocfi` handling. A dated `MAINTENANCE NOTE (2026-11-24)` states that whether the typedef change alters compiled `.ko` bytes is **not established** (affected calls are `__nocfi`; target vendor headers unchecked). Known-limitation comments retain the selinux_state field-order assumption, kprobes dependency and `pr_warn`-only `insn_patch_text` failure. The earlier `%px` pointer-logging sites were removed at this head. No runtime/branch logic changed. **Later CI evidence resolved the byte question:** the rebuilt CI artifact is 13,456 B · sha256 `e10425d055ff6803856cc24f6f4fe2e2e09746df195c50503811356eb87df605` (old CI pin 13,384 B · `9dfb8b71…`), so the bytes DID change and a reviewed re-pin added that hash/size to `KO_EXPECTED_SHA256S` / `KO_EXPECTED_SIZES`; the old pins remain historical records. No hardware validation; P1-08 remains an OPEN release gate.
 
 **Native robustness** (`fix/native-exploit-robustness`, `d3f3356`):
 - `exp.c` — bound-check the hook position in `patch_hook`; removed `SPLICE_F_GIFT` from the stack-buffer `vmsplice` (it would promise the pages are never modified again); fail-loud `bind()`, `detect_ko_target()` and `patch_helper`; strict hex/port/SPI validation and up-front port range checks; secret material wiped after use; `read_device_versions()` now fails closed, adds a `getprop` fallback (`ro.vendor.build.version.release` → `ro.build.version.release`) and fixes a dangling `release[]` pointer (it had been block-scoped but used after the block); soft-reboot rc=4 marker flow (§4, §9.6).
@@ -797,7 +798,7 @@ re-pin only bytes actually shown to change; do not advertise an unsupported
 bypass or treat PR CI as distributable-artifact validation. This corrects the
 older §4/§7 claim that the local and CI blobs were byte-identical twins.
 
-**Provenance scope.** A pinned hash proves equality to an approved blob, not that the blob was compiled from the current checkout. The exact source revision and build inputs of the historical variants (`9dfb8b71…` / `94f8be98…`) are **not established** here — they derive from the 2026-11-17 port based on upstream `7a6513a`, but no APK-level or build-input record pins that identity; mark it unknown rather than asserting it. Whether a post-CFI rebuild differs in bytes is **unverified** at #5's head, so do not call it a "different blob". A mutable local tag is not the CI digest pin; at #1's 2026-11-25 snapshot (`ed4b30d`, now historical) the local `Makefile` derives the exact digest-pinned image via `scripts/ddk-image.sh:49–54` and supports the single shipped KMI, unlike the older eight-KMI/mutable-tag description. Any source or build-input change requires re-verification; re-pin only bytes actually shown to change.
+**Provenance scope.** A pinned hash proves equality to an approved blob, not that the blob was compiled from the current checkout. The exact source revision and build inputs of the historical variants (`9dfb8b71…` / `94f8be98…`) are **not established** here — they derive from the 2026-11-17 port based on upstream `7a6513a`, but no APK-level or build-input record pins that identity; mark it unknown rather than asserting it. A later #5 CI rebuild **was shown to differ in bytes** (new CI pin `e10425d0…`, 13,456 B) and was re-pinned in a reviewed commit; the old pins are historical records. A mutable local tag is not the CI digest pin; at #1's 2026-11-25 snapshot (`ed4b30d`, now historical) the local `Makefile` derives the exact digest-pinned image via `scripts/ddk-image.sh:49–54` and supports the single shipped KMI, unlike the older eight-KMI/mutable-tag description. Any source or build-input change requires re-verification; re-pin only bytes actually shown to change.
 
 **Build / CI reliability** (`fix/ci-build-reliability`, `38eebc3`; master's Gradle 429 retry loop `ae627f1` retained):
 - AGP catalog 9.5.0 is the single source of truth via the version-catalog alias (above); `app/build.gradle.kts` pins NDK `28.2.13676358` (r28c) and CMake `3.22.1`; Gradle wrapper **9.7.1** at the **older `38eebc3` snapshot** with `distributionSha256Sum` and download `retries` 0→3. PR #1 has since merged to master with Gradle **9.9.2** (see CHANGELOG "Unreleased — PR #1 hardening"); that newer value is the shipped state, not a claim about the historical snapshot.
@@ -876,10 +877,11 @@ Gradle/AGP versions for the **2026-11-17** on-host build are not recorded in thi
   enforces the fail-closed SHA-256 gate on the embedded/final `.dfroot_ko`
   bytes (reported historical pins `94f8be98…` / `9dfb8b71…`) with no skip
   option, and tag CI repeats packaged-byte verification before upload (§4, §8.3).
-  The pins are **reported repository records**, not a re-verified build of
-  today's checkout; whether the 2026-11-24 CFI typedef change altered bytes is
-  unverified, so re-pin only if rebuilt bytes actually change. Release remains
-  withheld by policy (reviewed re-pin, OPEN P1-08, device validation).
+  The two old pins are **reported repository records**, not a re-verified build
+  of today's checkout. The 2026-11-24 CFI typedef rebuild **was later shown by
+  #5 CI to change the bytes** (new reviewed pin `e10425d0…`, 13,456 B — see §6
+  "Provenance scope"); re-pin only bytes actually shown to change. Release
+  remains withheld by policy (OPEN P1-08 and device validation).
 - **Toolchain**: JDK 21, Android SDK 36, NDK r28c (`28.2.13676358`), CMake 3.22.1.
 - **Signing (required for any installable output)**: a complete `signing.properties`; an unsigned
   build is not installable. Omit it only for local inspection builds.
@@ -900,10 +902,11 @@ authoritative policy signal; a cached Debug label cannot weaken it). CMake
 requires `CMAKE_OBJCOPY` and verifies the final `.dfroot_ko` bytes in
 `libdfroot.so` after linking, with no skip path; tag CI repeats the check on
 the APK's native library before upload. The byte gate rejects unknown bytes but
-**accepts the two known obsolete pins**; no hashes were added or relaxed. A
-release is withheld by policy — a reviewed re-pin, OPEN P1-08 and device
-validation — not by the hash gate alone, and passing the gate is not device
-validation.
+**accepts the reviewed third pin `e10425d0…` (13,456 B) alongside the two
+historical pins**; that hash and size were added deliberately in a reviewed
+re-pin after #5 CI showed the rebuilt bytes differ. A release is withheld by
+policy — OPEN P1-08 and device validation — not by the hash gate alone, and
+passing the gate is not device validation.
 
 ### 8.4 Install & run (device)
 

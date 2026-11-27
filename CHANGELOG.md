@@ -1538,8 +1538,7 @@ historical evidence only, not validation of this architecture.
 > **Historical record, not the current state.** This section preserves PR #4's
 > dated dependency snapshots, review caveats and notice/license discussion as
 > they stood before the PRs merged. Master is authoritative for the current
-> state: PRs #1, #2 and #3 have merged into master (`cdec576`); PR #5 is being
-> merged. PR #3's fail-closed KO SHA-256 gate and packaged-byte verification
+> state: PRs #1, #2 and #3 have merged into master (`cdec576`); PR #5 has merged into master (`e0e8657`). PR #3's fail-closed KO SHA-256 gate and packaged-byte verification
 > are present in master, while P1-08 staging integrity remains an OPEN release
 > blocker. None of the heads below is a current head, and separate green PR CI
 > runs are not integrated CI or release validation.
@@ -1554,7 +1553,7 @@ historical evidence only, not validation of this architecture.
 **Dependency snapshot (dated 2026-11-25 review points, Taiwan time).** These
 SHAs are **historical review snapshots**, not a live or final integration
 record; do not chase moving heads. **PRs #1, #2 and #3 have since merged into
-master (`cdec576`)**; PR #5 is being merged. PR #1's shipped changes are
+master (`cdec576`)**; PR #5 has merged into master (`e0e8657`). PR #1's shipped changes are
 recorded in the "Historical — PR #1 hardening" section above, and the snapshot
 rows below remain dated review points only. At that snapshot, live heads were
 checked with `gh pr view <n> --json headRefOid`; none of the listed heads is a
@@ -1611,7 +1610,7 @@ represents the new source. Historical run6/run8 validation is tied to the old
 artifact (CI pin `9dfb8b71…`, 13384 B); this batch has **no** new hardware
 validation. At that snapshot, merging this docs branch alone would have put
 documentation ahead of the code; master now contains the merged PR #1/#2/#3
-code and PR #5 is being merged.
+code and PR #5 has merged into master (`e0e8657`).
 
 Health-check / hardening batch applied on top of the 2026-11-17 GZIF port
 (master commits `3fbb7ed` and `ae627f1` are included and preserved). Scope is
@@ -1791,10 +1790,12 @@ LKM CFI type-ID correctness (`fix/lkm-kernel-compatibility`, snapshot head
   `insn_patch_text` failure being only `pr_warn`-ed. The earlier `%px`
   pointer-logging sites have been **removed** at this head — no kernel address
   is disclosed there — superseding the historical hashed/`kptr_restrict`
-  comment. No runtime/branch logic changed; **do not assume** the compiled
-  bytes are unchanged or changed: compare/re-verify the final artifact before
-  merge, and re-pin only if bytes actually changed (release gate, see merge
-  order above). No hardware validation was performed for this batch.
+  comment. No runtime/branch logic changed. **Later CI evidence resolved the
+  byte question:** the rebuilt CI artifact changed from 13,384 B · `9dfb8b71…`
+  to 13,456 B · `e10425d055ff6803856cc24f6f4fe2e2e09746df195c50503811356eb87df605`,
+  so a reviewed re-pin added that hash/size to `KO_EXPECTED_SHA256S` /
+  `KO_EXPECTED_SIZES`; the old pins remain historical records. No hardware
+  validation was performed for this batch, and P1-08 remains OPEN.
 
 Three cross-cutting caveats:
 
